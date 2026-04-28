@@ -1,0 +1,7 @@
+/* index.css is intentionally minimal — App.css owns the layout shell.
+ * This file establishes only the global box-sizing reset and stops
+ * the document from scrolling at the body level. */
+
+html { color-scheme: dark; }
+
+body { margin: 0; }
