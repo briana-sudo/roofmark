@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
+import {
+  effectivePhotoSize, photoNormToCanvas, canvasToPhotoNorm,
+  computeFitViewport, clampPan, zoomAtCursor, clampZoom,
+} from '../store/viewport'
 import ContextMenu from './ContextMenu'
 
 /**
@@ -34,19 +38,23 @@ const MIN_CLINE_DRAG = 5
 // browser clips it for us. 5000px is plenty for any reasonable canvas size.
 const CLINE_SENT = 5000
 
-// Spec §8 — snap engine pure function. Inputs in canvas px (already
-// denormalized). Output { x, y, type } | null. Identical logic to the
-// block test at /test/step-7-functional.html.
-function getShapeCorners(shape, cw, ch) {
-  if (shape.type === 'circ') return [{ x: shape.cx * cw, y: shape.cy * ch }]
+// Spec §8 — snap engine pure function. Inputs in canvas px (cursor +
+// canvas dims), output { x, y, type } | null in canvas px. Section 7.A
+// — translate normalized 0..1 photo coords to canvas px via the viewport
+// before any geometric math. The snap tolerance stays in canvas px
+// because the operator's snap-feel is pixel-distance on screen.
+function getShapeCorners(shape, viewport, photoSize) {
+  const tx = (p) => photoNormToCanvas(p, viewport, photoSize)
+  if (shape.type === 'circ') return [tx({ x: shape.cx, y: shape.cy })]
   if (!shape.pts) return []
-  return shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }))
+  return shape.pts.map(tx)
 }
 
-function getShapeEdges(shape, cw, ch) {
+function getShapeEdges(shape, viewport, photoSize) {
   if (shape.type === 'circ') return []
   if (!shape.pts || shape.pts.length < 2) return []
-  const pts = shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }))
+  const tx = (p) => photoNormToCanvas(p, viewport, photoSize)
+  const pts = shape.pts.map(tx)
   const edges = []
   for (let i = 0; i < pts.length - 1; i++) edges.push([pts[i], pts[i + 1]])
   if (shape.type !== 'line' && pts.length >= 3) {
@@ -55,14 +63,22 @@ function getShapeEdges(shape, cw, ch) {
   return edges
 }
 
-function projectOntoCline(cursorX, cursorY, cl, cw, ch) {
-  if (cl.type === 'h') return { x: cursorX, y: cl.y * ch }
-  if (cl.type === 'v') return { x: cl.x * cw, y: cursorY }
-  const ax = cl.px * cw, ay = cl.py * ch
+function projectOntoCline(cursorX, cursorY, cl, viewport, photoSize) {
+  // Section 7.A — clines are normalized to photo dims (h: y; v: x; angled:
+  // px/py + angle); translate to canvas px via the viewport.
+  if (cl.type === 'h') {
+    const y = cl.y * photoSize.height * viewport.zoom + viewport.panY
+    return { x: cursorX, y }
+  }
+  if (cl.type === 'v') {
+    const x = cl.x * photoSize.width * viewport.zoom + viewport.panX
+    return { x, y: cursorY }
+  }
+  const a = photoNormToCanvas({ x: cl.px, y: cl.py }, viewport, photoSize)
   const cosA = Math.cos(cl.angle), sinA = Math.sin(cl.angle)
-  const dx = cursorX - ax, dy = cursorY - ay
+  const dx = cursorX - a.x, dy = cursorY - a.y
   const t = dx * cosA + dy * sinA
-  return { x: ax + t * cosA, y: ay + t * sinA }
+  return { x: a.x + t * cosA, y: a.y + t * sinA }
 }
 
 // Spec §9 — edit-mode hit-test + handle helpers. Same math as the block
@@ -93,30 +109,36 @@ function distToSegment(px, py, ax, ay, bx, by) {
   return Math.sqrt(ex * ex + ey * ey)
 }
 
-function shapeHit(shape, pxNorm, pyNorm, cw, ch) {
+function shapeHit(shape, cursorCanvas, viewport, photoSize) {
+  // Section 7.A — hit-test in canvas-px space after translating shape
+  // coords through the viewport. Tolerance for line-proximity stays at
+  // 6 canvas px (same operator-feel as before §7.A).
+  const tx = (p) => photoNormToCanvas(p, viewport, photoSize)
   if (shape.type === 'circ') {
-    const dx = pxNorm * cw - shape.cx * cw
-    const dy = pyNorm * ch - shape.cy * ch
-    return Math.sqrt(dx * dx + dy * dy) <= shape.r * cw
+    const c = tx({ x: shape.cx, y: shape.cy })
+    const dx = cursorCanvas.x - c.x
+    const dy = cursorCanvas.y - c.y
+    const r = shape.r * photoSize.width * viewport.zoom
+    return Math.sqrt(dx * dx + dy * dy) <= r
   }
   if (shape.type === 'line') {
     if (!shape.pts || shape.pts.length < 2) return false
-    const a = { x: shape.pts[0].x * cw, y: shape.pts[0].y * ch }
-    const b = { x: shape.pts[1].x * cw, y: shape.pts[1].y * ch }
-    return distToSegment(pxNorm * cw, pyNorm * ch, a.x, a.y, b.x, b.y) <= 6
+    const a = tx(shape.pts[0])
+    const b = tx(shape.pts[1])
+    return distToSegment(cursorCanvas.x, cursorCanvas.y, a.x, a.y, b.x, b.y) <= 6
   }
   if (!shape.pts || shape.pts.length < 3) return false
-  const denormPts = shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }))
-  return pointInPolygon(pxNorm * cw, pyNorm * ch, denormPts)
+  const polyCanvas = shape.pts.map(tx)
+  return pointInPolygon(cursorCanvas.x, cursorCanvas.y, polyCanvas)
 }
 
-function hitTest(pxNorm, pyNorm, layers, cw, ch) {
+function hitTest(cursorCanvas, layers, viewport, photoSize) {
   for (let i = layers.length - 1; i >= 0; i--) {
     const layer = layers[i]
     if (!layer.visible) continue
     const shapes = layer.shapes || []
     for (let j = shapes.length - 1; j >= 0; j--) {
-      if (shapeHit(shapes[j], pxNorm, pyNorm, cw, ch)) {
+      if (shapeHit(shapes[j], cursorCanvas, viewport, photoSize)) {
         return { layerId: layer.id, shapeId: shapes[j].id }
       }
     }
@@ -124,44 +146,49 @@ function hitTest(pxNorm, pyNorm, layers, cw, ch) {
   return null
 }
 
-function shapeHandlePoints(shape, cw, ch) {
+function shapeHandlePoints(shape, viewport, photoSize) {
+  const tx = (p) => photoNormToCanvas(p, viewport, photoSize)
   if (shape.type === 'circ') {
+    const center = tx({ x: shape.cx, y: shape.cy })
     return [
-      { x: shape.cx * cw, y: shape.cy * ch },
-      { x: (shape.cx + shape.r) * cw, y: shape.cy * ch },
+      center,
+      { x: center.x + shape.r * photoSize.width * viewport.zoom, y: center.y },
     ]
   }
   if (!shape.pts) return []
-  return shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }))
+  return shape.pts.map(tx)
 }
 
-function shapeCentroid(shape, cw, ch) {
-  if (shape.type === 'circ') return { x: shape.cx * cw, y: shape.cy * ch }
+function shapeCentroid(shape, viewport, photoSize) {
+  const tx = (p) => photoNormToCanvas(p, viewport, photoSize)
+  if (shape.type === 'circ') return tx({ x: shape.cx, y: shape.cy })
   if (!shape.pts || shape.pts.length === 0) return null
   let sx = 0, sy = 0
   for (const p of shape.pts) { sx += p.x; sy += p.y }
-  return { x: (sx / shape.pts.length) * cw, y: (sy / shape.pts.length) * ch }
+  return tx({ x: sx / shape.pts.length, y: sy / shape.pts.length })
 }
 
-function movePoint(shape, pointIndex, newCanvasPt, cw, ch) {
+function movePoint(shape, pointIndex, newCanvasPt, viewport, photoSize) {
+  // Translate the new canvas-px point back to photo-normalized.
+  const newNorm = canvasToPhotoNorm(newCanvasPt, viewport, photoSize)
   if (shape.type === 'circ') {
-    if (pointIndex === 0) return { ...shape, cx: newCanvasPt.x / cw, cy: newCanvasPt.y / ch }
-    const cxPx = shape.cx * cw
-    const cyPx = shape.cy * ch
-    const dx = newCanvasPt.x - cxPx
-    const dy = newCanvasPt.y - cyPx
-    return { ...shape, r: Math.sqrt(dx * dx + dy * dy) / cw }
+    if (pointIndex === 0) return { ...shape, cx: newNorm.x, cy: newNorm.y }
+    // Radius handle drag — recompute r as canvas distance / photoW / zoom.
+    const center = photoNormToCanvas({ x: shape.cx, y: shape.cy }, viewport, photoSize)
+    const dx = newCanvasPt.x - center.x
+    const dy = newCanvasPt.y - center.y
+    const rPx = Math.sqrt(dx * dx + dy * dy)
+    return { ...shape, r: rPx / (photoSize.width * viewport.zoom || 1) }
   }
   if (!shape.pts) return shape
-  const newPts = shape.pts.map((p, i) =>
-    i === pointIndex ? { x: newCanvasPt.x / cw, y: newCanvasPt.y / ch } : p
-  )
+  const newPts = shape.pts.map((p, i) => (i === pointIndex ? newNorm : p))
   return { ...shape, pts: newPts }
 }
 
-function moveBody(shape, deltaCanvas, cw, ch) {
-  const dxN = deltaCanvas.x / cw
-  const dyN = deltaCanvas.y / ch
+function moveBody(shape, deltaCanvas, viewport, photoSize) {
+  // Translate the canvas-px delta into normalized-photo delta.
+  const dxN = deltaCanvas.x / (photoSize.width * viewport.zoom || 1)
+  const dyN = deltaCanvas.y / (photoSize.height * viewport.zoom || 1)
   if (shape.type === 'circ') return { ...shape, cx: shape.cx + dxN, cy: shape.cy + dyN }
   if (!shape.pts) return shape
   return { ...shape, pts: shape.pts.map((p) => ({ x: p.x + dxN, y: p.y + dyN })) }
@@ -171,26 +198,35 @@ function computeSnap(args) {
   const {
     cursorX, cursorY, layers, clines,
     snapEnabled, gridEnabled, gridSize, snapTolerance,
-    draft, tool, clinesVisible, cw, ch,
+    draft, tool, clinesVisible, viewport, photoSize,
   } = args
   if (!snapEnabled) return null
   const tolSq = snapTolerance * snapTolerance
 
-  // 1. CLOSE
+  // 1. CLOSE — draft polygon points are stored in canvas px (since draft
+  // is built incrementally as the operator clicks), so this comparison
+  // stays in canvas px.
   if ((tool === 'poly' || tool === 'tri') && draft && draft.pts && draft.pts.length >= 3) {
     const first = draft.pts[0]
     const dx = cursorX - first.x, dy = cursorY - first.y
     if (dx * dx + dy * dy < tolSq) return { x: first.x, y: first.y, type: 'close' }
   }
 
-  // 2. GRID — Step 10 / P12+P14 rectangular grid: independent X / Y spacing.
-  // gridSize is normalized to {x, y} in the store; defensively coerce a
-  // legacy number value for any caller that hasn't migrated yet.
+  // 2. GRID — Step 10 / P12+P14 rectangular grid in PHOTO px. Snap targets
+  // are at integer multiples of (gridSize.x, gridSize.y) in photo space;
+  // translate to canvas px before the distance test so the on-screen
+  // tolerance remains pixel-true regardless of zoom.
   if (gridEnabled) {
     const gxStep = (typeof gridSize === 'object' ? gridSize.x : gridSize) || 20
     const gyStep = (typeof gridSize === 'object' ? gridSize.y : gridSize) || 20
-    const gx = Math.round(cursorX / gxStep) * gxStep
-    const gy = Math.round(cursorY / gyStep) * gyStep
+    // Convert cursor to photo-px to find the nearest grid intersection.
+    const cursorPhotoX = (cursorX - viewport.panX) / viewport.zoom
+    const cursorPhotoY = (cursorY - viewport.panY) / viewport.zoom
+    const gxPhoto = Math.round(cursorPhotoX / gxStep) * gxStep
+    const gyPhoto = Math.round(cursorPhotoY / gyStep) * gyStep
+    // Translate back to canvas px for the distance test + the snap point.
+    const gx = gxPhoto * viewport.zoom + viewport.panX
+    const gy = gyPhoto * viewport.zoom + viewport.panY
     const dx = cursorX - gx, dy = cursorY - gy
     if (dx * dx + dy * dy < tolSq) return { x: gx, y: gy, type: 'grid' }
   }
@@ -201,7 +237,7 @@ function computeSnap(args) {
   for (const layer of layers) {
     if (!layer.visible) continue
     for (const shape of layer.shapes || []) {
-      const corners = getShapeCorners(shape, cw, ch)
+      const corners = getShapeCorners(shape, viewport, photoSize)
       for (const p of corners) {
         const dx = cursorX - p.x, dy = cursorY - p.y
         const d2 = dx * dx + dy * dy
@@ -216,7 +252,7 @@ function computeSnap(args) {
   for (const layer of layers) {
     if (!layer.visible) continue
     for (const shape of layer.shapes || []) {
-      const edges = getShapeEdges(shape, cw, ch)
+      const edges = getShapeEdges(shape, viewport, photoSize)
       for (const [a, b] of edges) {
         const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
         const dx = cursorX - mx, dy = cursorY - my
@@ -232,7 +268,7 @@ function computeSnap(args) {
     bestDistSq = tolSq
     for (const cl of clines) {
       if (cl.visible === false) continue
-      const proj = projectOntoCline(cursorX, cursorY, cl, cw, ch)
+      const proj = projectOntoCline(cursorX, cursorY, cl, viewport, photoSize)
       const dx = cursorX - proj.x, dy = cursorY - proj.y
       const d2 = dx * dx + dy * dy
       if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: proj.x, y: proj.y, type: 'cline' } }
@@ -294,12 +330,53 @@ export default function CanvasStage() {
     //   originCursor: cursor canvas-px at drag start (for body delta)
     let editDrag = null
 
+    // Section 7.A — viewport pan state (closure-scoped). Set when a pan
+    // input begins (middle-mouse, space+left, two-finger touch); applies
+    // delta to the store viewport on each move; cleared on release.
+    //   originCursor: cursor canvas-px at pan start
+    //   originPan:    {panX, panY} at pan start
+    //   trigger:      'middle' | 'space' | 'touch' (informational)
+    let panDrag = null
+    // Section 7.A — `Space` (held) acts as a hand tool. `space+leftclick
+    // drag` pans the canvas. The flag prevents accidental drawing while
+    // the hand tool is engaged.
+    let spaceHeld = false
+    // Section 7.A — pinch state. `originDist` is the two-finger distance
+    // when pinch began; `originZoom` is the viewport zoom at that moment;
+    // each move computes a new zoom = originZoom * (currentDist / originDist)
+    // anchored at the pinch midpoint.
+    let pinch = null
+
     const resizeAll = () => {
       sizeCanvas(cvStatic)
       sizeCanvas(cvDynamic)
       staticDirty = true
       dynamicDirty = true
+      // Section 7.A — when canvas dims change AND a photo is loaded but
+      // its viewport zoom is below the new fit-to-viewport floor, raise
+      // it so the photo stays visible. Pan is also clamped to keep ≥10%
+      // of photo on-screen.
+      const s = useAppStore.getState()
+      if (s.photoMeta) {
+        const cw = container.clientWidth
+        const ch = container.clientHeight
+        const fit = computeFitViewport({ width: s.photoMeta.width, height: s.photoMeta.height }, cw, ch)
+        const v = s.viewport || DEFAULT_VIEWPORT_LOCAL
+        let nextZoom = v.zoom
+        if (nextZoom < fit.zoom) nextZoom = fit.zoom
+        const nextPan = clampPan(
+          { ...v, zoom: nextZoom },
+          { width: s.photoMeta.width, height: s.photoMeta.height },
+          cw, ch,
+        )
+        if (nextZoom !== v.zoom || nextPan.panX !== v.panX || nextPan.panY !== v.panY) {
+          useAppStore.getState().setViewport({ zoom: nextZoom, panX: nextPan.panX, panY: nextPan.panY })
+        }
+      }
     }
+    // Default viewport literal for closure (matches store's DEFAULT_VIEWPORT
+    // — kept inline to avoid an extra import).
+    const DEFAULT_VIEWPORT_LOCAL = { panX: 0, panY: 0, zoom: 1 }
     resizeAll()
 
     const ro = new ResizeObserver(resizeAll)
@@ -307,12 +384,12 @@ export default function CanvasStage() {
     window.addEventListener('resize', resizeAll)
 
     // ---- Annotation rendering (Step 12, Spec §12) -------------------------
-    // Renders one annotation. Coords are normalized (0..1) and scaled to
-    // canvas px here. Step 12 paints structural geometry only — text/value
-    // bodies render as a visible "?" placeholder until Step 13 adds the
-    // editing panel that fills `textEN` / `textES` / `value`.
+    // Renders one annotation. Section 7.A — translate normalized photo coords
+    // to canvas px via the viewport. Pin geometry (size of dot, tick length,
+    // diamond size) intentionally stays in canvas px so labels remain legible
+    // regardless of zoom (similar to dimension labels in CAD apps).
     const ANNO_ACCENT = '#f5a623' // amber — distinct from layer colors
-    const drawAnnotationOnContext = (ctx, anno, cw, ch) => {
+    const drawAnnotationOnContext = (ctx, anno, viewport, photoSize) => {
       ctx.save()
       ctx.strokeStyle = ANNO_ACCENT
       ctx.fillStyle = ANNO_ACCENT
@@ -320,8 +397,9 @@ export default function CanvasStage() {
       ctx.font = 'bold 11px var(--rm-sans, sans-serif)'
 
       if (anno.type === 'note') {
-        const x = anno.at.x * cw
-        const y = anno.at.y * ch
+        const at = photoNormToCanvas(anno.at, viewport, photoSize)
+        const x = at.x
+        const y = at.y
         // Pin: filled circle + center dot in white
         ctx.beginPath()
         ctx.arc(x, y, 7, 0, Math.PI * 2)
@@ -335,8 +413,10 @@ export default function CanvasStage() {
         ctx.fillStyle = ANNO_ACCENT
         ctx.fillText(label, x + 10, y + 4)
       } else if (anno.type === 'callout') {
-        const tipX  = anno.tip.x * cw,  tipY  = anno.tip.y * ch
-        const tailX = anno.tail.x * cw, tailY = anno.tail.y * ch
+        const tipPt  = photoNormToCanvas(anno.tip,  viewport, photoSize)
+        const tailPt = photoNormToCanvas(anno.tail, viewport, photoSize)
+        const tipX = tipPt.x, tipY = tipPt.y
+        const tailX = tailPt.x, tailY = tailPt.y
         // Tip: small filled diamond (caller end)
         ctx.beginPath()
         ctx.moveTo(tipX, tipY - 5); ctx.lineTo(tipX + 5, tipY)
@@ -355,8 +435,9 @@ export default function CanvasStage() {
         const label = anno.textEN ? anno.textEN.slice(0, 24) : '?'
         ctx.fillText(label, tailX + 10, tailY + 4)
       } else if (anno.type === 'dimline') {
-        const ax = anno.a.x * cw, ay = anno.a.y * ch
-        const bx = anno.b.x * cw, by = anno.b.y * ch
+        const aP = photoNormToCanvas(anno.a, viewport, photoSize)
+        const bP = photoNormToCanvas(anno.b, viewport, photoSize)
+        const ax = aP.x, ay = aP.y, bx = bP.x, by = bP.y
         const dx = bx - ax, dy = by - ay
         const len = Math.hypot(dx, dy) || 1
         const ux = dx / len, uy = dy / len
@@ -383,7 +464,11 @@ export default function CanvasStage() {
     }
 
     // ---- Shape rendering (Spec §7 static draw step 5) ----------------------
-    const drawShapeOnContext = (ctx, shape, cw, ch, layer) => {
+    // Section 7.A — translate normalized photo coords to canvas px via the
+    // viewport. Stroke weight stays in canvas px (visual stroke thickness
+    // is operator-tuning, not photo-anchored). Circle radius scales WITH
+    // zoom because `r` is normalized to photo width.
+    const drawShapeOnContext = (ctx, shape, viewport, photoSize, layer) => {
       const color = layer?.color || '#3b82f6'
       const fillOn = layer?.fillOn !== false
       const strokeOn = layer?.strokeOn !== false
@@ -393,16 +478,20 @@ export default function CanvasStage() {
       ctx.fillStyle = color
       ctx.lineWidth = layer?.strokeWeight || 2
 
+      const tx = (p) => photoNormToCanvas(p, viewport, photoSize)
       if (shape.type === 'circ') {
+        const c = tx({ x: shape.cx, y: shape.cy })
+        const rPx = shape.r * photoSize.width * viewport.zoom
         ctx.beginPath()
-        ctx.arc(shape.cx * cw, shape.cy * ch, shape.r * cw, 0, Math.PI * 2)
+        ctx.arc(c.x, c.y, rPx, 0, Math.PI * 2)
         if (fillOn) { ctx.globalAlpha = fillOpacity; ctx.fill() }
         if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
       } else if (shape.type === 'line') {
         if (shape.pts && shape.pts.length === 2) {
+          const a = tx(shape.pts[0]), b = tx(shape.pts[1])
           ctx.beginPath()
-          ctx.moveTo(shape.pts[0].x * cw, shape.pts[0].y * ch)
-          ctx.lineTo(shape.pts[1].x * cw, shape.pts[1].y * ch)
+          ctx.moveTo(a.x, a.y)
+          ctx.lineTo(b.x, b.y)
           if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
         }
       } else {
@@ -410,9 +499,9 @@ export default function CanvasStage() {
         if (shape.pts && shape.pts.length >= 2) {
           ctx.beginPath()
           shape.pts.forEach((p, i) => {
-            const x = p.x * cw, y = p.y * ch
-            if (i === 0) ctx.moveTo(x, y)
-            else ctx.lineTo(x, y)
+            const c = tx(p)
+            if (i === 0) ctx.moveTo(c.x, c.y)
+            else ctx.lineTo(c.x, c.y)
           })
           ctx.closePath()
           if (fillOn) { ctx.globalAlpha = fillOpacity; ctx.fill() }
@@ -423,6 +512,11 @@ export default function CanvasStage() {
     }
 
     // ---- Static draw -------------------------------------------------------
+    // Section 7.A — viewport-onto-photo render. The PHOTO is drawn at
+    // (panX, panY, photoW * zoom, photoH * zoom). Everything that lives
+    // in photo-normalized coords (shapes, clines, annotations, grid) is
+    // translated to canvas px through the same viewport. The CANVAS is
+    // the window the operator looks through; the PHOTO is the world.
     const drawStatic = () => {
       const cw = container.clientWidth
       const ch = container.clientHeight
@@ -431,14 +525,26 @@ export default function CanvasStage() {
       ctxStatic.clearRect(0, 0, cvStatic.width, cvStatic.height)
       ctxStatic.scale(dpr, dpr)
 
-      // Spec §7 step 2 — photo background OR dark-grid fallback.
       const storeState = useAppStore.getState()
+      const viewport = storeState.viewport || { panX: 0, panY: 0, zoom: 1 }
+      const photoSize = effectivePhotoSize(storeState.photoMeta, cw, ch)
       const bg = storeState.backgroundImage
+
+      // Always paint dark canvas-area first so out-of-photo regions read
+      // as "outside the world" rather than as garbage from prior frames.
+      ctxStatic.fillStyle = '#0d1117'
+      ctxStatic.fillRect(0, 0, cw, ch)
+
       if (bg && bg.complete && bg.naturalWidth > 0) {
-        ctxStatic.drawImage(bg, 0, 0, cw, ch)
+        // Section 7.A.2 — photo at viewport coordinates. drawImage clamps
+        // outside the canvas naturally; no manual clipping needed.
+        const drawW = photoSize.width * viewport.zoom
+        const drawH = photoSize.height * viewport.zoom
+        ctxStatic.drawImage(bg, viewport.panX, viewport.panY, drawW, drawH)
       } else {
-        ctxStatic.fillStyle = '#0d1117'
-        ctxStatic.fillRect(0, 0, cw, ch)
+        // Pre-photo / no-photo fallback: a 40-px dark grid as a visible
+        // canvas surface so the operator can draft markup before loading
+        // a photo (existing pre-§7.A behavior).
         ctxStatic.strokeStyle = '#1a1f2e'
         ctxStatic.lineWidth = 1
         for (let x = 0; x < cw; x += 40) {
@@ -455,24 +561,33 @@ export default function CanvasStage() {
         }
       }
 
-      // Spec §7 step 3 — snap grid overlay when gridEnabled. Subtle cyan
-      // tint at gridSize spacing. Renders over the photo (or dark grid) so
-      // operators see the snap geometry regardless of background.
-      // Step 10 / P12+P14 — independent X / Y spacing for standing-seam
-      // panel layouts (e.g. X = 24 px = 1", Y = 384 px = 16" panel width).
+      // Spec §7 step 3 — snap grid overlay when gridEnabled. Section 7.A —
+      // grid lives in PHOTO px (so e.g. X=24 px / 1" stays 1" regardless
+      // of zoom). Compute the visible photo-px range that overlaps the
+      // canvas, then iterate grid steps within it.
       if (storeState.gridEnabled) {
         const gs = storeState.gridSize
         const gxStep = (typeof gs === 'object' ? gs.x : gs) || 20
         const gyStep = (typeof gs === 'object' ? gs.y : gs) || 20
+        const z = viewport.zoom || 1
+        // Visible photo-px range within the canvas:
+        const photoX0 = Math.max(0, (-viewport.panX) / z)
+        const photoX1 = Math.min(photoSize.width,  (cw - viewport.panX) / z)
+        const photoY0 = Math.max(0, (-viewport.panY) / z)
+        const photoY1 = Math.min(photoSize.height, (ch - viewport.panY) / z)
         ctxStatic.strokeStyle = 'rgba(0, 255, 204, 0.16)'
         ctxStatic.lineWidth = 1
-        for (let x = 0; x < cw; x += gxStep) {
+        const startX = Math.ceil(photoX0 / gxStep) * gxStep
+        for (let xPhoto = startX; xPhoto <= photoX1; xPhoto += gxStep) {
+          const x = xPhoto * z + viewport.panX
           ctxStatic.beginPath()
           ctxStatic.moveTo(x + 0.5, 0)
           ctxStatic.lineTo(x + 0.5, ch)
           ctxStatic.stroke()
         }
-        for (let y = 0; y < ch; y += gyStep) {
+        const startY = Math.ceil(photoY0 / gyStep) * gyStep
+        for (let yPhoto = startY; yPhoto <= photoY1; yPhoto += gyStep) {
+          const y = yPhoto * z + viewport.panY
           ctxStatic.beginPath()
           ctxStatic.moveTo(0, y + 0.5)
           ctxStatic.lineTo(cw, y + 0.5)
@@ -480,8 +595,8 @@ export default function CanvasStage() {
         }
       }
 
-      // Construction lines (Spec §7 static draw step 4 — rendered after the
-      // background grid, before layer shapes so committed shapes paint over).
+      // Construction lines — translated through the viewport. Angled
+      // clines use a sentinel-length endpoint pair so the browser clips.
       if (storeState.clinesVisible !== false) {
         ctxStatic.strokeStyle = 'rgba(0, 255, 204, 0.5)'
         ctxStatic.lineWidth = 1
@@ -489,25 +604,24 @@ export default function CanvasStage() {
         for (const cl of storeState.clines) {
           if (cl.visible === false) continue
           if (cl.type === 'h') {
-            const y = cl.y * ch
+            const y = cl.y * photoSize.height * viewport.zoom + viewport.panY
             ctxStatic.beginPath()
             ctxStatic.moveTo(0, y)
             ctxStatic.lineTo(cw, y)
             ctxStatic.stroke()
           } else if (cl.type === 'v') {
-            const x = cl.x * cw
+            const x = cl.x * photoSize.width * viewport.zoom + viewport.panX
             ctxStatic.beginPath()
             ctxStatic.moveTo(x, 0)
             ctxStatic.lineTo(x, ch)
             ctxStatic.stroke()
           } else if (cl.type === 'a') {
-            const ax = cl.px * cw
-            const ay = cl.py * ch
+            const a = photoNormToCanvas({ x: cl.px, y: cl.py }, viewport, photoSize)
             const cosA = Math.cos(cl.angle)
             const sinA = Math.sin(cl.angle)
             ctxStatic.beginPath()
-            ctxStatic.moveTo(ax - CLINE_SENT * cosA, ay - CLINE_SENT * sinA)
-            ctxStatic.lineTo(ax + CLINE_SENT * cosA, ay + CLINE_SENT * sinA)
+            ctxStatic.moveTo(a.x - CLINE_SENT * cosA, a.y - CLINE_SENT * sinA)
+            ctxStatic.lineTo(a.x + CLINE_SENT * cosA, a.y + CLINE_SENT * sinA)
             ctxStatic.stroke()
           }
         }
@@ -515,12 +629,8 @@ export default function CanvasStage() {
       }
 
       // Layer shapes (bottom to top, skipping invisible layers).
-      // Step 11 — when SEQUENCE mode is active AND a sequence is active,
-      // additionally filter by the sequence's per-layer visibility map.
-      // Default TRUE (unlisted layers are visible in the sequence) so a
-      // newly added layer doesn't disappear retroactively from existing
-      // sequences. DRAW / EDIT / TECHNICAL modes ignore the sequence
-      // filter entirely — all visible layers paint.
+      // Step 11 — SEQUENCE-mode per-sequence visibility filter. Section
+      // 7.A — render through viewport.
       const layers = storeState.layers
       const seqFilter = (storeState.mode === 'SEQUENCE' && storeState.activeSeqId)
         ? (storeState.sequences.find((s) => s.id === storeState.activeSeqId)?.layers || {})
@@ -529,24 +639,21 @@ export default function CanvasStage() {
         if (!layer.visible) continue
         if (seqFilter && seqFilter[layer.id] === false) continue
         for (const shape of layer.shapes || []) {
-          drawShapeOnContext(ctxStatic, shape, cw, ch, layer)
+          drawShapeOnContext(ctxStatic, shape, viewport, photoSize, layer)
         }
       }
 
-      // Step 12 — annotations from the active sequence (Spec §12). Render
-      // regardless of mode whenever a sequence is active: operator should
-      // see placed annotations in DRAW / EDIT (full-data view) and in
-      // SEQUENCE (crew preview). Switching the active sequence hides the
-      // others — annotations lock to whichever sequence was active at
-      // create-time.
+      // Step 12 — annotations from the active sequence rendered through
+      // the viewport (so they pan/zoom with the photo).
       const activeSeq = storeState.activeSeqId
         ? storeState.sequences.find((s) => s.id === storeState.activeSeqId)
         : null
       if (activeSeq && Array.isArray(activeSeq.annotations)) {
-        for (const a of activeSeq.annotations) drawAnnotationOnContext(ctxStatic, a, cw, ch)
+        for (const a of activeSeq.annotations) drawAnnotationOnContext(ctxStatic, a, viewport, photoSize)
       }
 
-      // Spec §9 — selected shape outline (white, +1 stroke weight)
+      // Spec §9 — selected shape outline (white, +1 stroke weight). Render
+      // through viewport so it tracks the underlying shape.
       const sel = storeState.selected
       if (sel) {
         const layer = layers.find((l) => l.id === sel.layerId)
@@ -557,21 +664,25 @@ export default function CanvasStage() {
           ctxStatic.strokeStyle = '#ffffff'
           ctxStatic.lineWidth = (layer.strokeWeight || 2) + 1
           ctxStatic.globalAlpha = 1
+          const tx = (p) => photoNormToCanvas(p, viewport, photoSize)
           if (shape.type === 'circ') {
+            const c = tx({ x: shape.cx, y: shape.cy })
+            const rPx = shape.r * photoSize.width * viewport.zoom
             ctxStatic.beginPath()
-            ctxStatic.arc(shape.cx * cw, shape.cy * ch, shape.r * cw, 0, Math.PI * 2)
+            ctxStatic.arc(c.x, c.y, rPx, 0, Math.PI * 2)
             ctxStatic.stroke()
           } else if (shape.type === 'line' && shape.pts && shape.pts.length === 2) {
+            const a = tx(shape.pts[0]), b = tx(shape.pts[1])
             ctxStatic.beginPath()
-            ctxStatic.moveTo(shape.pts[0].x * cw, shape.pts[0].y * ch)
-            ctxStatic.lineTo(shape.pts[1].x * cw, shape.pts[1].y * ch)
+            ctxStatic.moveTo(a.x, a.y)
+            ctxStatic.lineTo(b.x, b.y)
             ctxStatic.stroke()
           } else if (shape.pts && shape.pts.length >= 2) {
             ctxStatic.beginPath()
             shape.pts.forEach((p, i) => {
-              const x = p.x * cw, y = p.y * ch
-              if (i === 0) ctxStatic.moveTo(x, y)
-              else ctxStatic.lineTo(x, y)
+              const c = tx(p)
+              if (i === 0) ctxStatic.moveTo(c.x, c.y)
+              else ctxStatic.lineTo(c.x, c.y)
             })
             ctxStatic.closePath()
             ctxStatic.stroke()
@@ -680,7 +791,8 @@ export default function CanvasStage() {
       }
 
       // Spec §9 — selection handles when in EDIT mode with a selection.
-      // Painted before the snap indicator so snap targets stay visible.
+      // Section 7.A — translate handle positions through viewport so they
+      // track the shape under pan/zoom.
       if (state.mode === 'EDIT' && state.selected) {
         const sel = state.selected
         const layer = state.layers.find((l) => l.id === sel.layerId)
@@ -689,8 +801,11 @@ export default function CanvasStage() {
           : null
         if (shape) {
           const layerColor = layer.color || '#3b82f6'
+          const cwLocal = container.clientWidth
+          const chLocal = container.clientHeight
+          const ps = effectivePhotoSize(state.photoMeta, cwLocal, chLocal)
           // Point handles
-          const handles = shapeHandlePoints(shape, container.clientWidth, container.clientHeight)
+          const handles = shapeHandlePoints(shape, state.viewport, ps)
           for (const p of handles) {
             ctxDynamic.fillStyle = layerColor
             ctxDynamic.strokeStyle = '#ffffff'
@@ -702,7 +817,7 @@ export default function CanvasStage() {
           }
           // Body center handle (only for non-circle, since circle's pt[0] IS center)
           if (shape.type !== 'circ') {
-            const c = shapeCentroid(shape, container.clientWidth, container.clientHeight)
+            const c = shapeCentroid(shape, state.viewport, ps)
             if (c) {
               ctxDynamic.strokeStyle = '#ffffff'
               ctxDynamic.lineWidth = 1.5
@@ -777,44 +892,48 @@ export default function CanvasStage() {
     rafHandle = requestAnimationFrame(tick)
 
     // ---- Draft commit (writes normalized 0–1 shape to active layer) -------
+    // Section 7.A — drafts stay in canvas px while the operator is clicking
+    // (immediate feedback in screen coords). At commit time, we translate
+    // each canvas-px point back to photo-normalized via the viewport so
+    // the persisted shape coordinates are zoom-stable.
     const commitDraft = () => {
       if (!draft) return
       const cw = container.clientWidth
       const ch = container.clientHeight
-      const activeLayerId = useAppStore.getState().activeLayerId
+      const store = useAppStore.getState()
+      const activeLayerId = store.activeLayerId
       if (!activeLayerId) {
         draft = null
         isDragging = false
         return
       }
+      const photoSize = effectivePhotoSize(store.photoMeta, cw, ch)
+      const viewport = store.viewport
+      const toNorm = (p) => canvasToPhotoNorm(p, viewport, photoSize)
       let shape = null
       if (draft.type === 'poly' || draft.type === 'tri' || draft.type === 'line') {
         shape = {
           type: draft.type,
-          pts: draft.pts.map((p) => ({ x: p.x / cw, y: p.y / ch })),
+          pts: draft.pts.map(toNorm),
         }
       } else if (draft.type === 'rect') {
-        const x1 = Math.min(draft.startX, draft.x) / cw
-        const y1 = Math.min(draft.startY, draft.y) / ch
-        const x2 = Math.max(draft.startX, draft.x) / cw
-        const y2 = Math.max(draft.startY, draft.y) / ch
-        shape = {
-          type: 'rect',
-          pts: [
-            { x: x1, y: y1 }, // TL
-            { x: x2, y: y1 }, // TR
-            { x: x2, y: y2 }, // BR
-            { x: x1, y: y2 }, // BL
-          ],
-        }
+        const x1c = Math.min(draft.startX, draft.x), x2c = Math.max(draft.startX, draft.x)
+        const y1c = Math.min(draft.startY, draft.y), y2c = Math.max(draft.startY, draft.y)
+        const tl = toNorm({ x: x1c, y: y1c })
+        const tr = toNorm({ x: x2c, y: y1c })
+        const br = toNorm({ x: x2c, y: y2c })
+        const bl = toNorm({ x: x1c, y: y2c })
+        shape = { type: 'rect', pts: [tl, tr, br, bl] }
       } else if (draft.type === 'circ') {
-        // Spec §20 — coords normalized. Single scalar r is normalized to
-        // canvas width; render multiplies r by current cw to scale back.
+        // Section 7.A — circle radius is normalized to PHOTO width (was
+        // canvas width pre-amendment). r in photo-px = r-canvas / zoom.
+        const center = toNorm({ x: draft.cx, y: draft.cy })
+        const rPhotoPx = draft.r / (viewport.zoom || 1)
         shape = {
           type: 'circ',
-          cx: draft.cx / cw,
-          cy: draft.cy / ch,
-          r: draft.r / cw,
+          cx: center.x,
+          cy: center.y,
+          r: rPhotoPx / photoSize.width,
         }
       }
       if (shape) useAppStore.getState().addShape(activeLayerId, shape)
@@ -830,31 +949,36 @@ export default function CanvasStage() {
       if (!draft || (draft.type !== 'callout' && draft.type !== 'dimline' && draft.type !== 'note')) return
       const cw = container.clientWidth
       const ch = container.clientHeight
-      const seqId = useAppStore.getState().activeSeqId
+      const store = useAppStore.getState()
+      const seqId = store.activeSeqId
       if (!seqId) {
         draft = null
         return
       }
+      // Section 7.A — translate canvas-px draft coords to photo-normalized.
+      const photoSize = effectivePhotoSize(store.photoMeta, cw, ch)
+      const viewport = store.viewport
+      const toNorm = (p) => canvasToPhotoNorm(p, viewport, photoSize)
       let anno = null
       if (draft.type === 'callout') {
         anno = {
           type: 'callout',
-          tip:  { x: draft.tip.x / cw,  y: draft.tip.y / ch },
-          tail: { x: draft.tail.x / cw, y: draft.tail.y / ch },
+          tip:  toNorm(draft.tip),
+          tail: toNorm(draft.tail),
           textEN: '',
           textES: '',
         }
       } else if (draft.type === 'dimline') {
         anno = {
           type: 'dimline',
-          a: { x: draft.a.x / cw, y: draft.a.y / ch },
-          b: { x: draft.b.x / cw, y: draft.b.y / ch },
+          a: toNorm(draft.a),
+          b: toNorm(draft.b),
           value: '',
         }
       } else if (draft.type === 'note') {
         anno = {
           type: 'note',
-          at: { x: draft.at.x / cw, y: draft.at.y / ch },
+          at: toNorm(draft.at),
           textEN: '',
           textES: '',
         }
@@ -864,23 +988,29 @@ export default function CanvasStage() {
     }
 
     // ---- Construction-line commit (no active layer required, lives in
-    // the separate clines array per Spec §6.6).
+    // the separate clines array per Spec §6.6). Section 7.A — translate
+    // anchor canvas-px through the viewport to photo-normalized so the
+    // cline stays glued to the photo when zoomed.
     const commitClineDraft = () => {
       if (!draft || draft.type !== 'cline') return
       const cw = container.clientWidth
       const ch = container.clientHeight
+      const store = useAppStore.getState()
+      const photoSize = effectivePhotoSize(store.photoMeta, cw, ch)
+      const viewport = store.viewport
+      const startNorm = canvasToPhotoNorm({ x: draft.startX, y: draft.startY }, viewport, photoSize)
       const dx = draft.x - draft.startX
       const dy = draft.y - draft.startY
       let cline
       if (Math.abs(dy) < ORTHO_TOL) {
-        cline = { type: 'h', y: draft.startY / ch }
+        cline = { type: 'h', y: startNorm.y }
       } else if (Math.abs(dx) < ORTHO_TOL) {
-        cline = { type: 'v', x: draft.startX / cw }
+        cline = { type: 'v', x: startNorm.x }
       } else {
         cline = {
           type: 'a',
-          px: draft.startX / cw,
-          py: draft.startY / ch,
+          px: startNorm.x,
+          py: startNorm.y,
           angle: Math.atan2(dy, dx),
         }
       }
@@ -902,6 +1032,22 @@ export default function CanvasStage() {
       const { x, y } = pointFromClient(e.clientX, e.clientY)
       const store = useAppStore.getState()
       store.setCursor(x, y)
+      // Section 7.A.3 — viewport pan update. Apply delta to the original
+      // pan baseline so re-entering the canvas mid-drag stays stable.
+      if (panDrag) {
+        const dx = x - panDrag.originCursor.x
+        const dy = y - panDrag.originCursor.y
+        const cwL = container.clientWidth
+        const chL = container.clientHeight
+        const next = clampPan(
+          { ...store.viewport, panX: panDrag.originPan.panX + dx, panY: panDrag.originPan.panY + dy },
+          effectivePhotoSize(store.photoMeta, cwL, chL),
+          cwL, chL,
+        )
+        store.setPan(next.panX, next.panY)
+        dynamicDirty = true
+        return
+      }
       if (draft) {
         if (draft.type === 'rect' && isDragging) { draft.x = x; draft.y = y }
         else if (draft.type === 'circ' && isDragging) {
@@ -910,6 +1056,12 @@ export default function CanvasStage() {
         else if (draft.type === 'cline' && isDragging) { draft.x = x; draft.y = y }
       }
       // Spec §8 — recompute the best snap target on every mousemove.
+      // Section 7.A — pass viewport + effective photo size so snap math
+      // operates in canvas px regardless of pan/zoom (operator-tolerance
+      // is screen-pixel based).
+      const cwLocal = container.clientWidth
+      const chLocal = container.clientHeight
+      const photoSizeLocal = effectivePhotoSize(store.photoMeta, cwLocal, chLocal)
       const snapPt = computeSnap({
         cursorX: x, cursorY: y,
         layers: store.layers,
@@ -921,8 +1073,8 @@ export default function CanvasStage() {
         draft,
         tool: store.tool,
         clinesVisible: store.clinesVisible,
-        cw: container.clientWidth,
-        ch: container.clientHeight,
+        viewport: store.viewport,
+        photoSize: photoSizeLocal,
       })
       // Avoid spurious store mutations when the snap result is unchanged
       // (cursor moved a pixel but snap target stayed the same).
@@ -932,23 +1084,21 @@ export default function CanvasStage() {
         || (prev === null && snapPt === null)
       if (!same) store.setSnap(snapPt)
 
-      // Spec §9 — edit-mode handle drag. Applies the delta or new point
-      // against the original shape baseline so re-entering / leaving the
-      // canvas during drag stays stable.
+      // Spec §9 — edit-mode handle drag. Section 7.A — viewport-aware
+      // movePoint / moveBody convert canvas-px deltas to photo-normalized
+      // mutations so handles track the cursor 1:1 regardless of zoom.
       if (editDrag) {
-        const cw = container.clientWidth
-        const ch = container.clientHeight
         // Use snap target when available (Spec §9: "Snap applies while
         // dragging handles") for point drags; body drags use raw cursor.
         const useX = (editDrag.mode === 'point' && snapPt) ? Math.round(snapPt.x) : x
         const useY = (editDrag.mode === 'point' && snapPt) ? Math.round(snapPt.y) : y
         let newShape
         if (editDrag.mode === 'point') {
-          newShape = movePoint(editDrag.originShape, editDrag.pointIndex, { x: useX, y: useY }, cw, ch)
+          newShape = movePoint(editDrag.originShape, editDrag.pointIndex, { x: useX, y: useY }, store.viewport, photoSizeLocal)
         } else {
           const dx = useX - editDrag.originCursor.x
           const dy = useY - editDrag.originCursor.y
-          newShape = moveBody(editDrag.originShape, { x: dx, y: dy }, cw, ch)
+          newShape = moveBody(editDrag.originShape, { x: dx, y: dy }, store.viewport, photoSizeLocal)
         }
         // Apply the move via store updateShape — the layers reference
         // change triggers staticDirty via the existing subscription.
@@ -964,10 +1114,27 @@ export default function CanvasStage() {
       const ch = container.clientHeight
       const raw = pointFromClient(e.clientX, e.clientY)
 
+      // Section 7.A.3 — pan triggers BEFORE any tool / mode branch.
+      //   middle mouse button (e.button === 1): always pans
+      //   space + left button:                  pans (hand tool engaged)
+      const isPanInput = e.button === 1 || (e.button === 0 && spaceHeld)
+      if (isPanInput) {
+        e.preventDefault?.()
+        panDrag = {
+          originCursor: { x: raw.x, y: raw.y },
+          originPan: { panX: store.viewport.panX, panY: store.viewport.panY },
+          trigger: e.button === 1 ? 'middle' : 'space',
+        }
+        return
+      }
+
       // Spec §9 — EDIT mode branches BEFORE the tool dispatch.
+      // Section 7.A — handle / hit-test math uses viewport so a zoomed-in
+      // shape gets a 7-canvas-px handle just like a zoomed-out one.
       if (store.mode === 'EDIT') {
         // Don't intercept right-clicks (handled by onContextMenu instead).
         if (e.button === 2) return
+        const photoSizeMD = effectivePhotoSize(store.photoMeta, cw, ch)
         const sel = store.selected
         // 1. If something is already selected, check handle proximity first
         if (sel) {
@@ -976,7 +1143,7 @@ export default function CanvasStage() {
             ? (layer.shapes || []).find((sh) => sh.id === sel.shapeId)
             : null
           if (shape) {
-            const handles = shapeHandlePoints(shape, cw, ch)
+            const handles = shapeHandlePoints(shape, store.viewport, photoSizeMD)
             const HANDLE_TOL_SQ = 49 // 7-px radius
             for (let i = 0; i < handles.length; i++) {
               const dx = raw.x - handles[i].x
@@ -996,7 +1163,7 @@ export default function CanvasStage() {
             }
             // Body center handle (non-circle only — circle's handle 0 IS center)
             if (shape.type !== 'circ') {
-              const c = shapeCentroid(shape, cw, ch)
+              const c = shapeCentroid(shape, store.viewport, photoSizeMD)
               if (c) {
                 const dx = raw.x - c.x
                 const dy = raw.y - c.y
@@ -1015,8 +1182,8 @@ export default function CanvasStage() {
             }
           }
         }
-        // 2. No handle hit — do shape hit-test for new selection
-        const hit = hitTest(raw.x / cw, raw.y / ch, store.layers, cw, ch)
+        // 2. No handle hit — do shape hit-test for new selection.
+        const hit = hitTest({ x: raw.x, y: raw.y }, store.layers, store.viewport, photoSizeMD)
         if (hit) {
           store.setSelected(hit)
         } else {
@@ -1104,6 +1271,12 @@ export default function CanvasStage() {
     }
 
     const onMouseUp = () => {
+      // Section 7.A.3 — end any in-progress pan drag.
+      if (panDrag) {
+        panDrag = null
+        dynamicDirty = true
+        return
+      }
       // Spec §9 — end edit-mode drag if active
       if (editDrag) {
         editDrag = null
@@ -1136,12 +1309,86 @@ export default function CanvasStage() {
       }
     }
 
+    // Section 7.A.4 — scroll-wheel zoom, cursor-aligned. Skip when ctrl/cmd
+    // is held so browser-default zoom continues to work.
+    const onWheel = (e) => {
+      if (e.ctrlKey || e.metaKey) return
+      e.preventDefault?.()
+      const store = useAppStore.getState()
+      const cwL = container.clientWidth
+      const chL = container.clientHeight
+      const ps = effectivePhotoSize(store.photoMeta, cwL, chL)
+      const fitFloor = computeFitViewport(ps, cwL, chL).zoom
+      const cursor = pointFromClient(e.clientX, e.clientY)
+      // Smooth step: each wheel tick scales by ~1.1; deltaY positive =
+      // scroll down = zoom out; deltaY negative = scroll up = zoom in.
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1
+      const targetZoom = clampZoom(store.viewport.zoom * factor, fitFloor)
+      const v = zoomAtCursor(store.viewport, ps, cursor, targetZoom)
+      const clamped = clampPan(v, ps, cwL, chL)
+      store.setViewport({ zoom: v.zoom, panX: clamped.panX, panY: clamped.panY })
+    }
+
+    // Section 7.A.4 — keyboard zoom helpers: zoom-at-canvas-center.
+    const zoomBy = (factor) => {
+      const store = useAppStore.getState()
+      const cwL = container.clientWidth
+      const chL = container.clientHeight
+      const ps = effectivePhotoSize(store.photoMeta, cwL, chL)
+      const fitFloor = computeFitViewport(ps, cwL, chL).zoom
+      const target = clampZoom(store.viewport.zoom * factor, fitFloor)
+      const center = { x: cwL / 2, y: chL / 2 }
+      const v = zoomAtCursor(store.viewport, ps, center, target)
+      const clamped = clampPan(v, ps, cwL, chL)
+      store.setViewport({ zoom: v.zoom, panX: clamped.panX, panY: clamped.panY })
+    }
+    const zoomTo = (target) => {
+      const store = useAppStore.getState()
+      const cwL = container.clientWidth
+      const chL = container.clientHeight
+      const ps = effectivePhotoSize(store.photoMeta, cwL, chL)
+      const fitFloor = computeFitViewport(ps, cwL, chL).zoom
+      const t = clampZoom(target, fitFloor)
+      const center = { x: cwL / 2, y: chL / 2 }
+      const v = zoomAtCursor(store.viewport, ps, center, t)
+      const clamped = clampPan(v, ps, cwL, chL)
+      store.setViewport({ zoom: v.zoom, panX: clamped.panX, panY: clamped.panY })
+    }
+    const fitViewport = () => {
+      const store = useAppStore.getState()
+      const cwL = container.clientWidth
+      const chL = container.clientHeight
+      const ps = effectivePhotoSize(store.photoMeta, cwL, chL)
+      store.setViewport(computeFitViewport(ps, cwL, chL))
+    }
+
     const onKeyDown = (e) => {
       // Don't intercept while the user is typing in inputs/textareas
       // (layer rename, future annotation textareas, etc.).
       const tag = (e.target?.tagName || '').toUpperCase()
       const editable = tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable
       if (editable) return
+
+      // Section 7.A.6 — Space (held) = hand tool. Track the held state
+      // for the pan-input gate in onMouseDown.
+      if (e.key === ' ' || e.code === 'Space') {
+        if (!spaceHeld) {
+          spaceHeld = true
+          // Visual feedback via the wrapper class is added by App.css
+          // (handled at the React level via store-derived class).
+        }
+        e.preventDefault?.()
+        return
+      }
+      // Section 7.A.6 — zoom keyboard shortcuts. `+`/`=` zoom in; `-` out;
+      // `0` fit; `1` 100%. Skip when meta/ctrl/alt held so OS shortcuts
+      // (Cmd+0, Ctrl+= browser zoom, etc.) keep working.
+      if (!(e.ctrlKey || e.metaKey || e.altKey)) {
+        if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomBy(1.25); return }
+        if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomBy(0.8); return }
+        if (e.key === '0') { e.preventDefault(); fitViewport(); return }
+        if (e.key === '1') { e.preventDefault(); zoomTo(1.0); return }
+      }
 
       if (e.key === 'Escape') {
         // Priority: cancel in-progress draw draft → cancel edit drag →
@@ -1192,21 +1439,75 @@ export default function CanvasStage() {
       }
     }
 
+    // Section 7.A.6 — Space release clears the hand-tool flag.
+    const onKeyUp = (e) => {
+      if (e.key === ' ' || e.code === 'Space') {
+        spaceHeld = false
+      }
+    }
+
+    // Section 7.A.3 / 7.A.4 — touch handling distinguishes single-finger
+    // drag (existing draw / edit semantics) from two-finger gestures
+    // (pan + pinch zoom). pinch midpoint = average of both touches.
     const onTouchStart = (e) => {
-      if (e.touches && e.touches.length) {
-        useAppStore.getState().setPointerType('touch')
+      const store = useAppStore.getState()
+      store.setPointerType('touch')
+      if (e.touches.length === 2) {
+        const [a, b] = e.touches
+        const mid = pointFromClient((a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2)
+        const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1
+        pinch = {
+          originDist: dist,
+          originZoom: store.viewport.zoom,
+          originPan: { panX: store.viewport.panX, panY: store.viewport.panY },
+          originMid: mid,
+        }
+        // Cancel any single-finger drag-in-progress so the pinch dominates.
+        panDrag = null
+        return
+      }
+      if (e.touches && e.touches.length === 1) {
         const t = e.touches[0]
-        onMouseDown({ clientX: t.clientX, clientY: t.clientY })
+        onMouseDown({ clientX: t.clientX, clientY: t.clientY, button: 0, preventDefault: () => {} })
       }
     }
     const onTouchMove = (e) => {
-      if (e.touches && e.touches.length) {
-        useAppStore.getState().setPointerType('touch')
+      const store = useAppStore.getState()
+      store.setPointerType('touch')
+      if (e.touches.length === 2 && pinch) {
+        const [a, b] = e.touches
+        const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1
+        const ratio = dist / pinch.originDist
+        const cwL = container.clientWidth
+        const chL = container.clientHeight
+        const ps = effectivePhotoSize(store.photoMeta, cwL, chL)
+        const fitFloor = computeFitViewport(ps, cwL, chL).zoom
+        const targetZoom = clampZoom(pinch.originZoom * ratio, fitFloor)
+        // Anchor the pinch midpoint in canvas space so the photo point
+        // under the midpoint remains under the midpoint as zoom changes.
+        const currentMid = pointFromClient((a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2)
+        const v = zoomAtCursor(
+          { ...store.viewport, panX: pinch.originPan.panX, panY: pinch.originPan.panY, zoom: pinch.originZoom },
+          ps, pinch.originMid, targetZoom,
+        )
+        // Two-finger pan: shift by the midpoint delta on top of zoom.
+        const dx = currentMid.x - pinch.originMid.x
+        const dy = currentMid.y - pinch.originMid.y
+        const clamped = clampPan({ ...v, panX: v.panX + dx, panY: v.panY + dy }, ps, cwL, chL)
+        store.setViewport({ zoom: v.zoom, panX: clamped.panX, panY: clamped.panY })
+        return
+      }
+      if (e.touches && e.touches.length === 1 && !pinch) {
         const t = e.touches[0]
         onMouseMove({ clientX: t.clientX, clientY: t.clientY })
       }
     }
-    const onTouchEnd = () => onMouseUp()
+    const onTouchEnd = (e) => {
+      if (pinch && e.touches.length < 2) {
+        pinch = null
+      }
+      onMouseUp()
+    }
 
     // Spec §9 — right-click context menu in EDIT mode (Delete / Duplicate
     // / Move to layer). Hits the shape under the cursor (or stays on the
@@ -1222,9 +1523,10 @@ export default function CanvasStage() {
       const raw = pointFromClient(e.clientX, e.clientY)
       // Hit-test under cursor; if hit, set selection AND open menu. Capture
       // canvas size at click-time (refs are safe to read here, unlike during
-      // render).
+      // render). Section 7.A — pass viewport + photo size to hitTest.
       const sizeSnapshot = { cw, ch }
-      const hit = hitTest(raw.x / cw, raw.y / ch, store.layers, cw, ch)
+      const photoSizeCM = effectivePhotoSize(store.photoMeta, cw, ch)
+      const hit = hitTest({ x: raw.x, y: raw.y }, store.layers, store.viewport, photoSizeCM)
       if (hit) {
         store.setSelected(hit)
         setCtxMenu({ x: raw.x, y: raw.y, layerId: hit.layerId, shapeId: hit.shapeId, canvasSize: sizeSnapshot })
@@ -1245,10 +1547,14 @@ export default function CanvasStage() {
     cvDynamic.addEventListener('mouseup', onMouseUp)
     cvDynamic.addEventListener('dblclick', onDblClick)
     cvDynamic.addEventListener('contextmenu', onContextMenu)
+    // wheel must be {passive: false} so we can preventDefault to stop the
+    // page from scrolling when the operator zooms over the canvas.
+    cvDynamic.addEventListener('wheel', onWheel, { passive: false })
     cvDynamic.addEventListener('touchstart', onTouchStart, { passive: true })
     cvDynamic.addEventListener('touchmove', onTouchMove, { passive: true })
     cvDynamic.addEventListener('touchend', onTouchEnd, { passive: true })
     document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('keyup', onKeyUp)
 
     // ---- Store subscription -----------------------------------------------
     const unsub = useAppStore.subscribe((state, prev) => {
@@ -1299,11 +1605,32 @@ export default function CanvasStage() {
         staticDirty = true
       }
       // Spec §7 step 2 — photo background load/clear redraws static.
-      // The image may not be `complete` yet at the moment it's set; we
-      // also attach an onload listener at set time (in the file-picker
-      // handler below) to flip staticDirty when pixels are decoded.
+      // Section 7.A — when a NEW photo is set (prev was null or different
+      // image), reset the viewport to fit-to-viewport so the operator
+      // sees the whole photo by default. Subsequent in-session pan/zoom
+      // overrides this; reload restores the persisted viewport.
       if (state.backgroundImage !== prev.backgroundImage) {
         staticDirty = true
+        if (state.backgroundImage && state.photoMeta && state.backgroundImage !== prev.backgroundImage) {
+          const cwL = container.clientWidth
+          const chL = container.clientHeight
+          // Defer one tick so the render pipeline picks up photoMeta + image
+          // before the viewport-driven dirty flag flips again.
+          queueMicrotask(() => {
+            const s = useAppStore.getState()
+            // If the operator has a persisted viewport from a prior session,
+            // honor it; otherwise fit-to-viewport.
+            const v = s.viewport || DEFAULT_VIEWPORT_LOCAL
+            if (v.zoom <= 0 || (!prev.backgroundImage && (v.panX === 0 && v.panY === 0))) {
+              s.setViewport(computeFitViewport(s.photoMeta, cwL, chL))
+            }
+          })
+        }
+      }
+      // Section 7.A — viewport / photoMeta / cropMeta change repaints.
+      if (state.viewport !== prev.viewport || state.photoMeta !== prev.photoMeta) {
+        staticDirty = true
+        dynamicDirty = true
       }
       // Tool change clears any in-progress draft so the user doesn't end up
       // half-drawing one shape while another tool is selected.
@@ -1324,10 +1651,12 @@ export default function CanvasStage() {
       cvDynamic.removeEventListener('mouseup', onMouseUp)
       cvDynamic.removeEventListener('dblclick', onDblClick)
       cvDynamic.removeEventListener('contextmenu', onContextMenu)
+      cvDynamic.removeEventListener('wheel', onWheel)
       cvDynamic.removeEventListener('touchstart', onTouchStart)
       cvDynamic.removeEventListener('touchmove', onTouchMove)
       cvDynamic.removeEventListener('touchend', onTouchEnd)
       document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('keyup', onKeyUp)
       unsub()
     }
   }, [])

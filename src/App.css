@@ -368,6 +368,85 @@ body {
 .canvas-stage canvas.cv-dynamic { z-index: 2; touch-action: none; }
 
 .canvas-stage.tool-active .cv-dynamic { cursor: crosshair; }
+/* Section 7.A.3 — Space-held hand-tool cursor cue. The class is applied
+ * by App.jsx based on a session flag; pan-active overrides to `grabbing`. */
+.canvas-stage.space-held .cv-dynamic { cursor: grab; }
+.canvas-stage.space-held.panning .cv-dynamic { cursor: grabbing; }
+
+/* Section 7.A.1 — Photo Crop modal. Full-viewport overlay with the
+ * source photo, crop rectangle, aspect/rotate controls, and confirm/
+ * cancel actions. */
+.photo-crop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+.photo-crop-shell {
+  background: var(--rm-panel);
+  border: 1px solid var(--rm-border);
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 96vw;
+  max-height: 96vh;
+}
+.photo-crop-header,
+.photo-crop-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.photo-crop-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--rm-fg);
+}
+.photo-crop-spacer { flex: 1; }
+.photo-crop-aspect {
+  font-size: 11px;
+  color: var(--rm-fg-dim);
+}
+.photo-crop-aspect select {
+  background: var(--rm-panel-2);
+  color: var(--rm-fg);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+.photo-crop-canvas-wrap {
+  background: #000;
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 320px;
+  min-height: 240px;
+}
+.photo-crop-canvas { display: block; cursor: crosshair; }
+.photo-crop-meta {
+  font-family: var(--rm-mono);
+  font-size: 11px;
+  color: var(--rm-fg-dim);
+}
+
+/* Section 7.A.5 — viewport tool buttons in the canvas toolbar. Cyan tint
+ * differentiates them from drawing / annotation tools (cyan = "view"). */
+.tool-btn.viewport-btn {
+  border-color: rgba(6, 182, 212, 0.5);
+}
+.tool-btn.viewport-btn:hover:not(:disabled) {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: #06b6d4;
+}
 
 /* ---- Drawer edge handle (Step 10 partial-completion fix) ----
  * Floating tab pinned to the right edge of the canvas-area. Always

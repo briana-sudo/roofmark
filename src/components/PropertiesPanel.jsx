@@ -1,4 +1,7 @@
+import { useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
+import { loadPhoto, savePhoto } from '../store/photoIDB'
+import PhotoCropModal from './PhotoCropModal'
 
 /**
  * PropertiesPanel — Step 10 of Kickoff Spec §5/§6.
@@ -39,9 +42,30 @@ export default function PropertiesPanel() {
   const layer = useAppStore((s) =>
     s.layers.find((l) => l.id === activeLayerId) || null
   )
+  // Section 7.A.1 — re-crop action gating: requires a source photo in IDB.
+  const hasSourcePhoto = useAppStore((s) => s.hasSourcePhoto)
+  const cropMeta = useAppStore((s) => s.cropMeta)
+  const photoMeta = useAppStore((s) => s.photoMeta)
+  const [recropSrc, setRecropSrc] = useState(null)
 
-  const setColor = (color) => useAppStore.getState().setLayerColor(layer.id, color)
-  const setProps = (partial) => useAppStore.getState().updateLayerProps(layer.id, partial)
+  const onRecropClick = async () => {
+    const src = await loadPhoto('source').catch(() => null)
+    if (src) setRecropSrc(src)
+  }
+  const onRecropConfirm = ({ croppedDataURL, sourceDataURL, width, height, cropMeta: nextCropMeta }) => {
+    const img = new Image()
+    img.onload = () => {
+      useAppStore.getState().setCroppedPhoto({
+        image: img, width, height, cropMeta: nextCropMeta, hasSourcePhoto: true,
+      })
+    }
+    img.src = croppedDataURL
+    Promise.all([
+      savePhoto(croppedDataURL, 'cropped'),
+      savePhoto(sourceDataURL, 'source'),
+    ]).catch((err) => console.warn('Failed to persist photos to IndexedDB:', err))
+    setRecropSrc(null)
+  }
 
   if (!layer) {
     return (
@@ -49,10 +73,32 @@ export default function PropertiesPanel() {
         <div className="panel-header">Properties</div>
         <div className="panel-body panel-empty">
           Select a layer to edit its properties.
+          {photoMeta && hasSourcePhoto && (
+            <button
+              type="button"
+              className="btn-panel-action btn-add"
+              onClick={onRecropClick}
+              data-testid="btn-recrop-photo"
+              style={{ marginTop: 12 }}
+            >
+              Re-crop photo
+            </button>
+          )}
         </div>
+        {recropSrc && (
+          <PhotoCropModal
+            sourceDataURL={recropSrc}
+            initialCrop={cropMeta}
+            onConfirm={onRecropConfirm}
+            onCancel={() => setRecropSrc(null)}
+          />
+        )}
       </>
     )
   }
+
+  const setColor = (color) => useAppStore.getState().setLayerColor(layer.id, color)
+  const setProps = (partial) => useAppStore.getState().updateLayerProps(layer.id, partial)
 
   // Match LayerPanel's defaults so a freshly-added layer renders predictably
   // even before the operator touches any slider.
@@ -175,7 +221,29 @@ export default function PropertiesPanel() {
             <span className="prop-value">{Math.round(strokeOpacity * 100)}%</span>
           </label>
         </section>
+
+        {photoMeta && hasSourcePhoto && (
+          <section className="props-section" aria-label="Photo">
+            <div className="props-section-title">Photo</div>
+            <button
+              type="button"
+              className="btn-panel-action btn-add"
+              onClick={onRecropClick}
+              data-testid="btn-recrop-photo"
+            >
+              Re-crop photo
+            </button>
+          </section>
+        )}
       </div>
+      {recropSrc && (
+        <PhotoCropModal
+          sourceDataURL={recropSrc}
+          initialCrop={cropMeta}
+          onConfirm={onRecropConfirm}
+          onCancel={() => setRecropSrc(null)}
+        />
+      )}
     </>
   )
 }

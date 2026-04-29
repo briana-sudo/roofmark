@@ -1,6 +1,10 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { savePhoto, clearPhoto } from '../store/photoIDB'
+import {
+  effectivePhotoSize, computeFitViewport, zoomAtCursor, clampPan, clampZoom,
+} from '../store/viewport'
+import PhotoCropModal from './PhotoCropModal'
 
 /**
  * DrawingTools — Step 5 of Kickoff Spec §6.
@@ -47,6 +51,10 @@ export default function DrawingTools() {
   // Step 12 — annotation tools require SEQUENCE mode + an active sequence.
   const mode = useAppStore((s) => s.mode)
   const activeSeqId = useAppStore((s) => s.activeSeqId)
+  // Section 7.A — viewport state drives the toolbar zoom buttons.
+  const viewport = useAppStore((s) => s.viewport)
+  const photoMeta = useAppStore((s) => s.photoMeta)
+  const setViewport = useAppStore((s) => s.setViewport)
   const clinesVisible = useAppStore((s) => s.clinesVisible)
   const toggleClinesVisibility = useAppStore((s) => s.toggleClinesVisibility)
   const snapEnabled = useAppStore((s) => s.snapEnabled)
@@ -57,7 +65,6 @@ export default function DrawingTools() {
   const gridSize = useAppStore((s) => s.gridSize)
   const setGridSizeAxis = useAppStore((s) => s.setGridSizeAxis)
   const backgroundImage = useAppStore((s) => s.backgroundImage)
-  const setBackgroundImage = useAppStore((s) => s.setBackgroundImage)
   const clearBackgroundImage = useAppStore((s) => s.clearBackgroundImage)
 
   // Shape tools require an active layer (they commit shapes into it).
@@ -75,12 +82,43 @@ export default function DrawingTools() {
     setTool(tool === id ? null : id)
   }
 
-  // Spec §7 step 2 — photo background loader. Step 8 places the picker
-  // here in the canvas toolbar; Step 10 (properties panel) takes
-  // ownership of the file-picker UI per Spec §12 and this temporary
-  // button can be removed (or rerouted to open the right drawer's
-  // picker) at that time.
+  // Section 7.A.5 — viewport toolbar handlers. The canvas size is read from
+  // the live `.canvas-stage` element so the math matches whatever the
+  // canvas is actually rendered at right now (matches CanvasStage's own
+  // viewport math). photoSize falls back to canvas dims when no photo is
+  // loaded so the buttons still behave (no-op-ish at zoom=1).
+  const readCanvasSize = () => {
+    const el = document.querySelector('.canvas-stage')
+    return { cw: el?.clientWidth || 0, ch: el?.clientHeight || 0 }
+  }
+  const applyZoom = (factor) => {
+    const { cw, ch } = readCanvasSize()
+    if (!cw || !ch) return
+    const ps = effectivePhotoSize(photoMeta, cw, ch)
+    const fitFloor = computeFitViewport(ps, cw, ch).zoom
+    const target = clampZoom(viewport.zoom * factor, fitFloor)
+    const center = { x: cw / 2, y: ch / 2 }
+    const v = zoomAtCursor(viewport, ps, center, target)
+    const clamped = clampPan(v, ps, cw, ch)
+    setViewport({ zoom: v.zoom, panX: clamped.panX, panY: clamped.panY })
+  }
+  const onZoomIn  = () => applyZoom(1.25)
+  const onZoomOut = () => applyZoom(0.8)
+  const onFit = () => {
+    const { cw, ch } = readCanvasSize()
+    if (!cw || !ch) return
+    const ps = effectivePhotoSize(photoMeta, cw, ch)
+    setViewport(computeFitViewport(ps, cw, ch))
+  }
+
+  // Section 7.A — photo flow:
+  //   1. operator clicks 📷 Photo → file picker opens
+  //   2. operator selects file → load into PhotoCropModal as source
+  //   3. operator adjusts crop + confirms → cropped data URL + dims
+  //      get persisted to IDB (cropped + source slots) and the canvas
+  //      switches to the new working photo with fit-to-viewport
   const fileInputRef = useRef(null)
+  const [pendingSource, setPendingSource] = useState(null) // {dataURL} for modal
   const onPickPhoto = () => fileInputRef.current?.click()
   const onPhotoFile = (e) => {
     const file = e.target.files?.[0]
@@ -90,30 +128,44 @@ export default function DrawingTools() {
     reader.onload = (ev) => {
       const dataURL = ev.target?.result
       if (typeof dataURL !== 'string') return
-      const img = new Image()
-      img.onload = () => {
-        setBackgroundImage(img)
-        // Persist to IndexedDB so the photo survives refresh. Fire and
-        // forget — render path doesn't depend on this resolving.
-        savePhoto(dataURL).catch((err) => {
-          console.warn('Failed to persist photo to IndexedDB:', err)
-        })
-      }
-      img.onerror = () => {
-        // Bad image — surface to console; don't update store.
-        console.warn('Failed to decode photo:', file.name)
-      }
-      img.src = dataURL
+      // Open the crop modal with this data URL as the source. The modal
+      // calls back with cropped dataURL + dims on confirm.
+      setPendingSource({ dataURL })
     }
     reader.readAsDataURL(file)
   }
 
+  const onCropConfirm = ({ croppedDataURL, sourceDataURL, width, height, cropMeta }) => {
+    // Decode cropped image, set on store, persist BOTH source + cropped
+    // to IDB. fit-to-viewport happens automatically in CanvasStage's
+    // photo-load subscription hook (Section 7.A.2 default).
+    const img = new Image()
+    img.onload = () => {
+      useAppStore.getState().setCroppedPhoto({
+        image: img,
+        width,
+        height,
+        cropMeta,
+        hasSourcePhoto: true,
+      })
+    }
+    img.src = croppedDataURL
+    Promise.all([
+      savePhoto(croppedDataURL, 'cropped'),
+      savePhoto(sourceDataURL, 'source'),
+    ]).catch((err) => console.warn('Failed to persist photos to IndexedDB:', err))
+    setPendingSource(null)
+  }
+
+  const onCropCancel = () => setPendingSource(null)
+
   const onClearPhoto = () => {
     clearBackgroundImage()
-    // Also wipe the persisted copy so a refresh doesn't bring it back.
-    clearPhoto().catch((err) => {
-      console.warn('Failed to clear persisted photo from IndexedDB:', err)
-    })
+    // Wipe BOTH slots (cropped + source) so a refresh doesn't bring it back.
+    clearPhoto('cropped').catch((err) => console.warn('Failed to clear cropped photo:', err))
+    clearPhoto('source').catch((err) => console.warn('Failed to clear source photo:', err))
+    // Also clean up the legacy pre-§7.A key just in case.
+    clearPhoto('background').catch(() => {})
   }
 
   return (
@@ -245,6 +297,42 @@ export default function DrawingTools() {
 
       <span className="tool-divider" aria-hidden="true" />
 
+      {/*
+        Section 7.A.5 — viewport controls. Visible always (Rule 28); cyan
+        tint differentiates them from drawing / annotation tools. Status
+        bar carries the live zoom readout for verification.
+      */}
+      <button
+        type="button"
+        className="tool-btn viewport-btn"
+        onClick={onZoomOut}
+        title="Zoom out (- key)"
+        data-testid="btn-zoom-out"
+      >
+        <span className="tool-icon" aria-hidden="true">🔍−</span>
+      </button>
+      <button
+        type="button"
+        className="tool-btn viewport-btn"
+        onClick={onZoomIn}
+        title="Zoom in (+ key)"
+        data-testid="btn-zoom-in"
+      >
+        <span className="tool-icon" aria-hidden="true">🔍+</span>
+      </button>
+      <button
+        type="button"
+        className="tool-btn viewport-btn"
+        onClick={onFit}
+        title="Fit photo to viewport (0 key)"
+        data-testid="btn-fit"
+      >
+        <span className="tool-icon" aria-hidden="true">⊡</span>
+        <span className="tool-name">Fit</span>
+      </button>
+
+      <span className="tool-divider" aria-hidden="true" />
+
       <button
         type="button"
         className={backgroundImage ? 'tool-btn photo-btn active' : 'tool-btn photo-btn'}
@@ -276,6 +364,13 @@ export default function DrawingTools() {
       />
 
       {shapeDisabled && <span className="tool-hint">Select a layer to draw shapes</span>}
+      {pendingSource && (
+        <PhotoCropModal
+          sourceDataURL={pendingSource.dataURL}
+          onConfirm={onCropConfirm}
+          onCancel={onCropCancel}
+        />
+      )}
     </div>
   )
 }

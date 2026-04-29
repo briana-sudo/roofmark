@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { loadPhoto } from './photoIDB'
+import { loadPhoto, savePhoto } from './photoIDB'
 
 // ============================================================================
 // RoofMark application store — Step 2 of Kickoff Spec Section 16
@@ -75,13 +75,41 @@ const sequenceDefaults = (n) => ({
 // preserves the operator's working context — otherwise refresh reverts to
 // "nominal state" (Properties panel empty, mode back to DRAW) even though
 // the data itself survives.
+// Section 7.A — viewport state (panX/panY/zoom) and cropMeta both persist so
+// the operator returns to the same view they left. `photoMeta` (working-photo
+// width/height) also persists; the photo image itself lives in IndexedDB.
 const PERSIST_KEYS = [
   'layers', 'sequences', 'clines', 'jobContext',
   'gridSize', 'rightDrawerOpen', 'drawerTab',
   'mode', 'activeLayerId', 'activeSeqId',
+  'viewport', 'photoMeta', 'cropMeta',
 ]
 const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE', 'TECHNICAL'])
 const VALID_DRAWER_TABS = new Set(['properties', 'sequences'])
+
+// Default viewport when no photo (or before fit-to-viewport runs). Render
+// math degenerates cleanly: shapeNormX * canvasW * 1 + 0 = shapeNormX * canvasW
+// (the pre-Section-7.A behavior).
+const DEFAULT_VIEWPORT = { panX: 0, panY: 0, zoom: 1 }
+const ZOOM_MIN_CAP = 0.05  // safety floor; per-photo fit-to-viewport recomputes a tighter min
+const ZOOM_MAX = 4.0       // §7.A.4 — 4× native pixels
+
+const normalizeViewport = (v) => {
+  if (!v || typeof v !== 'object') return { ...DEFAULT_VIEWPORT }
+  const panX = Number.isFinite(v.panX) ? v.panX : 0
+  const panY = Number.isFinite(v.panY) ? v.panY : 0
+  const zRaw = Number.isFinite(v.zoom) && v.zoom > 0 ? v.zoom : 1
+  const zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN_CAP, zRaw))
+  return { panX, panY, zoom }
+}
+
+const normalizePhotoMeta = (m) => {
+  if (!m || typeof m !== 'object') return null
+  const width = Math.round(Number(m.width))
+  const height = Math.round(Number(m.height))
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) return null
+  return { width, height }
+}
 
 // Step 10 — accept either a number (legacy / square grid) or an {x, y}
 // object (rectangular). Always normalize to {x, y} on the way in.
@@ -192,6 +220,25 @@ const initialState = {
   // mode change / shape delete.
   selected: null,
 
+  // Section 7.A — viewport state (canvas-as-viewport-onto-photo). Persists
+  // so refresh restores the operator's pan/zoom. Default zoom of 1.0 is
+  // overridden by fit-to-viewport when a photo loads (deferred until after
+  // canvas dimensions are known).
+  viewport: normalizeViewport(hydrated?.viewport),
+  // Working (cropped) photo dimensions in photo-px. Set when a photo
+  // commits from the crop modal; cleared when photo is cleared. Used by
+  // viewport math to translate normalized 0–1 shape coords to canvas px.
+  photoMeta: normalizePhotoMeta(hydrated?.photoMeta),
+  // Crop region in source-photo-px (preloaded into the re-crop modal so
+  // operators can refine an existing crop without re-uploading).
+  // { x, y, w, h, rotation: 0 | 90 | 180 | 270 }
+  cropMeta: hydrated?.cropMeta ?? null,
+  // Whether a separate source-photo blob is available in IndexedDB.
+  // Migration: existing projects (pre-Section-7.A) only persisted the
+  // displayed photo under key 'background', which we treat as the cropped
+  // working photo. `hasSourcePhoto` stays false for those projects until
+  // the operator re-uploads via the crop modal.
+  hasSourcePhoto: false,
   rightDrawerOpen: hydrated?.rightDrawerOpen ?? false,
   // Step 11 — which view fills the right-drawer body. Two values:
   // 'properties' (per-layer color/fill/stroke) or 'sequences' (sequence
@@ -506,8 +553,48 @@ export const useAppStore = create((set, get) => {
     // its `load` event fires) or null to clear. Static draw checks
     // `image.complete && image.naturalWidth > 0` before painting so a
     // not-yet-loaded image cleanly falls back to the dark grid.
-    setBackgroundImage: (image) => set({ backgroundImage: image }),
-    clearBackgroundImage: () => set({ backgroundImage: null }),
+    // Section 7.A — when a cropped working photo lands, capture its
+    // photo-px dimensions in `photoMeta`; clearing the image clears
+    // photoMeta and cropMeta so re-crop has no stale boundary preload.
+    setBackgroundImage: (image) => set((s) => {
+      const dims = (image && image.naturalWidth > 0 && image.naturalHeight > 0)
+        ? { width: image.naturalWidth, height: image.naturalHeight }
+        : null
+      return {
+        backgroundImage: image,
+        photoMeta: dims || s.photoMeta,
+      }
+    }),
+    clearBackgroundImage: () => set({
+      backgroundImage: null,
+      photoMeta: null,
+      cropMeta: null,
+      hasSourcePhoto: false,
+      // Reset viewport so the next photo upload starts at fit-to-viewport.
+      viewport: { ...DEFAULT_VIEWPORT },
+    }),
+
+    // Section 7.A — viewport mutators. Set the whole viewport in one shot
+    // (e.g. fit-to-viewport calc), or update one field. Zoom always clamped
+    // to [ZOOM_MIN_CAP, ZOOM_MAX]; pan clamped lazily by the renderer/
+    // pan-handler since the constraint depends on canvas dimensions.
+    setViewport: (v) => set({ viewport: normalizeViewport(v) }),
+    setZoom: (zoom) => set((s) => ({
+      viewport: normalizeViewport({ ...s.viewport, zoom }),
+    })),
+    setPan: (panX, panY) => set((s) => ({
+      viewport: normalizeViewport({ ...s.viewport, panX, panY }),
+    })),
+
+    // Section 7.A — the source + cropped photo lifecycle. Crop modal
+    // confirm calls this with the cropped data URL + photo dims +
+    // crop-rect-in-source-coords. Source preserved separately in IDB.
+    setCroppedPhoto: ({ image, width, height, cropMeta, hasSourcePhoto }) => set({
+      backgroundImage: image,
+      photoMeta: { width, height },
+      cropMeta: cropMeta || null,
+      hasSourcePhoto: !!hasSourcePhoto,
+    }),
 
     // ============ Selection (Spec §9) =======================================
     setSelected: (sel) => set({ selected: sel }),
@@ -678,7 +765,12 @@ useAppStore.subscribe((state, prev) => {
     state.drawerTab !== prev.drawerTab ||
     state.mode !== prev.mode ||
     state.activeLayerId !== prev.activeLayerId ||
-    state.activeSeqId !== prev.activeSeqId
+    state.activeSeqId !== prev.activeSeqId ||
+    // Section 7.A — viewport / photo metadata persist alongside the
+    // operator's working context.
+    state.viewport !== prev.viewport ||
+    state.photoMeta !== prev.photoMeta ||
+    state.cropMeta !== prev.cropMeta
   )
   if (!dataChanged && !uiFlagChanged) return
 
@@ -717,25 +809,40 @@ if (typeof window !== 'undefined') {
 }
 
 // ============================================================================
-// PHOTO HYDRATION (post-Step-8 fix)
+// PHOTO HYDRATION (Step 8 + Section 7.A)
 // Photo is too large for localStorage (Spec §15 originally said don't save
 // at all) but fits IndexedDB easily. Operator-test on Step 8 surfaced that
 // no-persistence is unacceptable UX. Module-level fire-and-forget read at
 // startup; when the data-URL is decoded, set it on the store. Renderer
 // falls back to dark grid until this resolves (typically <50 ms).
+//
+// Section 7.A — dual-slot model: 'source' = original uploaded photo (kept
+// for re-crop), 'cropped' = working photo rendered to canvas. Migration:
+// projects saved before §7.A only had 'background' (the displayed photo);
+// load that as cropped if cropped is missing, and `hasSourcePhoto` stays
+// false until the operator re-uploads via the crop modal.
 // ============================================================================
 if (typeof window !== 'undefined') {
-  loadPhoto()
-    .then((dataURL) => {
-      if (!dataURL) return
-      const img = new Image()
-      img.onload = () => useAppStore.getState().setBackgroundImage(img)
-      img.onerror = () => {
-        console.warn('Failed to decode persisted photo; ignoring.')
-      }
-      img.src = dataURL
-    })
-    .catch(() => {
-      // IDB unavailable / quota / corruption — skip silently.
-    })
+  Promise.all([
+    loadPhoto('cropped').catch(() => null),
+    loadPhoto('source').catch(() => null),
+    loadPhoto('background').catch(() => null), // legacy
+  ]).then(([croppedURL, sourceURL, legacyURL]) => {
+    const workingURL = croppedURL || legacyURL
+    if (!workingURL) return
+    const img = new Image()
+    img.onload = () => {
+      useAppStore.getState().setBackgroundImage(img)
+      useAppStore.setState({ hasSourcePhoto: !!sourceURL })
+    }
+    img.onerror = () => {
+      console.warn('Failed to decode persisted photo; ignoring.')
+    }
+    img.src = workingURL
+    // One-time migration: if we read from legacy 'background', copy to
+    // 'cropped' so future reads use the canonical key.
+    if (!croppedURL && legacyURL) {
+      savePhoto(legacyURL, 'cropped').catch(() => {})
+    }
+  })
 }

@@ -22,6 +22,8 @@ export default function App() {
   const cursorY = useAppStore((s) => s.cursorY)
   const snapType = useAppStore((s) => s.snapType)
   const layers = useAppStore((s) => s.layers)
+  // Section 7.A — viewport zoom level for the status bar readout.
+  const viewportZoom = useAppStore((s) => s.viewport?.zoom ?? 1)
 
   const shapeCount = layers.reduce((n, l) => n + (l.shapes?.length || 0), 0)
 
@@ -136,6 +138,10 @@ export default function App() {
         <span className="status-cell">Y: {cursorY}</span>
         <span className="status-cell">Snap: {snapType ?? '—'}</span>
         <span className="status-cell">Shapes: {shapeCount}</span>
+        {/* Section 7.A.5 — viewport zoom readout. */}
+        <span className="status-cell" data-testid="status-zoom">
+          Zoom: {viewportZoom.toFixed(2)}x
+        </span>
         {/*
           Step 12 partial-completion fix — operator-verifiable build marker.
           Lets the operator confirm the page is loading the latest deployed
