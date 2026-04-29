@@ -229,24 +229,54 @@ export default function CanvasStage() {
       ctxStatic.setTransform(1, 0, 0, 1, 0, 0)
       ctxStatic.clearRect(0, 0, cvStatic.width, cvStatic.height)
       ctxStatic.scale(dpr, dpr)
-      // Background grid (Spec §7 static draw step 2)
-      ctxStatic.strokeStyle = '#1a1f2e'
-      ctxStatic.lineWidth = 1
-      for (let x = 0; x < cw; x += 40) {
-        ctxStatic.beginPath()
-        ctxStatic.moveTo(x + 0.5, 0)
-        ctxStatic.lineTo(x + 0.5, ch)
-        ctxStatic.stroke()
+
+      // Spec §7 step 2 — photo background OR dark-grid fallback.
+      const storeState = useAppStore.getState()
+      const bg = storeState.backgroundImage
+      if (bg && bg.complete && bg.naturalWidth > 0) {
+        ctxStatic.drawImage(bg, 0, 0, cw, ch)
+      } else {
+        ctxStatic.fillStyle = '#0d1117'
+        ctxStatic.fillRect(0, 0, cw, ch)
+        ctxStatic.strokeStyle = '#1a1f2e'
+        ctxStatic.lineWidth = 1
+        for (let x = 0; x < cw; x += 40) {
+          ctxStatic.beginPath()
+          ctxStatic.moveTo(x + 0.5, 0)
+          ctxStatic.lineTo(x + 0.5, ch)
+          ctxStatic.stroke()
+        }
+        for (let y = 0; y < ch; y += 40) {
+          ctxStatic.beginPath()
+          ctxStatic.moveTo(0, y + 0.5)
+          ctxStatic.lineTo(cw, y + 0.5)
+          ctxStatic.stroke()
+        }
       }
-      for (let y = 0; y < ch; y += 40) {
-        ctxStatic.beginPath()
-        ctxStatic.moveTo(0, y + 0.5)
-        ctxStatic.lineTo(cw, y + 0.5)
-        ctxStatic.stroke()
+
+      // Spec §7 step 3 — snap grid overlay when gridEnabled. Subtle cyan
+      // tint at gridSize spacing. Renders over the photo (or dark grid) so
+      // operators see the snap geometry regardless of background.
+      if (storeState.gridEnabled) {
+        const gs = storeState.gridSize || 20
+        ctxStatic.strokeStyle = 'rgba(0, 255, 204, 0.16)'
+        ctxStatic.lineWidth = 1
+        for (let x = 0; x < cw; x += gs) {
+          ctxStatic.beginPath()
+          ctxStatic.moveTo(x + 0.5, 0)
+          ctxStatic.lineTo(x + 0.5, ch)
+          ctxStatic.stroke()
+        }
+        for (let y = 0; y < ch; y += gs) {
+          ctxStatic.beginPath()
+          ctxStatic.moveTo(0, y + 0.5)
+          ctxStatic.lineTo(cw, y + 0.5)
+          ctxStatic.stroke()
+        }
       }
+
       // Construction lines (Spec §7 static draw step 4 — rendered after the
       // background grid, before layer shapes so committed shapes paint over).
-      const storeState = useAppStore.getState()
       if (storeState.clinesVisible !== false) {
         ctxStatic.strokeStyle = 'rgba(0, 255, 204, 0.5)'
         ctxStatic.lineWidth = 1
@@ -681,6 +711,17 @@ export default function CanvasStage() {
       // Toggling the global CLines visibility flag must redraw static so
       // the lines appear/disappear without a separate mutation to clines.
       if (state.clinesVisible !== prev.clinesVisible) {
+        staticDirty = true
+      }
+      // Spec §7 step 3 — grid overlay visibility flips redraw static.
+      if (state.gridEnabled !== prev.gridEnabled || state.gridSize !== prev.gridSize) {
+        staticDirty = true
+      }
+      // Spec §7 step 2 — photo background load/clear redraws static.
+      // The image may not be `complete` yet at the moment it's set; we
+      // also attach an onload listener at set time (in the file-picker
+      // handler below) to flip staticDirty when pixels are decoded.
+      if (state.backgroundImage !== prev.backgroundImage) {
         staticDirty = true
       }
       // Tool change clears any in-progress draft so the user doesn't end up

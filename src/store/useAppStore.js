@@ -152,6 +152,12 @@ const initialState = {
   // This flag is UI-only (not persisted alongside layers/sequences/clines).
   clinesVisible: true,
 
+  // Spec §7 step 2 — photo/PDF background. Stored as the loaded
+  // HTMLImageElement (or null). UI-only, not in PERSIST_KEYS — Spec §15
+  // explicitly says canvas background is not saved (too large for
+  // localStorage). User reloads on session resume.
+  backgroundImage: null,
+
   saveState: 'saved',     // 'saved' | 'unsaved' | 'saving'
   lastSavedAt: null,
 
@@ -384,6 +390,13 @@ export const useAppStore = create((set, get) => {
     // "👁 CLines" button). Distinct from per-cline visibility.
     toggleClinesVisibility: () =>
       set((s) => ({ clinesVisible: !s.clinesVisible })),
+
+    // Spec §7 step 2 — photo background. Pass an HTMLImageElement (after
+    // its `load` event fires) or null to clear. Static draw checks
+    // `image.complete && image.naturalWidth > 0` before painting so a
+    // not-yet-loaded image cleanly falls back to the dark grid.
+    setBackgroundImage: (image) => set({ backgroundImage: image }),
+    clearBackgroundImage: () => set({ backgroundImage: null }),
 
     // ============ App state actions =========================================
     setMode: (mode) => set({ mode }),

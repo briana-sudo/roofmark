@@ -253,6 +253,22 @@ body {
   color: var(--rm-fg);
 }
 
+.tool-btn.photo-btn.active {
+  background: rgba(31, 111, 235, 0.18);
+  border-color: var(--rm-accent);
+  color: var(--rm-fg);
+}
+
+.tool-btn.photo-clear {
+  padding: 3px 7px;
+  border-color: var(--rm-red);
+  color: var(--rm-red);
+}
+
+.tool-btn.photo-clear:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.12);
+}
+
 .tool-hint {
   margin-left: auto;
   color: var(--rm-fg-dim);

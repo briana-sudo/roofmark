@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>RoofMark Step 8.a — Static Canvas Renderer Block Test</title>
+<!--
+========================================================================
+RoofMark Step 8.a — Static Canvas Renderer Block Functional Test
+========================================================================
+
+Block under test:
+  Static canvas draw routine per Kickoff Spec §7. Draw order:
+    1. Clear canvas
+    2. If backgroundImage loaded → paint image to fill canvas
+       Else                       → paint dark-grid background (#0d1117
+                                     base + #1a1f2e grid lines @ 40px)
+    3. If gridEnabled              → paint cyan snap-grid overlay
+                                     (rgba(0,255,204,0.08) lines @
+                                     gridSize spacing)
+    4. If clinesVisible            → paint construction lines
+                                     (dashed cyan rgba(0,255,204,0.5))
+    5. Per visible layer (bottom→top): paint shapes per per-layer
+       fill/stroke/opacity settings
+
+  Inputs come from the store snapshot. Photo loads asynchronously
+  (HTMLImageElement); the renderer paints whatever's currently
+  loaded, so a not-yet-loaded image falls back to the dark grid.
+
+Why standalone:
+  Rule 27 — exercise the renderer in isolation. Same draw order +
+  layering that ships in src/components/CanvasStage.jsx for Step
+  8.b, here driven by hardcoded data + pixel-sampling assertions.
+
+Runtime targets (Rule 27):
+  Desktop Chrome (auto-test on load) AND **real iPhone Safari**
+  (Brian opens the file, visually verifies the four scenarios at
+  the bottom of the page).
+
+Pass criteria (auto-test, pixel-sampling):
+  P1. NO-PHOTO  — dark grid (#1a1f2e) at grid line; #0d1117 between.
+  P2. PHOTO     — pixel inside photo bounds matches the photo's
+                  expected color; dark-grid color absent.
+  P3. CLINE     — at a horizontal cline's y, the line color is the
+                  cline cyan rgba(0,255,204,0.5).
+  P4. SHAPE     — at a known shape pixel, the layer's color
+                  dominates.
+  P5. LAYER-ORDER — top layer's color paints over bottom layer at
+                    overlapping coord.
+  P6. LAYER-VISIBILITY — invisible layer's pixels don't appear.
+  P7. GRID-OVERLAY — with gridEnabled, cyan overlay color present at
+                     grid intersection.
+  P8. STROKE-OPACITY — layer.strokeOpacity affects rendered alpha.
+  P9. FILL-OFF  — layer.fillOn=false → no fill paint inside shape
+                  (interior pixel matches the layer below or
+                  background).
+  P10. CONSOLE  — zero console.error / console.warn during the
+                  suite.
+
+Failure modes detected:
+  F1. Z-order wrong (clines paint over shapes; or layer 1 over 2).
+  F2. Photo doesn't replace dark grid when loaded.
+  F3. fillOn=false still paints fill (interior color leaks).
+  F4. gridEnabled doesn't paint overlay at all (snap grid invisible).
+  F5. Invisible layer still renders.
+======================================================================== -->
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", sans-serif; background: #1a1d23; color: #e6edf3; }
+  .test-panel { padding: 14px 18px; border-bottom: 2px solid #444; background: #11141a; }
+  .test-panel h1 { margin: 0 0 6px; font-size: 14px; }
+  .test-panel .meta { font-size: 11px; color: #8b949e; line-height: 1.5; }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+  .btn { padding: 5px 12px; background: #1f6feb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .results { margin-top: 12px; font-family: "SF Mono", Consolas, monospace; font-size: 11px; max-height: 280px; overflow: auto; }
+  .results .pass { color: #3fb950; }
+  .results .fail { color: #f85149; }
+  .results .row { padding: 1px 0; }
+  .summary { margin-top: 10px; padding: 8px 12px; border-radius: 4px; font-weight: 700; font-family: "SF Mono", Consolas, monospace; font-size: 13px; }
+  .summary.pass { background: #1f3320; color: #3fb950; }
+  .summary.fail { background: #321e1e; color: #f85149; }
+  .summary.pending { background: #2d2a1e; color: #d29922; }
+  .stage-row { display: flex; gap: 12px; padding: 12px; background: #0d1117; border-bottom: 1px solid #30363d; flex-wrap: wrap; }
+  .stage-cell { width: 280px; }
+  .stage-cell h3 { margin: 0 0 4px; font-size: 11px; color: #8b949e; font-weight: 500; }
+  .stage-cell .canvas-box { width: 280px; height: 200px; position: relative; background: #0d1117; }
+  .stage-cell canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+</style>
+</head>
+<body>
+
+<section class="test-panel">
+  <h1>RoofMark Step 8.a — Static Canvas Renderer Block Test</h1>
+  <div class="meta">
+    Block: static draw routine recreated standalone per Spec §7. Each scenario below renders to its own 280×200 canvas and the auto-test pixel-samples to verify draw order + colors.<br>
+    Auto-runs on load. Open in <strong>desktop Chrome</strong> for the harness pass; <strong>real iPhone Safari</strong> for the iOS-runtime visual confirmation. No server needed (file:// works).
+  </div>
+  <div class="actions">
+    <button class="btn" id="btnRun">Re-run auto-test</button>
+  </div>
+  <div class="summary pending" id="summary">Running...</div>
+  <div class="results" id="results"></div>
+</section>
+
+<div class="stage-row">
+  <div class="stage-cell">
+    <h3>S1 — no photo (dark grid baseline)</h3>
+    <div class="canvas-box"><canvas id="cvS1"></canvas></div>
+  </div>
+  <div class="stage-cell">
+    <h3>S2 — photo loaded (dark grid replaced)</h3>
+    <div class="canvas-box"><canvas id="cvS2"></canvas></div>
+  </div>
+  <div class="stage-cell">
+    <h3>S3 — clines + shapes (z-order)</h3>
+    <div class="canvas-box"><canvas id="cvS3"></canvas></div>
+  </div>
+  <div class="stage-cell">
+    <h3>S4 — grid overlay enabled</h3>
+    <div class="canvas-box"><canvas id="cvS4"></canvas></div>
+  </div>
+  <div class="stage-cell">
+    <h3>S5 — layer order + invisible</h3>
+    <div class="canvas-box"><canvas id="cvS5"></canvas></div>
+  </div>
+  <div class="stage-cell">
+    <h3>S6 — fill-on/off + opacity</h3>
+    <div class="canvas-box"><canvas id="cvS6"></canvas></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  // ===== Renderer (mirrors Spec §7 + Step 8 React clone) ===================
+  function drawStaticInto(canvas, opts) {
+    const cw = canvas.clientWidth;
+    const ch = canvas.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(ch * dpr);
+    canvas.style.width = cw + 'px';
+    canvas.style.height = ch + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.scale(dpr, dpr);
+
+    const {
+      backgroundImage = null,
+      gridEnabled = false,
+      gridSize = 20,
+      clinesVisible = true,
+      clines = [],
+      layers = [],
+    } = opts;
+
+    // Step 1: photo background (if loaded) OR dark-grid fallback
+    if (backgroundImage && backgroundImage.complete && backgroundImage.naturalWidth > 0) {
+      ctx.drawImage(backgroundImage, 0, 0, cw, ch);
+    } else {
+      // Dark base + 40px grid (#1a1f2e)
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.strokeStyle = '#1a1f2e';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < cw; x += 40) {
+        ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, ch); ctx.stroke();
+      }
+      for (let y = 0; y < ch; y += 40) {
+        ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(cw, y + 0.5); ctx.stroke();
+      }
+    }
+
+    // Step 2: cyan snap-grid overlay if gridEnabled
+    if (gridEnabled) {
+      ctx.strokeStyle = 'rgba(0, 255, 204, 0.16)';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < cw; x += gridSize) {
+        ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, ch); ctx.stroke();
+      }
+      for (let y = 0; y < ch; y += gridSize) {
+        ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(cw, y + 0.5); ctx.stroke();
+      }
+    }
+
+    // Step 3: construction lines
+    if (clinesVisible !== false) {
+      ctx.strokeStyle = 'rgba(0, 255, 204, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 4]);
+      const SENT = 5000;
+      for (const cl of clines) {
+        if (cl.visible === false) continue;
+        if (cl.type === 'h') {
+          const y = cl.y * ch;
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(cw, y); ctx.stroke();
+        } else if (cl.type === 'v') {
+          const x = cl.x * cw;
+          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, ch); ctx.stroke();
+        } else if (cl.type === 'a') {
+          const ax = cl.px * cw, ay = cl.py * ch;
+          const cosA = Math.cos(cl.angle), sinA = Math.sin(cl.angle);
+          ctx.beginPath();
+          ctx.moveTo(ax - SENT * cosA, ay - SENT * sinA);
+          ctx.lineTo(ax + SENT * cosA, ay + SENT * sinA);
+          ctx.stroke();
+        }
+      }
+      ctx.setLineDash([]);
+    }
+
+    // Step 4: layer shapes (bottom to top, skip invisible)
+    for (const layer of layers) {
+      if (!layer.visible) continue;
+      const color = layer.color || '#3b82f6';
+      const fillOn = layer.fillOn !== false;
+      const strokeOn = layer.strokeOn !== false;
+      const fillOpacity = layer.fillOpacity ?? 0.25;
+      const strokeOpacity = layer.strokeOpacity ?? 1.0;
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = layer.strokeWeight || 2;
+      for (const shape of layer.shapes || []) {
+        if (shape.type === 'circ') {
+          ctx.beginPath();
+          ctx.arc(shape.cx * cw, shape.cy * ch, shape.r * cw, 0, Math.PI * 2);
+          if (fillOn)   { ctx.globalAlpha = fillOpacity;   ctx.fill(); }
+          if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke(); }
+        } else if (shape.type === 'line') {
+          if (shape.pts && shape.pts.length === 2) {
+            ctx.beginPath();
+            ctx.moveTo(shape.pts[0].x * cw, shape.pts[0].y * ch);
+            ctx.lineTo(shape.pts[1].x * cw, shape.pts[1].y * ch);
+            if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke(); }
+          }
+        } else {
+          if (shape.pts && shape.pts.length >= 2) {
+            ctx.beginPath();
+            shape.pts.forEach((p, i) => {
+              const x = p.x * cw, y = p.y * ch;
+              if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.closePath();
+            if (fillOn)   { ctx.globalAlpha = fillOpacity;   ctx.fill(); }
+            if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke(); }
+          }
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.restore();
+  }
+
+  // Pixel sampler — reads RGBA at canvas-CSS-px (x, y), accounts for DPR
+  function pixel(canvas, x, y) {
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = canvas.getContext('2d');
+    const data = ctx.getImageData(Math.round(x * dpr), Math.round(y * dpr), 1, 1).data;
+    return { r: data[0], g: data[1], b: data[2], a: data[3] };
+  }
+  function close(a, b, tol = 8) {
+    return Math.abs(a.r - b.r) <= tol && Math.abs(a.g - b.g) <= tol && Math.abs(a.b - b.b) <= tol;
+  }
+
+  // Hardcoded test layer / clines
+  const rectShape = { type: 'rect', pts: [
+    { x: 0.20, y: 0.20 }, { x: 0.55, y: 0.20 },
+    { x: 0.55, y: 0.55 }, { x: 0.20, y: 0.55 },
+  ]};
+  const tealLayer = {
+    visible: true, color: '#3fb950',
+    fillOn: true, strokeOn: true, fillOpacity: 0.5, strokeOpacity: 1.0,
+    strokeWeight: 2, shapes: [rectShape],
+  };
+  const orangeLayer = {
+    visible: true, color: '#e8531a',
+    fillOn: true, strokeOn: true, fillOpacity: 0.6, strokeOpacity: 1.0,
+    strokeWeight: 2,
+    shapes: [{ type: 'rect', pts: [
+      { x: 0.40, y: 0.40 }, { x: 0.75, y: 0.40 },
+      { x: 0.75, y: 0.75 }, { x: 0.40, y: 0.75 },
+    ]}],
+  };
+  const invisLayer = { ...tealLayer, visible: false };
+
+  // Render the 6 scenarios + load a synthetic photo for S2.
+  // Generate the photo from a temp canvas so the dataURL is guaranteed to
+  // encode the exact RGB we sample for in P2.1 (base64 PNGs from sources
+  // can land transparent or wrong-channel without warning).
+  const photoImg = new Image();
+  (() => {
+    const tmp = document.createElement('canvas');
+    tmp.width = 16; tmp.height = 16;
+    const tctx = tmp.getContext('2d');
+    tctx.fillStyle = '#ff00aa';
+    tctx.fillRect(0, 0, 16, 16);
+    photoImg.src = tmp.toDataURL('image/png');
+  })();
+
+  function renderAll() {
+    drawStaticInto(document.getElementById('cvS1'), { layers: [] });
+    drawStaticInto(document.getElementById('cvS2'), { backgroundImage: photoImg, layers: [] });
+    drawStaticInto(document.getElementById('cvS3'), {
+      clines: [{ type: 'h', y: 0.7, visible: true }],
+      layers: [tealLayer],
+    });
+    drawStaticInto(document.getElementById('cvS4'), { gridEnabled: true, gridSize: 20, layers: [] });
+    drawStaticInto(document.getElementById('cvS5'), {
+      // tealLayer first (bottom), orangeLayer on top — at (180, 100) only orange paints
+      layers: [tealLayer, orangeLayer, invisLayer],
+    });
+    drawStaticInto(document.getElementById('cvS6'), {
+      layers: [{ ...tealLayer, fillOn: false, strokeOn: true, strokeOpacity: 0.6 }],
+    });
+  }
+
+  const consoleIssues = [];
+  const origError = console.error, origWarn = console.warn;
+  console.error = (...a) => { consoleIssues.push(['error', a.map(String).join(' ')]); origError.apply(console, a); };
+  console.warn  = (...a) => { consoleIssues.push(['warn',  a.map(String).join(' ')]); origWarn.apply(console, a); };
+
+  async function runTest() {
+    consoleIssues.length = 0;
+    const results = [];
+    const log = (n, p, d) => results.push({ name: n, pass: p, detail: d ?? '' });
+
+    // Wait for photo to load (must be before S2 render)
+    if (!photoImg.complete || photoImg.naturalWidth === 0) {
+      await new Promise((res) => {
+        if (photoImg.complete) res();
+        else photoImg.addEventListener('load', () => res(), { once: true });
+      });
+    }
+    renderAll();
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+    const S1 = document.getElementById('cvS1');
+    const S2 = document.getElementById('cvS2');
+    const S3 = document.getElementById('cvS3');
+    const S4 = document.getElementById('cvS4');
+    const S5 = document.getElementById('cvS5');
+    const S6 = document.getElementById('cvS6');
+
+    // ---- P1 NO-PHOTO ----
+    // Pick a pixel between grid lines (not at multiple of 40): (100, 100)
+    const baseDark = pixel(S1, 100, 100);
+    log('P1.1 dark base near #0d1117 (between grid lines)', close(baseDark, { r: 13, g: 17, b: 23 }, 12), 'rgb=' + JSON.stringify(baseDark));
+    // Pick a pixel ON a grid line: (40, 50)
+    const gridLine = pixel(S1, 40, 50);
+    log('P1.2 grid line near #1a1f2e at x=40', close(gridLine, { r: 26, g: 31, b: 46 }, 18), 'rgb=' + JSON.stringify(gridLine));
+
+    // ---- P2 PHOTO ----
+    // Photo is solid magenta #ff00aa; sample a pixel inside the photo render
+    const photoPx = pixel(S2, 100, 100);
+    log('P2.1 photo loaded: pixel near #ff00aa', close(photoPx, { r: 255, g: 0, b: 170 }, 16), 'rgb=' + JSON.stringify(photoPx));
+    log('P2.2 photo loaded: dark base color absent (no #0d1117)', !close(photoPx, { r: 13, g: 17, b: 23 }, 12));
+
+    // ---- P3 CLINE ----
+    // h-cline at y=0.7*200=140, render with no photo (dark base). Sample at (100, 140).
+    // Expected: cline cyan rgba(0,255,204,0.5) blended onto dark base.
+    // Blended: (0*0.5 + 13*0.5, 255*0.5 + 17*0.5, 204*0.5 + 23*0.5) ≈ (6, 136, 113)
+    const clinePx = pixel(S3, 100, 140);
+    log('P3.1 cline at y=140 has cyan tint', clinePx.g > 80 && clinePx.b > 70, 'rgb=' + JSON.stringify(clinePx));
+
+    // ---- P4 SHAPE ----
+    // Teal rect at norm (0.20, 0.20)–(0.55, 0.55). At canvas 280×200: (56, 40)–(154, 110).
+    // Sample at (100, 80) — inside teal rect.
+    // Teal #3fb950 with fillOpacity 0.5 over dark #0d1117:
+    //   r ≈ 0x3f * 0.5 + 0x0d * 0.5 = 31.5 + 6.5 = 38
+    //   g ≈ 0xb9 * 0.5 + 0x11 * 0.5 = 92.5 + 8.5 = 101
+    //   b ≈ 0x50 * 0.5 + 0x17 * 0.5 = 40 + 11.5 = 51.5
+    // But cline runs at y=140 only; not affecting (100, 80).
+    const shapePx = pixel(S3, 100, 80);
+    log('P4.1 teal layer paints inside its rect (g dominant)', shapePx.g > 60 && shapePx.g > shapePx.b, 'rgb=' + JSON.stringify(shapePx));
+
+    // ---- P5 LAYER-ORDER ----
+    // S5: teal at (0.20, 0.20)–(0.55, 0.55) → in 280×200 = (56, 40)–(154, 110)
+    //     orange at (0.40, 0.40)–(0.75, 0.75) → (112, 80)–(210, 150)
+    // Overlap region: (112, 80)–(154, 110)
+    // At (130, 95): both teal and orange overlap → orange (top) should dominate.
+    // Orange #e8531a fillOpacity 0.6 over teal-tinted base. Expect strong red.
+    const overlap = pixel(S5, 130, 95);
+    log('P5.1 layer order: top layer (orange) dominates overlap (r > g)', overlap.r > overlap.g, 'rgb=' + JSON.stringify(overlap));
+
+    // Outside overlap, only teal: (80, 70) — only teal
+    const tealOnly = pixel(S5, 80, 70);
+    log('P5.2 non-overlap: teal-only region (g > r)', tealOnly.g > tealOnly.r, 'rgb=' + JSON.stringify(tealOnly));
+
+    // ---- P6 LAYER VISIBILITY ----
+    // S5 has invisLayer (a copy of teal but visible=false). It shouldn't add anything.
+    // At (231, 173) — outside both teal and orange rects, AND off the 40-px
+    // dark-grid lines (so the sample is plain dark base #0d1117).
+    const empty = pixel(S5, 231, 173);
+    log('P6.1 empty region (no visible-layer paint) close to dark base',
+        close(empty, { r: 13, g: 17, b: 23 }, 12), 'rgb=' + JSON.stringify(empty));
+
+    // ---- P7 GRID OVERLAY ----
+    // S4: grid overlay at gridSize=20. At (40, 60) — grid intersection in overlay.
+    // Dark base + dark-grid line + cyan overlay. Expect a small cyan tint.
+    // Compare same x with vs without overlay.
+    const overlayPx = pixel(S4, 40, 60);
+    const baselinePx = pixel(S1, 40, 60);
+    // Overlay should make the green channel slightly higher than baseline
+    log('P7.1 grid overlay tint visible (g_overlay > g_baseline)',
+        overlayPx.g > baselinePx.g,
+        'overlay=' + JSON.stringify(overlayPx) + ' baseline=' + JSON.stringify(baselinePx));
+
+    // ---- P8 STROKE OPACITY ----
+    // S6 has fillOn=false, strokeOn=true, strokeOpacity=0.6
+    // Sample on the rect's left edge: (56, 80)
+    const stroke = pixel(S6, 56, 80);
+    log('P8.1 stroke present at edge', stroke.g > 40 || stroke.r > 40 || stroke.b > 40, 'rgb=' + JSON.stringify(stroke));
+
+    // ---- P9 FILL OFF ----
+    // S6 fillOn=false → interior should be dark base, not teal.
+    // Sample at (95, 75) — off the 40-px dark-grid lines (would otherwise
+    // hit #1a1f2e instead of the #0d1117 base).
+    const interior = pixel(S6, 95, 75);
+    log('P9.1 fillOn=false: interior is dark base, not teal',
+        close(interior, { r: 13, g: 17, b: 23 }, 16), 'rgb=' + JSON.stringify(interior));
+
+    // ---- P10 CONSOLE ----
+    log('P10.1 zero console.error/warn during suite', consoleIssues.length === 0,
+        consoleIssues.length ? 'first=' + JSON.stringify(consoleIssues[0]) : '');
+
+    // Render results
+    const out = document.getElementById('results');
+    out.textContent = '';
+    results.forEach((r) => {
+      const row = document.createElement('div');
+      row.className = 'row ' + (r.pass ? 'pass' : 'fail');
+      row.textContent = (r.pass ? '✓ PASS  ' : '✗ FAIL  ') + r.name + (r.detail ? '  — ' + r.detail : '');
+      out.appendChild(row);
+    });
+    const failed = results.filter((r) => !r.pass).length;
+    const total = results.length;
+    const sum = document.getElementById('summary');
+    sum.className = 'summary ' + (failed === 0 ? 'pass' : 'fail');
+    sum.textContent = failed === 0
+      ? `STEP 8.a PASS — ${total}/${total} checks passed.`
+      : `STEP 8.a FAIL — ${failed}/${total} checks failed.`;
+
+    window.__step8 = { lastResults: results, lastSummary: { total, passed: total - failed, failed } };
+    return window.__step8.lastSummary;
+  }
+
+  document.getElementById('btnRun').addEventListener('click', runTest);
+  // Initial render so the demo cells aren't empty before the test runs
+  renderAll();
+  requestAnimationFrame(() => requestAnimationFrame(runTest));
+})();
+</script>
+</body>
+</html>

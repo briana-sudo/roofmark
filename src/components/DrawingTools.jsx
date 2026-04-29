@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { useAppStore } from '../store/useAppStore'
 
 /**
@@ -36,6 +37,9 @@ export default function DrawingTools() {
   const toggleSnap = useAppStore((s) => s.toggleSnap)
   const gridEnabled = useAppStore((s) => s.gridEnabled)
   const toggleGrid = useAppStore((s) => s.toggleGrid)
+  const backgroundImage = useAppStore((s) => s.backgroundImage)
+  const setBackgroundImage = useAppStore((s) => s.setBackgroundImage)
+  const clearBackgroundImage = useAppStore((s) => s.clearBackgroundImage)
 
   // Shape tools require an active layer (they commit shapes into it).
   // CLines do not — they live in their own array, not in any layer.
@@ -45,6 +49,32 @@ export default function DrawingTools() {
   const onSelect = (id, disabled) => {
     if (disabled) return
     setTool(tool === id ? null : id)
+  }
+
+  // Spec §7 step 2 — photo background loader. Step 8 places the picker
+  // here in the canvas toolbar; Step 10 (properties panel) takes
+  // ownership of the file-picker UI per Spec §12 and this temporary
+  // button can be removed (or rerouted to open the right drawer's
+  // picker) at that time.
+  const fileInputRef = useRef(null)
+  const onPickPhoto = () => fileInputRef.current?.click()
+  const onPhotoFile = (e) => {
+    const file = e.target.files?.[0]
+    e.target.value = '' // allow picking the same file again later
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const dataURL = ev.target?.result
+      if (typeof dataURL !== 'string') return
+      const img = new Image()
+      img.onload = () => setBackgroundImage(img)
+      img.onerror = () => {
+        // Bad image — surface to console; don't update store.
+        console.warn('Failed to decode photo:', file.name)
+      }
+      img.src = dataURL
+    }
+    reader.readAsDataURL(file)
   }
 
   return (
@@ -118,6 +148,38 @@ export default function DrawingTools() {
         <span className="tool-icon" aria-hidden="true">▦</span>
         <span className="tool-name">Grid</span>
       </button>
+
+      <span className="tool-divider" aria-hidden="true" />
+
+      <button
+        type="button"
+        className={backgroundImage ? 'tool-btn photo-btn active' : 'tool-btn photo-btn'}
+        onClick={onPickPhoto}
+        title={backgroundImage ? 'Replace background photo' : 'Load background photo'}
+        data-testid="btn-photo"
+      >
+        <span className="tool-icon" aria-hidden="true">📷</span>
+        <span className="tool-name">Photo</span>
+      </button>
+      {backgroundImage && (
+        <button
+          type="button"
+          className="tool-btn photo-clear"
+          onClick={clearBackgroundImage}
+          title="Clear background photo"
+          data-testid="btn-photo-clear"
+        >
+          <span className="tool-icon" aria-hidden="true">✕</span>
+        </button>
+      )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={onPhotoFile}
+        style={{ display: 'none' }}
+        data-testid="photo-file-input"
+      />
 
       {shapeDisabled && <span className="tool-hint">Select a layer to draw shapes</span>}
     </div>
