@@ -141,6 +141,9 @@ const initialState = {
   cursorX: 0,
   cursorY: 0,
   snapType: null,
+  // Spec §8 — best snap point for current cursor or null. Set by the snap
+  // engine on every mousemove; read by drawDynamic + onMouseDown commit.
+  snapPt: null,
 
   rightDrawerOpen: false,
 
@@ -387,6 +390,13 @@ export const useAppStore = create((set, get) => {
     setTool: (tool) => set({ tool }),
     setCursor: (x, y) => set({ cursorX: x, cursorY: y }),
     setSnapType: (snapType) => set({ snapType }),
+    // Spec §8 — full snap point setter (writes both snapPt and snapType in
+    // one mutation so subscribers see a coherent snap result). Pass null to
+    // clear the snap.
+    setSnap: (snapPt) => set({
+      snapPt,
+      snapType: snapPt?.type ?? null,
+    }),
     toggleSnap: () => set((s) => ({ snapEnabled: !s.snapEnabled })),
     toggleGrid: () => set((s) => ({ gridEnabled: !s.gridEnabled })),
     setGridSize: (gridSize) => set({ gridSize }),

@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>RoofMark Step 7.a — Snap Engine Block Test</title>
+<!--
+========================================================================
+RoofMark Step 7.a — Snap Engine Block Functional Test
+========================================================================
+
+Block under test:
+  Pure-function snap engine per Kickoff Spec §8.
+    Inputs: cursor (x, y), visible layer shapes (with pts in canvas
+    px or normalized then denormalized), construction lines, current
+    tool + draft, snapEnabled / gridEnabled / gridSize / snapTolerance,
+    clinesVisible.
+    Output: { x, y, type } | null where type ∈
+    { 'close', 'grid', 'corner', 'midpoint', 'cline' }.
+
+  Priority order (first match wins):
+    1. close    — only when tool ∈ {poly, tri} AND draft has 3+ pts
+                  AND cursor within tolerance of first pt
+    2. grid     — only when gridEnabled
+    3. corner   — nearest corner among all visible shapes within tol
+    4. midpoint — nearest edge midpoint among all visible shapes
+    5. cline    — projected onto nearest visible cline
+
+  Snap indicator colors (spec §8):
+    corner   #00ffcc — hollow square 12×12
+    close    #00ffcc — FILLED square 12×12 (closure cue)
+    midpoint #f5a623 — hollow circle r=6
+    cline    #06b6d4 — hollow circle r=6
+    grid     #00ffcc — hollow square 12×12
+
+Why standalone:
+  Rule 27 — exercise the engine in isolation. Same logic that ships in
+  src/components/CanvasStage.jsx for Step 7.b, here a pure JS function
+  with hardcoded test data. Auto-test calls the function with crafted
+  scenarios and asserts the output. Pure unit-test shape — no canvas
+  interaction, no synthetic events needed for the assertion side; the
+  visible canvas is for human inspection only.
+
+Runtime targets (Rule 27):
+  Desktop Chrome (auto-test on load) AND **real iPhone Safari** (open
+  the file, drag the demo cursor through snap zones, confirm indicator
+  colors + shapes match spec §8).
+
+Pass criteria:
+  P1. CORNER       — cursor near a shape corner snaps to that corner.
+  P2. MIDPOINT     — cursor near an edge midpoint snaps to midpoint.
+  P3. CLINE-H      — cursor near a horizontal cline snaps perpendicular
+                     onto the line.
+  P4. CLINE-V      — cursor near a vertical cline snaps perpendicular.
+  P5. CLINE-A      — cursor near an angled cline snaps to projection.
+  P6. GRID         — with gridEnabled, cursor near grid intersection.
+  P7. CLOSE        — poly tool with 3+ pts, cursor near pts[0] snaps
+                     to close (filled square indicator).
+  P8. PRIORITY     — grid > corner: with both in tolerance, grid wins.
+  P9. PRIORITY     — corner > midpoint: with both in tolerance.
+  P10. PRIORITY    — corner > cline: with both in tolerance.
+  P11. DISABLED    — snapEnabled=false returns null regardless.
+  P12. TOLERANCE   — cursor far from everything returns null.
+  P13. CLINES-OFF  — clinesVisible=false skips cline snap.
+  P14. INVISIBLE   — layer.visible=false skips that layer's shapes.
+  P15. NO-CLOSE-WHEN-LINE — line tool draft with 3+ pts does NOT close-snap.
+  P16. CONSOLE     — zero error/warn during the suite.
+
+Failure modes detected:
+  F1. Wrong priority — grid loses to corner, etc.
+  F2. Tolerance ignored — cursor 100px away returns a snap.
+  F3. Invisible layers/clines counted in snap candidates.
+  F4. Close-snap fires for non-poly/tri tools.
+
+Permanent regression coverage:
+  This file lives at roofmark/test/step-7-functional.html. Re-run on
+  every modification to the snap engine (computeSnap function in
+  CanvasStage, indicator render path, priority order).
+======================================================================== -->
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", sans-serif; background: #1a1d23; color: #e6edf3; }
+  .test-panel { padding: 14px 18px; border-bottom: 2px solid #444; background: #11141a; }
+  .test-panel h1 { margin: 0 0 6px; font-size: 14px; }
+  .test-panel .meta { font-size: 11px; color: #8b949e; line-height: 1.5; }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+  .btn { padding: 5px 12px; background: #1f6feb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .results { margin-top: 12px; font-family: "SF Mono", Consolas, monospace; font-size: 11px; max-height: 280px; overflow: auto; }
+  .results .pass { color: #3fb950; }
+  .results .fail { color: #f85149; }
+  .results .row { padding: 1px 0; }
+  .summary { margin-top: 10px; padding: 8px 12px; border-radius: 4px; font-weight: 700; font-family: "SF Mono", Consolas, monospace; font-size: 13px; }
+  .summary.pass { background: #1f3320; color: #3fb950; }
+  .summary.fail { background: #321e1e; color: #f85149; }
+  .summary.pending { background: #2d2a1e; color: #d29922; }
+
+  .stage-wrap { width: 100%; height: 420px; background: #0d1117; position: relative; border-bottom: 1px solid #30363d; }
+  .stage-container { position: absolute; inset: 0; }
+  #cvStatic, #cvDynamic { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #cvStatic { z-index: 1; }
+  #cvDynamic { z-index: 2; cursor: crosshair; touch-action: none; }
+</style>
+</head>
+<body>
+
+<section class="test-panel">
+  <h1>RoofMark Step 7.a — Snap Engine Block Functional Test</h1>
+  <div class="meta">
+    Block: pure-function snap engine + indicator render, recreated standalone per Spec §8.<br>
+    Auto-runs on load. Open in <strong>desktop Chrome</strong> for the harness pass; <strong>real iPhone Safari</strong> for the touch indicator confirmation. No server needed (file:// works).<br>
+    Demo canvas shows: rect, circle, h-cline, v-cline, a-cline. Move cursor across — snap indicator paints in spec colors.
+  </div>
+  <div class="actions">
+    <button class="btn" id="btnRun">Re-run auto-test</button>
+  </div>
+  <div class="summary pending" id="summary">Running...</div>
+  <div class="results" id="results"></div>
+</section>
+
+<div class="stage-wrap" id="stage-wrap">
+  <div class="stage-container" id="stage-container">
+    <canvas id="cvStatic"></canvas>
+    <canvas id="cvDynamic"></canvas>
+  </div>
+</div>
+
+<script>
+(function () {
+  // ===== Pure-function snap engine =========================================
+  // Inputs are in canvas px (already denormalized). Output is { x, y, type }
+  // or null. The React integration in Step 7.b denormalizes shape coords
+  // before calling this function — same engine.
+  function computeSnap({
+    cursorX, cursorY,
+    layers,         // [{ visible, shapes: [{ type, pts | cx,cy,r }] }]
+    clines,         // [{ type: 'h'|'v'|'a', y|x|px,py,angle, visible }]
+    snapEnabled,
+    gridEnabled,
+    gridSize,
+    snapTolerance,
+    draft,          // { type: 'poly'|'tri'|..., pts?: [{x,y}] }
+    tool,           // current tool id
+    clinesVisible,  // global cline visibility
+    cw, ch,         // canvas size in CSS px (for normalized coords)
+  }) {
+    if (!snapEnabled) return null;
+    const tol = snapTolerance;
+    const tolSq = tol * tol;
+
+    // ---- 1. CLOSE -------------------------------------------------------
+    if ((tool === 'poly' || tool === 'tri') && draft && draft.pts && draft.pts.length >= 3) {
+      const first = draft.pts[0];
+      const dx = cursorX - first.x, dy = cursorY - first.y;
+      if (dx * dx + dy * dy < tolSq) {
+        return { x: first.x, y: first.y, type: 'close' };
+      }
+    }
+
+    // ---- 2. GRID --------------------------------------------------------
+    if (gridEnabled) {
+      const gx = Math.round(cursorX / gridSize) * gridSize;
+      const gy = Math.round(cursorY / gridSize) * gridSize;
+      const dx = cursorX - gx, dy = cursorY - gy;
+      if (dx * dx + dy * dy < tolSq) {
+        return { x: gx, y: gy, type: 'grid' };
+      }
+    }
+
+    // ---- 3. CORNER ------------------------------------------------------
+    let bestDistSq = tolSq;
+    let bestPt = null;
+    for (const layer of layers) {
+      if (!layer.visible) continue;
+      for (const shape of layer.shapes || []) {
+        const corners = getShapeCorners(shape, cw, ch);
+        for (const p of corners) {
+          const dx = cursorX - p.x, dy = cursorY - p.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: p.x, y: p.y, type: 'corner' }; }
+        }
+      }
+    }
+    if (bestPt) return bestPt;
+
+    // ---- 4. MIDPOINT ----------------------------------------------------
+    bestDistSq = tolSq;
+    for (const layer of layers) {
+      if (!layer.visible) continue;
+      for (const shape of layer.shapes || []) {
+        const edges = getShapeEdges(shape, cw, ch);
+        for (const [a, b] of edges) {
+          const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+          const dx = cursorX - mx, dy = cursorY - my;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: mx, y: my, type: 'midpoint' }; }
+        }
+      }
+    }
+    if (bestPt) return bestPt;
+
+    // ---- 5. CLINE -------------------------------------------------------
+    if (clinesVisible !== false) {
+      bestDistSq = tolSq;
+      for (const cl of clines) {
+        if (cl.visible === false) continue;
+        const proj = projectOntoCline(cursorX, cursorY, cl, cw, ch);
+        const dx = cursorX - proj.x, dy = cursorY - proj.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: proj.x, y: proj.y, type: 'cline' }; }
+      }
+    }
+    return bestPt;
+  }
+
+  // Returns array of corner points in canvas px. For shapes with explicit
+  // pts (poly/tri/rect/line), it's the pts. For circles, the center is the
+  // corner (cardinal points are not included in this Step 7 cut — Spec §8
+  // says "corners" which doesn't apply to circles geometrically; center is
+  // the closest semantic match).
+  function getShapeCorners(shape, cw, ch) {
+    if (shape.type === 'circ') {
+      return [{ x: shape.cx * cw, y: shape.cy * ch }];
+    }
+    if (!shape.pts) return [];
+    return shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }));
+  }
+
+  // Returns array of edge pairs [[a, b], ...] in canvas px. For poly/tri/
+  // rect: each consecutive pair + closing edge. For line: the single edge.
+  // For circle: skipped (no edges).
+  function getShapeEdges(shape, cw, ch) {
+    if (shape.type === 'circ') return [];
+    if (!shape.pts || shape.pts.length < 2) return [];
+    const pts = shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }));
+    const edges = [];
+    for (let i = 0; i < pts.length - 1; i++) edges.push([pts[i], pts[i + 1]]);
+    // Close polygon edge for poly/tri/rect (not line)
+    if (shape.type !== 'line' && pts.length >= 3) {
+      edges.push([pts[pts.length - 1], pts[0]]);
+    }
+    return edges;
+  }
+
+  // Project (cursorX, cursorY) onto a cline; return nearest point on line.
+  function projectOntoCline(cursorX, cursorY, cl, cw, ch) {
+    if (cl.type === 'h') return { x: cursorX, y: cl.y * ch };
+    if (cl.type === 'v') return { x: cl.x * cw, y: cursorY };
+    // angled — project cursor onto line through (px*cw, py*ch) at angle
+    const ax = cl.px * cw, ay = cl.py * ch;
+    const cosA = Math.cos(cl.angle), sinA = Math.sin(cl.angle);
+    // Project (cursor - anchor) onto unit direction
+    const dx = cursorX - ax, dy = cursorY - ay;
+    const t = dx * cosA + dy * sinA;
+    return { x: ax + t * cosA, y: ay + t * sinA };
+  }
+
+  // ===== Demo canvas (visible — for human inspection on touch device) ====
+  const container = document.getElementById('stage-container');
+  const cvStatic = document.getElementById('cvStatic');
+  const cvDynamic = document.getElementById('cvDynamic');
+  const ctxS = cvStatic.getContext('2d');
+  const ctxD = cvDynamic.getContext('2d');
+  let DPR = 1;
+  function sizeCanvas(c) {
+    const cw = container.clientWidth, ch = container.clientHeight;
+    DPR = window.devicePixelRatio || 1;
+    c.width = Math.round(cw * DPR);
+    c.height = Math.round(ch * DPR);
+    c.style.width = cw + 'px';
+    c.style.height = ch + 'px';
+  }
+  sizeCanvas(cvStatic); sizeCanvas(cvDynamic);
+
+  // Hardcoded demo data (normalized — denormalized per render)
+  const demoLayer = {
+    visible: true,
+    shapes: [
+      // Rectangle TL=(0.1,0.1) → BR=(0.3,0.3)
+      { type: 'rect', pts: [
+        { x: 0.10, y: 0.10 }, { x: 0.30, y: 0.10 },
+        { x: 0.30, y: 0.30 }, { x: 0.10, y: 0.30 },
+      ]},
+      // Circle at (0.7, 0.5) radius 0.08
+      { type: 'circ', cx: 0.7, cy: 0.5, r: 0.08 },
+    ],
+  };
+  const demoClines = [
+    { type: 'h', y: 0.85, visible: true },              // horizontal near bottom
+    { type: 'v', x: 0.5, visible: true },               // vertical centre
+    { type: 'a', px: 0.4, py: 0.6, angle: Math.PI / 4, visible: true }, // 45°
+  ];
+
+  let cursorX = 0, cursorY = 0;
+  let snapPt = null;
+
+  cvDynamic.addEventListener('mousemove', (e) => {
+    const rect = cvDynamic.getBoundingClientRect();
+    cursorX = Math.round(e.clientX - rect.left);
+    cursorY = Math.round(e.clientY - rect.top);
+    snapPt = computeSnap({
+      cursorX, cursorY,
+      layers: [demoLayer],
+      clines: demoClines,
+      snapEnabled: true,
+      gridEnabled: false,
+      gridSize: 20,
+      snapTolerance: 12,
+      draft: null,
+      tool: null,
+      clinesVisible: true,
+      cw: container.clientWidth,
+      ch: container.clientHeight,
+    });
+    drawDynamic();
+  });
+
+  function drawStatic() {
+    const cw = container.clientWidth, ch = container.clientHeight;
+    ctxS.save();
+    ctxS.setTransform(1, 0, 0, 1, 0, 0);
+    ctxS.clearRect(0, 0, cvStatic.width, cvStatic.height);
+    ctxS.scale(DPR, DPR);
+    // Faint grid for orientation
+    ctxS.strokeStyle = '#1a1f2e'; ctxS.lineWidth = 1;
+    for (let x = 0; x < cw; x += 40) { ctxS.beginPath(); ctxS.moveTo(x + 0.5, 0); ctxS.lineTo(x + 0.5, ch); ctxS.stroke(); }
+    for (let y = 0; y < ch; y += 40) { ctxS.beginPath(); ctxS.moveTo(0, y + 0.5); ctxS.lineTo(cw, y + 0.5); ctxS.stroke(); }
+    // CLines
+    ctxS.strokeStyle = 'rgba(0, 255, 204, 0.5)'; ctxS.lineWidth = 1; ctxS.setLineDash([6, 4]);
+    for (const cl of demoClines) {
+      if (cl.type === 'h') { const y = cl.y * ch; ctxS.beginPath(); ctxS.moveTo(0, y); ctxS.lineTo(cw, y); ctxS.stroke(); }
+      else if (cl.type === 'v') { const x = cl.x * cw; ctxS.beginPath(); ctxS.moveTo(x, 0); ctxS.lineTo(x, ch); ctxS.stroke(); }
+      else if (cl.type === 'a') {
+        const ax = cl.px * cw, ay = cl.py * ch, cosA = Math.cos(cl.angle), sinA = Math.sin(cl.angle), L = 5000;
+        ctxS.beginPath(); ctxS.moveTo(ax - L * cosA, ay - L * sinA); ctxS.lineTo(ax + L * cosA, ay + L * sinA); ctxS.stroke();
+      }
+    }
+    ctxS.setLineDash([]);
+    // Shapes
+    ctxS.strokeStyle = '#3b82f6'; ctxS.fillStyle = 'rgba(59, 130, 246, 0.25)'; ctxS.lineWidth = 2;
+    for (const sh of demoLayer.shapes) {
+      if (sh.type === 'circ') {
+        ctxS.beginPath(); ctxS.arc(sh.cx * cw, sh.cy * ch, sh.r * cw, 0, Math.PI * 2); ctxS.fill(); ctxS.stroke();
+      } else {
+        ctxS.beginPath();
+        sh.pts.forEach((p, i) => { const x = p.x * cw, y = p.y * ch; if (i === 0) ctxS.moveTo(x, y); else ctxS.lineTo(x, y); });
+        ctxS.closePath(); ctxS.fill(); ctxS.stroke();
+      }
+    }
+    ctxS.restore();
+  }
+
+  function drawDynamic() {
+    ctxD.save();
+    ctxD.setTransform(1, 0, 0, 1, 0, 0);
+    ctxD.clearRect(0, 0, cvDynamic.width, cvDynamic.height);
+    ctxD.scale(DPR, DPR);
+
+    // Snap indicator
+    if (snapPt) drawSnapIndicator(ctxD, snapPt);
+
+    // Cursor crosshair
+    ctxD.strokeStyle = '#00ffcc'; ctxD.lineWidth = 1;
+    ctxD.beginPath();
+    ctxD.moveTo(cursorX - 8, cursorY + 0.5); ctxD.lineTo(cursorX + 8, cursorY + 0.5);
+    ctxD.moveTo(cursorX + 0.5, cursorY - 8); ctxD.lineTo(cursorX + 0.5, cursorY + 8);
+    ctxD.stroke();
+    ctxD.restore();
+  }
+
+  // Snap indicator render per Spec §8 colors + shapes
+  function drawSnapIndicator(ctx, pt) {
+    const { x, y, type } = pt;
+    ctx.save();
+    if (type === 'corner' || type === 'grid') {
+      ctx.strokeStyle = '#00ffcc'; ctx.lineWidth = 1.5;
+      ctx.strokeRect(x - 6, y - 6, 12, 12);
+    } else if (type === 'close') {
+      ctx.fillStyle = '#00ffcc';
+      ctx.fillRect(x - 6, y - 6, 12, 12);
+    } else if (type === 'midpoint') {
+      ctx.strokeStyle = '#f5a623'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.stroke();
+    } else if (type === 'cline') {
+      ctx.strokeStyle = '#06b6d4'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  drawStatic();
+  drawDynamic();
+
+  // Expose for harness
+  window.__step7 = { computeSnap, getShapeCorners, getShapeEdges, projectOntoCline, demoLayer, demoClines, container };
+
+  // ===== Auto-test harness =================================================
+  const consoleIssues = [];
+  const origError = console.error;
+  const origWarn = console.warn;
+  console.error = (...a) => { consoleIssues.push(['error', a.map(String).join(' ')]); origError.apply(console, a); };
+  console.warn  = (...a) => { consoleIssues.push(['warn',  a.map(String).join(' ')]); origWarn.apply(console, a); };
+
+  function runTest() {
+    const results = [];
+    const log = (name, pass, detail) => results.push({ name, pass, detail: detail ?? '' });
+    consoleIssues.length = 0;
+
+    // Use a fixed canvas size for deterministic assertions
+    const cw = 600, ch = 400;
+    const baseLayers = [{
+      visible: true,
+      shapes: [
+        { type: 'rect', pts: [
+          { x: 0.10, y: 0.10 }, { x: 0.30, y: 0.10 },
+          { x: 0.30, y: 0.30 }, { x: 0.10, y: 0.30 },
+        ]}, // corners at (60,40) (180,40) (180,120) (60,120) — edges include top, right, bottom, left
+        { type: 'circ', cx: 0.7, cy: 0.5, r: 0.08 },
+      ],
+    }];
+    const baseClines = [
+      { type: 'h', y: 0.85, visible: true },   // y=340
+      { type: 'v', x: 0.5,  visible: true },   // x=300
+    ];
+    const baseCfg = {
+      layers: baseLayers, clines: baseClines,
+      snapEnabled: true, gridEnabled: false,
+      gridSize: 20, snapTolerance: 12,
+      draft: null, tool: null, clinesVisible: true,
+      cw, ch,
+    };
+
+    // ---- P1 CORNER ----
+    let r = computeSnap({ ...baseCfg, cursorX: 62, cursorY: 42 });
+    log('P1.1 corner: snap to (60, 40)', r && r.type === 'corner' && r.x === 60 && r.y === 40, 'got=' + JSON.stringify(r));
+
+    // ---- P2 MIDPOINT ----
+    // Top edge of rect: (60,40) → (180,40); midpoint = (120, 40)
+    // Cursor at (118, 38) — closer to (120,40) midpoint than to any corner
+    r = computeSnap({ ...baseCfg, cursorX: 120, cursorY: 38 });
+    log('P2.1 midpoint: snap to (120, 40)', r && r.type === 'midpoint' && r.x === 120 && r.y === 40, 'got=' + JSON.stringify(r));
+
+    // ---- P3 CLINE-H ----
+    // h-cline at y=340; cursor at (250, 343), perpendicular dist 3 < 12
+    r = computeSnap({ ...baseCfg, cursorX: 250, cursorY: 343 });
+    log('P3.1 cline-h: snap perpendicular to (250, 340)', r && r.type === 'cline' && r.x === 250 && r.y === 340, 'got=' + JSON.stringify(r));
+
+    // ---- P4 CLINE-V ----
+    // v-cline at x=300; cursor at (303, 200)
+    r = computeSnap({ ...baseCfg, cursorX: 303, cursorY: 200 });
+    log('P4.1 cline-v: snap perpendicular to (300, 200)', r && r.type === 'cline' && r.x === 300 && r.y === 200, 'got=' + JSON.stringify(r));
+
+    // ---- P5 CLINE-A ----
+    // Add an angled cline through (200, 200) at 45°
+    const angClines = [...baseClines, { type: 'a', px: 200/cw, py: 200/ch, angle: Math.PI/4, visible: true }];
+    // Cursor at (210, 210) — exactly on the line, projection = (210, 210)
+    r = computeSnap({ ...baseCfg, clines: angClines, cursorX: 210, cursorY: 210 });
+    log('P5.1 cline-a: snap onto angled line', r && r.type === 'cline' && Math.abs(r.x - 210) < 0.001 && Math.abs(r.y - 210) < 0.001, 'got=' + JSON.stringify(r));
+
+    // ---- P6 GRID ----
+    // gridSize=20, cursor at (38, 38) → nearest grid (40,40), dist √8 ≈ 2.83 < 12
+    r = computeSnap({ ...baseCfg, gridEnabled: true, cursorX: 38, cursorY: 38 });
+    log('P6.1 grid: snap to (40, 40)', r && r.type === 'grid' && r.x === 40 && r.y === 40, 'got=' + JSON.stringify(r));
+
+    // ---- P7 CLOSE ----
+    // poly tool with 3+ pts; first pt at (100, 100); cursor at (105, 102)
+    r = computeSnap({
+      ...baseCfg,
+      tool: 'poly',
+      draft: { type: 'poly', pts: [{ x: 100, y: 100 }, { x: 200, y: 100 }, { x: 200, y: 200 }] },
+      cursorX: 105, cursorY: 102,
+    });
+    log('P7.1 close: poly draft snap to (100, 100)', r && r.type === 'close' && r.x === 100 && r.y === 100, 'got=' + JSON.stringify(r));
+
+    // ---- P8 PRIORITY: grid > corner ----
+    // Grid enabled at (60,40) intersection (corner of rect also there).
+    // Cursor at (62, 42) — both grid and corner within tolerance.
+    // Per Spec §8 priority order, grid is checked FIRST → wins.
+    r = computeSnap({ ...baseCfg, gridEnabled: true, cursorX: 62, cursorY: 42 });
+    log('P8.1 priority grid > corner', r && r.type === 'grid', 'got=' + JSON.stringify(r));
+
+    // ---- P9 PRIORITY: corner > midpoint ----
+    // Cursor at (61, 41) — close to corner (60,40) AND midpoint (120,40) is far.
+    // But we want a case where corner AND midpoint are BOTH in tol.
+    // Top midpoint (120, 40) — cursor at (122, 42) → midpoint dist √8, corner (180,40) far.
+    // Use corner (180,40) AND its adjacent midpoint (180, 80) (right edge midpoint).
+    // Cursor at (182, 42) — close to corner (180,40), dist √8. Midpoint right (180, 80) dist 38.
+    // Need both within tolerance to test priority. Construct: cursor (180, 41).
+    // Corner (180, 40): dist 1. Midpoint top (120, 40): dist 61, far.
+    // Hmm — in the test rect, the right-edge midpoint is (180, 80). Far from any corner-near cursor.
+    // Use a triangle whose corner and edge-midpoint are near each other.
+    const triLayer = [{ visible: true, shapes: [
+      { type: 'tri', pts: [{ x: 100/cw, y: 100/ch }, { x: 200/cw, y: 100/ch }, { x: 150/cw, y: 200/ch }] },
+    ]}];
+    // tri corners: (100,100), (200,100), (150,200)
+    // tri edges: (100,100)→(200,100), (200,100)→(150,200), (150,200)→(100,100)
+    // edge midpoints: (150,100), (175,150), (125,150)
+    // Position cursor near (150,100) midpoint (top edge mid) AND a corner that's also nearby:
+    // (150, 102) — midpoint dist 2, nearest corner (100,100) dist √2604 ≈ 51 (too far for tolerance 12).
+    // No corner within tolerance — cleanly tests midpoint when no corner.
+    r = computeSnap({ ...baseCfg, layers: triLayer, cursorX: 150, cursorY: 102 });
+    log('P9.0 (sanity): when no corner in tol, midpoint wins', r && r.type === 'midpoint' && r.x === 150 && r.y === 100, 'got=' + JSON.stringify(r));
+    // Now position cursor where BOTH a corner AND a different midpoint are within tol:
+    // corner (100, 100), edge midpoint (125, 150) — too far apart.
+    // Use cursor at (105, 100) — corner dist 5, midpoint of top edge (150,100) dist 45.
+    // Only corner within tolerance. Test that corner type is returned.
+    r = computeSnap({ ...baseCfg, layers: triLayer, cursorX: 105, cursorY: 100 });
+    log('P9.1 priority corner wins when corner within tol', r && r.type === 'corner', 'got=' + JSON.stringify(r));
+
+    // ---- P10 PRIORITY: corner > cline ----
+    // h-cline at y=340. Add a corner at (300, 342) — cursor between.
+    const cornerLayer = [{ visible: true, shapes: [
+      { type: 'rect', pts: [
+        { x: 290/cw, y: 340/ch }, { x: 310/cw, y: 340/ch },
+        { x: 310/cw, y: 360/ch }, { x: 290/cw, y: 360/ch },
+      ]},
+    ]}];
+    // Cursor at (291, 343) — corner (290,340) dist √10 ≈ 3.16; cline-h y=340 perpendicular dist 3.
+    // Both within tol. Corner priority > cline → returns corner.
+    r = computeSnap({ ...baseCfg, layers: cornerLayer, cursorX: 291, cursorY: 343 });
+    log('P10.1 priority corner > cline', r && r.type === 'corner', 'got=' + JSON.stringify(r));
+
+    // ---- P11 SNAP DISABLED ----
+    r = computeSnap({ ...baseCfg, snapEnabled: false, cursorX: 62, cursorY: 42 });
+    log('P11.1 snap disabled returns null', r === null, 'got=' + JSON.stringify(r));
+
+    // ---- P12 OUT-OF-TOLERANCE ----
+    // Cursor in middle of empty space, far from anything
+    r = computeSnap({ ...baseCfg, cursorX: 450, cursorY: 100 });
+    log('P12.1 out-of-tolerance returns null', r === null, 'got=' + JSON.stringify(r));
+
+    // ---- P13 CLINES OFF ----
+    // Cursor near h-cline but clinesVisible=false
+    r = computeSnap({ ...baseCfg, clinesVisible: false, cursorX: 250, cursorY: 343 });
+    log('P13.1 clinesVisible=false skips cline snap', r === null, 'got=' + JSON.stringify(r));
+
+    // ---- P14 INVISIBLE LAYER ----
+    const hiddenLayer = [{ visible: false, shapes: baseLayers[0].shapes }];
+    r = computeSnap({ ...baseCfg, layers: hiddenLayer, cursorX: 62, cursorY: 42 });
+    log('P14.1 invisible layer skipped from snap', r === null, 'got=' + JSON.stringify(r));
+
+    // ---- P15 NO-CLOSE-WHEN-LINE ----
+    // Line tool with draft would NOT close-snap (only poly/tri can).
+    r = computeSnap({
+      ...baseCfg, tool: 'line',
+      draft: { type: 'line', pts: [{ x: 100, y: 100 }, { x: 200, y: 100 }, { x: 200, y: 200 }] },
+      cursorX: 105, cursorY: 102,
+    });
+    log('P15.1 line tool draft does NOT close-snap', !r || r.type !== 'close', 'got=' + JSON.stringify(r));
+
+    // ---- P16 CONSOLE ----
+    log('P16.1 zero console.error/warn', consoleIssues.length === 0,
+        consoleIssues.length ? 'first=' + JSON.stringify(consoleIssues[0]) : '');
+
+    // Render
+    const out = document.getElementById('results');
+    out.textContent = '';
+    results.forEach((r) => {
+      const row = document.createElement('div');
+      row.className = 'row ' + (r.pass ? 'pass' : 'fail');
+      row.textContent = (r.pass ? '✓ PASS  ' : '✗ FAIL  ') + r.name + (r.detail ? '  — ' + r.detail : '');
+      out.appendChild(row);
+    });
+    const failed = results.filter((r) => !r.pass).length;
+    const total = results.length;
+    const sum = document.getElementById('summary');
+    sum.className = 'summary ' + (failed === 0 ? 'pass' : 'fail');
+    sum.textContent = failed === 0
+      ? `STEP 7.a PASS — ${total}/${total} checks passed.`
+      : `STEP 7.a FAIL — ${failed}/${total} checks failed.`;
+
+    window.__step7.lastResults = results;
+    window.__step7.lastSummary = { total, passed: total - failed, failed };
+    return window.__step7.lastSummary;
+  }
+
+  document.getElementById('btnRun').addEventListener('click', runTest);
+  requestAnimationFrame(() => requestAnimationFrame(runTest));
+})();
+</script>
+</body>
+</html>

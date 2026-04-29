@@ -33,6 +33,107 @@ const MIN_CLINE_DRAG = 5
 // browser clips it for us. 5000px is plenty for any reasonable canvas size.
 const CLINE_SENT = 5000
 
+// Spec §8 — snap engine pure function. Inputs in canvas px (already
+// denormalized). Output { x, y, type } | null. Identical logic to the
+// block test at /test/step-7-functional.html.
+function getShapeCorners(shape, cw, ch) {
+  if (shape.type === 'circ') return [{ x: shape.cx * cw, y: shape.cy * ch }]
+  if (!shape.pts) return []
+  return shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }))
+}
+
+function getShapeEdges(shape, cw, ch) {
+  if (shape.type === 'circ') return []
+  if (!shape.pts || shape.pts.length < 2) return []
+  const pts = shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }))
+  const edges = []
+  for (let i = 0; i < pts.length - 1; i++) edges.push([pts[i], pts[i + 1]])
+  if (shape.type !== 'line' && pts.length >= 3) {
+    edges.push([pts[pts.length - 1], pts[0]])
+  }
+  return edges
+}
+
+function projectOntoCline(cursorX, cursorY, cl, cw, ch) {
+  if (cl.type === 'h') return { x: cursorX, y: cl.y * ch }
+  if (cl.type === 'v') return { x: cl.x * cw, y: cursorY }
+  const ax = cl.px * cw, ay = cl.py * ch
+  const cosA = Math.cos(cl.angle), sinA = Math.sin(cl.angle)
+  const dx = cursorX - ax, dy = cursorY - ay
+  const t = dx * cosA + dy * sinA
+  return { x: ax + t * cosA, y: ay + t * sinA }
+}
+
+function computeSnap(args) {
+  const {
+    cursorX, cursorY, layers, clines,
+    snapEnabled, gridEnabled, gridSize, snapTolerance,
+    draft, tool, clinesVisible, cw, ch,
+  } = args
+  if (!snapEnabled) return null
+  const tolSq = snapTolerance * snapTolerance
+
+  // 1. CLOSE
+  if ((tool === 'poly' || tool === 'tri') && draft && draft.pts && draft.pts.length >= 3) {
+    const first = draft.pts[0]
+    const dx = cursorX - first.x, dy = cursorY - first.y
+    if (dx * dx + dy * dy < tolSq) return { x: first.x, y: first.y, type: 'close' }
+  }
+
+  // 2. GRID
+  if (gridEnabled) {
+    const gx = Math.round(cursorX / gridSize) * gridSize
+    const gy = Math.round(cursorY / gridSize) * gridSize
+    const dx = cursorX - gx, dy = cursorY - gy
+    if (dx * dx + dy * dy < tolSq) return { x: gx, y: gy, type: 'grid' }
+  }
+
+  // 3. CORNER
+  let bestDistSq = tolSq
+  let bestPt = null
+  for (const layer of layers) {
+    if (!layer.visible) continue
+    for (const shape of layer.shapes || []) {
+      const corners = getShapeCorners(shape, cw, ch)
+      for (const p of corners) {
+        const dx = cursorX - p.x, dy = cursorY - p.y
+        const d2 = dx * dx + dy * dy
+        if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: p.x, y: p.y, type: 'corner' } }
+      }
+    }
+  }
+  if (bestPt) return bestPt
+
+  // 4. MIDPOINT
+  bestDistSq = tolSq
+  for (const layer of layers) {
+    if (!layer.visible) continue
+    for (const shape of layer.shapes || []) {
+      const edges = getShapeEdges(shape, cw, ch)
+      for (const [a, b] of edges) {
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
+        const dx = cursorX - mx, dy = cursorY - my
+        const d2 = dx * dx + dy * dy
+        if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: mx, y: my, type: 'midpoint' } }
+      }
+    }
+  }
+  if (bestPt) return bestPt
+
+  // 5. CLINE
+  if (clinesVisible !== false) {
+    bestDistSq = tolSq
+    for (const cl of clines) {
+      if (cl.visible === false) continue
+      const proj = projectOntoCline(cursorX, cursorY, cl, cw, ch)
+      const dx = cursorX - proj.x, dy = cursorY - proj.y
+      const d2 = dx * dx + dy * dy
+      if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: proj.x, y: proj.y, type: 'cline' } }
+    }
+  }
+  return bestPt
+}
+
 export default function CanvasStage() {
   const containerRef = useRef(null)
   const staticCanvasRef = useRef(null)
@@ -262,6 +363,31 @@ export default function CanvasStage() {
         ctxDynamic.setLineDash([])
       }
 
+      // Snap indicator (Spec §8 colors + shapes)
+      const snapPt = state.snapPt
+      if (snapPt) {
+        const sx = snapPt.x
+        const sy = snapPt.y
+        ctxDynamic.lineWidth = 1.5
+        if (snapPt.type === 'corner' || snapPt.type === 'grid') {
+          ctxDynamic.strokeStyle = '#00ffcc'
+          ctxDynamic.strokeRect(sx - 6, sy - 6, 12, 12)
+        } else if (snapPt.type === 'close') {
+          ctxDynamic.fillStyle = '#00ffcc'
+          ctxDynamic.fillRect(sx - 6, sy - 6, 12, 12)
+        } else if (snapPt.type === 'midpoint') {
+          ctxDynamic.strokeStyle = '#f5a623'
+          ctxDynamic.beginPath()
+          ctxDynamic.arc(sx, sy, 6, 0, Math.PI * 2)
+          ctxDynamic.stroke()
+        } else if (snapPt.type === 'cline') {
+          ctxDynamic.strokeStyle = '#06b6d4'
+          ctxDynamic.beginPath()
+          ctxDynamic.arc(sx, sy, 6, 0, Math.PI * 2)
+          ctxDynamic.stroke()
+        }
+      }
+
       // Cursor crosshair (top-most)
       ctxDynamic.strokeStyle = '#00ffcc'
       ctxDynamic.lineWidth = 1
@@ -376,7 +502,8 @@ export default function CanvasStage() {
 
     const onMouseMove = (e) => {
       const { x, y } = pointFromClient(e.clientX, e.clientY)
-      useAppStore.getState().setCursor(x, y)
+      const store = useAppStore.getState()
+      store.setCursor(x, y)
       if (draft) {
         if (draft.type === 'rect' && isDragging) { draft.x = x; draft.y = y }
         else if (draft.type === 'circ' && isDragging) {
@@ -384,18 +511,47 @@ export default function CanvasStage() {
         }
         else if (draft.type === 'cline' && isDragging) { draft.x = x; draft.y = y }
       }
+      // Spec §8 — recompute the best snap target on every mousemove.
+      const snapPt = computeSnap({
+        cursorX: x, cursorY: y,
+        layers: store.layers,
+        clines: store.clines,
+        snapEnabled: store.snapEnabled,
+        gridEnabled: store.gridEnabled,
+        gridSize: store.gridSize,
+        snapTolerance: store.snapTolerance,
+        draft,
+        tool: store.tool,
+        clinesVisible: store.clinesVisible,
+        cw: container.clientWidth,
+        ch: container.clientHeight,
+      })
+      // Avoid spurious store mutations when the snap result is unchanged
+      // (cursor moved a pixel but snap target stayed the same).
+      const prev = store.snapPt
+      const same = (prev && snapPt
+        && prev.x === snapPt.x && prev.y === snapPt.y && prev.type === snapPt.type)
+        || (prev === null && snapPt === null)
+      if (!same) store.setSnap(snapPt)
       dynamicDirty = true
     }
 
     const onMouseDown = (e) => {
-      const t = useAppStore.getState().tool
-      const activeLayerId = useAppStore.getState().activeLayerId
+      const store = useAppStore.getState()
+      const t = store.tool
+      const activeLayerId = store.activeLayerId
       if (!t) return
       // Shape tools commit into the active layer; cline lives in its own
       // array and doesn't need one (Spec §6.6).
       if (t !== 'cline' && !activeLayerId) return
-      const { x, y } = pointFromClient(e.clientX, e.clientY)
-      const snap = useAppStore.getState().snapTolerance || SNAP_TOLERANCE_DEFAULT
+      const raw = pointFromClient(e.clientX, e.clientY)
+      // Spec §8 — committing a point uses the active snap target if any.
+      // Snap is the cleanest precision boundary: shape commit, cline anchor,
+      // poly point placement all flow through the same coords.
+      const snapPt = store.snapPt
+      const x = snapPt ? Math.round(snapPt.x) : raw.x
+      const y = snapPt ? Math.round(snapPt.y) : raw.y
+      const snap = store.snapTolerance || SNAP_TOLERANCE_DEFAULT
 
       if (t === 'poly') {
         if (!draft) {

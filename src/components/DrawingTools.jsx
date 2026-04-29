@@ -32,6 +32,10 @@ export default function DrawingTools() {
   const activeLayerId = useAppStore((s) => s.activeLayerId)
   const clinesVisible = useAppStore((s) => s.clinesVisible)
   const toggleClinesVisibility = useAppStore((s) => s.toggleClinesVisibility)
+  const snapEnabled = useAppStore((s) => s.snapEnabled)
+  const toggleSnap = useAppStore((s) => s.toggleSnap)
+  const gridEnabled = useAppStore((s) => s.gridEnabled)
+  const toggleGrid = useAppStore((s) => s.toggleGrid)
 
   // Shape tools require an active layer (they commit shapes into it).
   // CLines do not — they live in their own array, not in any layer.
@@ -87,6 +91,32 @@ export default function DrawingTools() {
       >
         <span className="tool-icon" aria-hidden="true">👁</span>
         <span className="tool-name">CLines</span>
+      </button>
+
+      <span className="tool-divider" aria-hidden="true" />
+
+      <button
+        type="button"
+        className={snapEnabled ? 'tool-btn snap-toggle active' : 'tool-btn snap-toggle'}
+        onClick={toggleSnap}
+        title={snapEnabled ? 'Disable snap' : 'Enable snap'}
+        aria-pressed={snapEnabled}
+        data-testid="btn-snap"
+      >
+        <span className="tool-icon" aria-hidden="true">⊞</span>
+        <span className="tool-name">Snap</span>
+      </button>
+
+      <button
+        type="button"
+        className={gridEnabled ? 'tool-btn grid-toggle active' : 'tool-btn grid-toggle'}
+        onClick={toggleGrid}
+        title={gridEnabled ? 'Disable grid snap' : 'Enable grid snap'}
+        aria-pressed={gridEnabled}
+        data-testid="btn-grid"
+      >
+        <span className="tool-icon" aria-hidden="true">▦</span>
+        <span className="tool-name">Grid</span>
       </button>
 
       {shapeDisabled && <span className="tool-hint">Select a layer to draw shapes</span>}
