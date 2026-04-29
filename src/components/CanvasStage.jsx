@@ -306,6 +306,82 @@ export default function CanvasStage() {
     ro.observe(container)
     window.addEventListener('resize', resizeAll)
 
+    // ---- Annotation rendering (Step 12, Spec §12) -------------------------
+    // Renders one annotation. Coords are normalized (0..1) and scaled to
+    // canvas px here. Step 12 paints structural geometry only — text/value
+    // bodies render as a visible "?" placeholder until Step 13 adds the
+    // editing panel that fills `textEN` / `textES` / `value`.
+    const ANNO_ACCENT = '#f5a623' // amber — distinct from layer colors
+    const drawAnnotationOnContext = (ctx, anno, cw, ch) => {
+      ctx.save()
+      ctx.strokeStyle = ANNO_ACCENT
+      ctx.fillStyle = ANNO_ACCENT
+      ctx.lineWidth = 1.5
+      ctx.font = 'bold 11px var(--rm-sans, sans-serif)'
+
+      if (anno.type === 'note') {
+        const x = anno.at.x * cw
+        const y = anno.at.y * ch
+        // Pin: filled circle + center dot in white
+        ctx.beginPath()
+        ctx.arc(x, y, 7, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.fillStyle = '#000'
+        ctx.beginPath()
+        ctx.arc(x, y, 2, 0, Math.PI * 2)
+        ctx.fill()
+        // Body indicator: "?" placeholder until Step 13 adds the text panel
+        const label = anno.textEN ? anno.textEN.slice(0, 24) : '?'
+        ctx.fillStyle = ANNO_ACCENT
+        ctx.fillText(label, x + 10, y + 4)
+      } else if (anno.type === 'callout') {
+        const tipX  = anno.tip.x * cw,  tipY  = anno.tip.y * ch
+        const tailX = anno.tail.x * cw, tailY = anno.tail.y * ch
+        // Tip: small filled diamond (caller end)
+        ctx.beginPath()
+        ctx.moveTo(tipX, tipY - 5); ctx.lineTo(tipX + 5, tipY)
+        ctx.lineTo(tipX, tipY + 5); ctx.lineTo(tipX - 5, tipY)
+        ctx.closePath()
+        ctx.fill()
+        // Lead line tip → tail
+        ctx.beginPath()
+        ctx.moveTo(tipX, tipY)
+        ctx.lineTo(tailX, tailY)
+        ctx.stroke()
+        // Tail: hollow circle marker around the label anchor
+        ctx.beginPath()
+        ctx.arc(tailX, tailY, 6, 0, Math.PI * 2)
+        ctx.stroke()
+        const label = anno.textEN ? anno.textEN.slice(0, 24) : '?'
+        ctx.fillText(label, tailX + 10, tailY + 4)
+      } else if (anno.type === 'dimline') {
+        const ax = anno.a.x * cw, ay = anno.a.y * ch
+        const bx = anno.b.x * cw, by = anno.b.y * ch
+        const dx = bx - ax, dy = by - ay
+        const len = Math.hypot(dx, dy) || 1
+        const ux = dx / len, uy = dy / len
+        const nx = -uy, ny = ux // perpendicular unit vector
+        const tickLen = 6
+        // Main line
+        ctx.beginPath()
+        ctx.moveTo(ax, ay)
+        ctx.lineTo(bx, by)
+        ctx.stroke()
+        // Extension ticks at each endpoint perpendicular to the line
+        ctx.beginPath()
+        ctx.moveTo(ax + nx * tickLen, ay + ny * tickLen)
+        ctx.lineTo(ax - nx * tickLen, ay - ny * tickLen)
+        ctx.moveTo(bx + nx * tickLen, by + ny * tickLen)
+        ctx.lineTo(bx - nx * tickLen, by - ny * tickLen)
+        ctx.stroke()
+        // Label at midpoint (above the line in the +n direction)
+        const mx = (ax + bx) / 2, my = (ay + by) / 2
+        const label = anno.value ? String(anno.value).slice(0, 16) : '?'
+        ctx.fillText(label, mx + nx * (tickLen + 2), my + ny * (tickLen + 2))
+      }
+      ctx.restore()
+    }
+
     // ---- Shape rendering (Spec §7 static draw step 5) ----------------------
     const drawShapeOnContext = (ctx, shape, cw, ch, layer) => {
       const color = layer?.color || '#3b82f6'
@@ -457,6 +533,19 @@ export default function CanvasStage() {
         }
       }
 
+      // Step 12 — annotations from the active sequence (Spec §12). Render
+      // regardless of mode whenever a sequence is active: operator should
+      // see placed annotations in DRAW / EDIT (full-data view) and in
+      // SEQUENCE (crew preview). Switching the active sequence hides the
+      // others — annotations lock to whichever sequence was active at
+      // create-time.
+      const activeSeq = storeState.activeSeqId
+        ? storeState.sequences.find((s) => s.id === storeState.activeSeqId)
+        : null
+      if (activeSeq && Array.isArray(activeSeq.annotations)) {
+        for (const a of activeSeq.annotations) drawAnnotationOnContext(ctxStatic, a, cw, ch)
+      }
+
       // Spec §9 — selected shape outline (white, +1 stroke weight)
       const sel = storeState.selected
       if (sel) {
@@ -560,6 +649,31 @@ export default function CanvasStage() {
             ctxDynamic.moveTo(draft.startX - CLINE_SENT * cosA, draft.startY - CLINE_SENT * sinA)
             ctxDynamic.lineTo(draft.startX + CLINE_SENT * cosA, draft.startY + CLINE_SENT * sinA)
           }
+          ctxDynamic.stroke()
+        } else if (draft.type === 'callout' && draft.tip) {
+          // Step 12 — rubber-band lead line tip → cursor for callout
+          ctxDynamic.strokeStyle = '#f5a623'
+          ctxDynamic.lineWidth = 1.5
+          ctxDynamic.beginPath()
+          ctxDynamic.moveTo(draft.tip.x, draft.tip.y)
+          ctxDynamic.lineTo(state.cursorX, state.cursorY)
+          ctxDynamic.stroke()
+          // Tip diamond
+          ctxDynamic.beginPath()
+          ctxDynamic.moveTo(draft.tip.x, draft.tip.y - 5)
+          ctxDynamic.lineTo(draft.tip.x + 5, draft.tip.y)
+          ctxDynamic.lineTo(draft.tip.x, draft.tip.y + 5)
+          ctxDynamic.lineTo(draft.tip.x - 5, draft.tip.y)
+          ctxDynamic.closePath()
+          ctxDynamic.fillStyle = '#f5a623'
+          ctxDynamic.fill()
+        } else if (draft.type === 'dimline' && draft.a) {
+          // Step 12 — rubber-band measurement line a → cursor
+          ctxDynamic.strokeStyle = '#f5a623'
+          ctxDynamic.lineWidth = 1.5
+          ctxDynamic.beginPath()
+          ctxDynamic.moveTo(draft.a.x, draft.a.y)
+          ctxDynamic.lineTo(state.cursorX, state.cursorY)
           ctxDynamic.stroke()
         }
         ctxDynamic.setLineDash([])
@@ -706,6 +820,47 @@ export default function CanvasStage() {
       if (shape) useAppStore.getState().addShape(activeLayerId, shape)
       draft = null
       isDragging = false
+    }
+
+    // ---- Annotation commit (Step 12, Spec §12). Annotations live under
+    // sequence.annotations[] and lock to whichever sequence was active at
+    // create-time. SEQUENCE mode + active sequence are required at the
+    // dispatch site below; this helper trusts those gates.
+    const commitAnnotationDraft = () => {
+      if (!draft || (draft.type !== 'callout' && draft.type !== 'dimline' && draft.type !== 'note')) return
+      const cw = container.clientWidth
+      const ch = container.clientHeight
+      const seqId = useAppStore.getState().activeSeqId
+      if (!seqId) {
+        draft = null
+        return
+      }
+      let anno = null
+      if (draft.type === 'callout') {
+        anno = {
+          type: 'callout',
+          tip:  { x: draft.tip.x / cw,  y: draft.tip.y / ch },
+          tail: { x: draft.tail.x / cw, y: draft.tail.y / ch },
+          textEN: '',
+          textES: '',
+        }
+      } else if (draft.type === 'dimline') {
+        anno = {
+          type: 'dimline',
+          a: { x: draft.a.x / cw, y: draft.a.y / ch },
+          b: { x: draft.b.x / cw, y: draft.b.y / ch },
+          value: '',
+        }
+      } else if (draft.type === 'note') {
+        anno = {
+          type: 'note',
+          at: { x: draft.at.x / cw, y: draft.at.y / ch },
+          textEN: '',
+          textES: '',
+        }
+      }
+      if (anno) useAppStore.getState().addAnnotation(seqId, anno)
+      draft = null
     }
 
     // ---- Construction-line commit (no active layer required, lives in
@@ -871,13 +1026,20 @@ export default function CanvasStage() {
         return
       }
 
-      // ---- DRAW mode (existing tool dispatch) ----
+      // ---- DRAW / SEQUENCE mode tool dispatch ----
       const t = store.tool
       const activeLayerId = store.activeLayerId
       if (!t) return
+      // Step 12 — annotation tools (callout / dimline / note) require
+      // SEQUENCE mode AND an active sequence. They commit into
+      // `sequence.annotations[]` on the active sequence.
+      const ANNO_TOOLS = new Set(['callout', 'dimline', 'note'])
+      const isAnnoTool = ANNO_TOOLS.has(t)
+      if (isAnnoTool && (store.mode !== 'SEQUENCE' || !store.activeSeqId)) return
       // Shape tools commit into the active layer; cline lives in its own
-      // array and doesn't need one (Spec §6.6).
-      if (t !== 'cline' && !activeLayerId) return
+      // array and doesn't need one (Spec §6.6); annotation tools live
+      // under the active sequence and don't need an active layer.
+      if (!isAnnoTool && t !== 'cline' && !activeLayerId) return
       // Spec §8 — committing a point uses the active snap target if any.
       // Snap is the cleanest precision boundary: shape commit, cline anchor,
       // poly point placement all flow through the same coords.
@@ -920,6 +1082,23 @@ export default function CanvasStage() {
       } else if (t === 'cline') {
         draft = { type: 'cline', startX: x, startY: y, x, y }
         isDragging = true
+      } else if (t === 'callout') {
+        if (!draft) {
+          draft = { type: 'callout', tip: { x, y } }
+        } else {
+          draft.tail = { x, y }
+          commitAnnotationDraft()
+        }
+      } else if (t === 'dimline') {
+        if (!draft) {
+          draft = { type: 'dimline', a: { x, y } }
+        } else {
+          draft.b = { x, y }
+          commitAnnotationDraft()
+        }
+      } else if (t === 'note') {
+        draft = { type: 'note', at: { x, y } }
+        commitAnnotationDraft()
       }
       dynamicDirty = true
     }
@@ -1084,11 +1263,25 @@ export default function CanvasStage() {
       }
       // Mode change repaints (handles only show in EDIT, SEQUENCE-mode
       // changes the layer filter) and closes any open context menu
-      // (left-over UI from a prior mode is confusing).
+      // (left-over UI from a prior mode is confusing). Step 12 — leaving
+      // SEQUENCE mode while an annotation tool is selected clears the
+      // tool + any in-progress annotation draft so the toolbar doesn't
+      // strand the operator with a tool that can't commit.
       if (state.mode !== prev.mode) {
         staticDirty = true
         dynamicDirty = true
         setCtxMenu(null)
+        if (prev.mode === 'SEQUENCE' && state.mode !== 'SEQUENCE') {
+          if (draft && (draft.type === 'callout' || draft.type === 'dimline' || draft.type === 'note')) {
+            draft = null
+          }
+          const t = state.tool
+          if (t === 'callout' || t === 'dimline' || t === 'note') {
+            // Defer the setTool null so we don't mutate inside a subscriber
+            // callback (would re-enter the subscribe pipeline).
+            queueMicrotask(() => useAppStore.getState().setTool(null))
+          }
+        }
       }
       // Step 11 — sequence-array change OR active sequence change updates
       // the SEQUENCE-mode layer filter so the canvas reflects the new

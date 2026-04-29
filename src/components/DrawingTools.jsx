@@ -28,10 +28,25 @@ const CLINE_TOOL = {
   label: 'Construction line — drag to place horizontal / vertical / angled reference line',
 }
 
+// Step 12 — annotation tools per Spec §12. Active only in SEQUENCE mode
+// with an active sequence; annotations are stored under
+// `sequence.annotations` and lock to the active sequence at create-time.
+//   callout — 2-click (tip + tail) -> { type, tip:{x,y}, tail:{x,y}, textEN, textES }
+//   dimline — 2-click (a + b)        -> { type, a:{x,y}, b:{x,y}, value }
+//   note    — 1-click                -> { type, at:{x,y}, textEN, textES }
+const ANNOTATION_TOOLS = [
+  { id: 'callout', icon: '➥', name: 'Callout', label: 'Callout — click tip, then click tail. Adds a labelled marker for the active sequence.' },
+  { id: 'dimline', icon: '⤢', name: 'Dim',     label: 'Dimension line — click two endpoints to place a measurement line for the active sequence.' },
+  { id: 'note',    icon: '✎', name: 'Note',    label: 'General note — click once to drop a sequence-scoped note pin.' },
+]
+
 export default function DrawingTools() {
   const tool = useAppStore((s) => s.tool)
   const setTool = useAppStore((s) => s.setTool)
   const activeLayerId = useAppStore((s) => s.activeLayerId)
+  // Step 12 — annotation tools require SEQUENCE mode + an active sequence.
+  const mode = useAppStore((s) => s.mode)
+  const activeSeqId = useAppStore((s) => s.activeSeqId)
   const clinesVisible = useAppStore((s) => s.clinesVisible)
   const toggleClinesVisibility = useAppStore((s) => s.toggleClinesVisibility)
   const snapEnabled = useAppStore((s) => s.snapEnabled)
@@ -47,8 +62,13 @@ export default function DrawingTools() {
 
   // Shape tools require an active layer (they commit shapes into it).
   // CLines do not — they live in their own array, not in any layer.
+  // Step 12 — annotation tools require SEQUENCE mode + an active sequence.
   const shapeDisabled = !activeLayerId
   const clineDisabled = false
+  const annoDisabled = mode !== 'SEQUENCE' || !activeSeqId
+  const annoHint = mode !== 'SEQUENCE'
+    ? 'Switch to SEQ mode to use annotation tools'
+    : 'Select a sequence to use annotation tools'
 
   const onSelect = (id, disabled) => {
     if (disabled) return
@@ -129,6 +149,31 @@ export default function DrawingTools() {
         <span className="tool-icon" aria-hidden="true">{CLINE_TOOL.icon}</span>
         <span className="tool-name">{CLINE_TOOL.name}</span>
       </button>
+
+      <span className="tool-divider" aria-hidden="true" />
+
+      {/*
+        Step 12 — annotation tools. Visible always (Rule 28 — discoverable
+        affordance) but disabled outside SEQUENCE mode + active sequence.
+        Hover title surfaces the gating reason on desktop; the inline hint
+        at the right of the toolbar surfaces the same reason on iPad/touch
+        where hover is unavailable.
+      */}
+      {ANNOTATION_TOOLS.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          className={tool === t.id ? 'tool-btn anno-btn active' : 'tool-btn anno-btn'}
+          onClick={() => onSelect(t.id, annoDisabled)}
+          disabled={annoDisabled}
+          title={annoDisabled ? annoHint : t.label}
+          aria-pressed={tool === t.id}
+          data-tool={t.id}
+        >
+          <span className="tool-icon" aria-hidden="true">{t.icon}</span>
+          <span className="tool-name">{t.name}</span>
+        </button>
+      ))}
 
       <button
         type="button"

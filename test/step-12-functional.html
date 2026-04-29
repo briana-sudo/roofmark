@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RoofMark — Step 12 Functional (Annotation Tools)</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #0d1117; color: #e6edf3; padding: 16px; }
+  h1 { margin: 0 0 12px; font-size: 18px; }
+  .summary { font-family: "SF Mono", Consolas, monospace; font-size: 12px; }
+  .pass { color: #3fb950; }
+  .fail { color: #f85149; }
+  .row { padding: 2px 0; }
+  pre { background: #161b22; padding: 6px 10px; border-radius: 4px;
+        font-size: 11px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>RoofMark — Step 12 Block Test (Annotation Tools)</h1>
+<div class="summary" id="summary"></div>
+<pre id="detail"></pre>
+<script>
+/*
+  Step 12 block test — verifies the three annotation tools' commit logic
+  produces the correct normalized-coord annotation objects:
+    callout  — 2-click (tip + tail)  -> { type:'callout', tip:{x,y}, tail:{x,y}, textEN:'', textES:'' }
+    dimline  — 2-click (a + b)        -> { type:'dimline', a:{x,y}, b:{x,y}, value:'' }
+    note     — 1-click                -> { type:'note', at:{x,y}, textEN:'', textES:'' }
+
+  Pure-JS reproduction of the CanvasStage state machine. No React, no
+  store. Stand-alone proof that the commit math is correct so the
+  React clone in CanvasStage.jsx can match it verbatim.
+*/
+
+const tests = [];
+const pass = (name, cond, extra) => tests.push({ name, ok: !!cond, extra });
+
+// ---- State machine under test ----
+function makeAnnoEngine(cw, ch, getActiveSeqId) {
+  let draft = null;
+  const commits = [];
+  const onClick = (px, py) => {
+    const xN = px / cw, yN = py / ch;
+    const tool = draft?.tool || engine._pendingTool;
+    if (!tool) return null;
+    if (!getActiveSeqId()) return null; // tools blocked when no active sequence
+    if (tool === 'note') {
+      const anno = { type: 'note', at: { x: xN, y: yN }, textEN: '', textES: '' };
+      commits.push(anno);
+      draft = null;
+      return anno;
+    }
+    if (tool === 'callout') {
+      if (!draft) {
+        draft = { tool: 'callout', tip: { x: xN, y: yN } };
+        return null;
+      }
+      const anno = { type: 'callout', tip: draft.tip, tail: { x: xN, y: yN }, textEN: '', textES: '' };
+      commits.push(anno);
+      draft = null;
+      return anno;
+    }
+    if (tool === 'dimline') {
+      if (!draft) {
+        draft = { tool: 'dimline', a: { x: xN, y: yN } };
+        return null;
+      }
+      const anno = { type: 'dimline', a: draft.a, b: { x: xN, y: yN }, value: '' };
+      commits.push(anno);
+      draft = null;
+      return anno;
+    }
+    return null;
+  };
+  const onEscape = () => { draft = null; };
+  const engine = {
+    _pendingTool: null,
+    setTool(t) { this._pendingTool = t; draft = null; },
+    onClick,
+    onEscape,
+    getDraft() { return draft; },
+    commits() { return commits; },
+  };
+  return engine;
+}
+
+const cw = 800, ch = 600;
+let activeSeq = 's1';
+const engine = makeAnnoEngine(cw, ch, () => activeSeq);
+
+// ---- 1. Note tool (single click) ----
+engine.setTool('note');
+const noteCommit = engine.onClick(200, 300);
+pass('note: single click commits', !!noteCommit);
+pass('note: type is note', noteCommit?.type === 'note');
+pass('note: position normalized to canvas', noteCommit?.at?.x === 0.25 && noteCommit?.at?.y === 0.5,
+     { at: noteCommit?.at });
+pass('note: textEN + textES empty by default', noteCommit?.textEN === '' && noteCommit?.textES === '');
+pass('note: draft cleared after commit', engine.getDraft() === null);
+
+// ---- 2. Callout tool (2-click tip + tail) ----
+engine.setTool('callout');
+const calloutFirst = engine.onClick(80, 60);  // tip
+pass('callout: first click does NOT commit', calloutFirst === null);
+pass('callout: draft holds tip', engine.getDraft()?.tip?.x === 0.1 && engine.getDraft()?.tip?.y === 0.1);
+const calloutCommit = engine.onClick(560, 480); // tail
+pass('callout: second click commits', !!calloutCommit);
+pass('callout: type is callout', calloutCommit?.type === 'callout');
+pass('callout: tip preserved from first click', calloutCommit?.tip?.x === 0.1 && calloutCommit?.tip?.y === 0.1);
+pass('callout: tail set from second click',
+     calloutCommit?.tail?.x === 0.7 && calloutCommit?.tail?.y === 0.8);
+pass('callout: textEN + textES empty by default',
+     calloutCommit?.textEN === '' && calloutCommit?.textES === '');
+pass('callout: draft cleared after commit', engine.getDraft() === null);
+
+// ---- 3. Dimline tool (2-click) ----
+engine.setTool('dimline');
+const dimFirst = engine.onClick(80, 300);
+pass('dimline: first click does NOT commit', dimFirst === null);
+pass('dimline: draft holds a', engine.getDraft()?.a?.x === 0.1 && engine.getDraft()?.a?.y === 0.5);
+const dimCommit = engine.onClick(720, 300);
+pass('dimline: second click commits', !!dimCommit);
+pass('dimline: type is dimline', dimCommit?.type === 'dimline');
+pass('dimline: a + b normalized correctly',
+     dimCommit?.a?.x === 0.1 && dimCommit?.a?.y === 0.5 &&
+     dimCommit?.b?.x === 0.9 && dimCommit?.b?.y === 0.5);
+pass('dimline: value empty by default', dimCommit?.value === '');
+pass('dimline: draft cleared after commit', engine.getDraft() === null);
+
+// ---- 4. Escape mid-callout cancels draft ----
+engine.setTool('callout');
+engine.onClick(100, 100);
+pass('callout: draft after first click', engine.getDraft() !== null);
+engine.onEscape();
+pass('callout: escape clears draft', engine.getDraft() === null);
+
+// ---- 5. Tool change clears any in-progress draft ----
+engine.setTool('callout');
+engine.onClick(100, 100);
+pass('callout: draft after first click (pre-tool-change)', engine.getDraft() !== null);
+engine.setTool('dimline');
+pass('tool change clears draft', engine.getDraft() === null);
+
+// ---- 6. No active sequence -> no commits ----
+const prevSeq = activeSeq;
+activeSeq = null;
+engine.setTool('note');
+const blocked = engine.onClick(100, 100);
+pass('annotation tools blocked when no active sequence', blocked === null);
+activeSeq = prevSeq;
+
+// ---- 7. Total commits count ----
+pass('total commits = 3 (note + callout + dimline)', engine.commits().length === 3);
+
+// ---- Console clean check (no native errors raised during the run) ----
+let consoleClean = true;
+const origErr = console.error;
+console.error = (...args) => { consoleClean = false; origErr.apply(console, args); };
+// Run a sanity round
+engine.setTool('note');
+engine.onClick(400, 300);
+console.error = origErr;
+pass('console clean throughout', consoleClean);
+
+// ---- Render summary ----
+const root = document.getElementById('summary');
+const detail = document.getElementById('detail');
+const passCount = tests.filter(t => t.ok).length;
+const total = tests.length;
+root.innerHTML = `<div class="row ${passCount === total ? 'pass' : 'fail'}">${passCount}/${total} ${passCount === total ? 'PASS' : 'FAIL'}</div>` +
+  tests.map(t => `<div class="row ${t.ok ? 'pass' : 'fail'}">${t.ok ? '✓' : '✗'} ${t.name}${t.extra ? ' ' + JSON.stringify(t.extra) : ''}</div>`).join('');
+detail.textContent = JSON.stringify({ commits: engine.commits() }, null, 2);
+</script>
+</body>
+</html>

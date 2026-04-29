@@ -306,6 +306,22 @@ body {
   color: var(--rm-fg);
 }
 
+/* Step 12 — annotation tool buttons (callout / dimline / note). Amber
+ * tint matches the canvas annotation render so toolbar + canvas use the
+ * same color language. */
+.tool-btn.anno-btn {
+  border-color: rgba(245, 166, 35, 0.5);
+}
+.tool-btn.anno-btn:hover:not(:disabled) {
+  background: rgba(245, 166, 35, 0.1);
+  border-color: var(--rm-amber);
+}
+.tool-btn.anno-btn.active {
+  background: rgba(245, 166, 35, 0.25);
+  border-color: var(--rm-amber);
+  color: #fff;
+}
+
 .tool-btn.photo-btn.active {
   background: rgba(31, 111, 235, 0.18);
   border-color: var(--rm-accent);
