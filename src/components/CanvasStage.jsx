@@ -2,24 +2,34 @@ import { useEffect, useRef } from 'react'
 import { useAppStore } from '../store/useAppStore'
 
 /**
- * CanvasStage — Step 3 of Kickoff Spec §7
+ * CanvasStage — Step 3 substrate + Step 5 drawing tools (Spec §6, §7).
  *
- * React clone of the proven block at /test/step-3-functional.html. Owns:
+ * Owns:
  *   - Two stacked canvases (cvStatic z-index 1, cvDynamic z-index 2)
- *   - DPR compensation on mount and resize
- *   - requestAnimationFrame loop with dirty flags (staticDirty, dynamicDirty)
- *   - Mouse / touch handler that mutates the Zustand store cursor state
- *     and flips dynamicDirty — never calls draw functions directly
- *   - Store subscription that flips staticDirty when committed-data slices
- *     (layers / clines) change
+ *   - DPR compensation on mount + ResizeObserver + window resize
+ *   - rAF loop with closure-scoped staticDirty / dynamicDirty flags
+ *   - Mouse + touch handlers that mutate Zustand cursor + flip dynamicDirty
+ *   - Tool-aware drawing state machine (poly / rect / tri / circ / line)
+ *   - Draft commit produces normalized-coord shape and calls store.addShape
+ *   - Static draw renders all layer shapes (5 types) bottom-to-top with
+ *     per-layer fill/stroke/opacity
+ *   - Dynamic draw renders rubber-band preview from draft state + cursor
+ *     crosshair on top
+ *   - Store subscription flips staticDirty on layers/clines reference change
+ *     and clears in-progress draft on tool change
  *
- * Step 5 onward will replace the static draw routine's placeholder with
- * the real shape rendering pipeline. Step 3 only proves the substrate.
+ * Constants match /test/step-5-functional.html block test verbatim so the
+ * standalone proof and the React clone behave identically.
  */
+const SNAP_TOLERANCE_DEFAULT = 12
+const MIN_RECT_SIZE = 3
+const MIN_CIRCLE_R = 3
+
 export default function CanvasStage() {
   const containerRef = useRef(null)
   const staticCanvasRef = useRef(null)
   const dynamicCanvasRef = useRef(null)
+  const tool = useAppStore((s) => s.tool)
 
   useEffect(() => {
     const container = containerRef.current
@@ -45,6 +55,11 @@ export default function CanvasStage() {
     let staticDirty = true
     let dynamicDirty = true
 
+    // Drawing-tool draft state (closure-scoped — not in store, not observable
+    // from React render). The rAF draw routine reads these directly.
+    let draft = null
+    let isDragging = false
+
     const resizeAll = () => {
       sizeCanvas(cvStatic)
       sizeCanvas(cvDynamic)
@@ -55,10 +70,49 @@ export default function CanvasStage() {
 
     const ro = new ResizeObserver(resizeAll)
     ro.observe(container)
-    // window resize covers DPR changes (cross-display drag)
     window.addEventListener('resize', resizeAll)
 
-    // ---- Draw routines (called from rAF loop only) --------------------------
+    // ---- Shape rendering (Spec §7 static draw step 5) ----------------------
+    const drawShapeOnContext = (ctx, shape, cw, ch, layer) => {
+      const color = layer?.color || '#3b82f6'
+      const fillOn = layer?.fillOn !== false
+      const strokeOn = layer?.strokeOn !== false
+      const fillOpacity = layer?.fillOpacity ?? 0.25
+      const strokeOpacity = layer?.strokeOpacity ?? 1.0
+      ctx.strokeStyle = color
+      ctx.fillStyle = color
+      ctx.lineWidth = layer?.strokeWeight || 2
+
+      if (shape.type === 'circ') {
+        ctx.beginPath()
+        ctx.arc(shape.cx * cw, shape.cy * ch, shape.r * cw, 0, Math.PI * 2)
+        if (fillOn) { ctx.globalAlpha = fillOpacity; ctx.fill() }
+        if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
+      } else if (shape.type === 'line') {
+        if (shape.pts && shape.pts.length === 2) {
+          ctx.beginPath()
+          ctx.moveTo(shape.pts[0].x * cw, shape.pts[0].y * ch)
+          ctx.lineTo(shape.pts[1].x * cw, shape.pts[1].y * ch)
+          if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
+        }
+      } else {
+        // poly / tri / rect — closed path
+        if (shape.pts && shape.pts.length >= 2) {
+          ctx.beginPath()
+          shape.pts.forEach((p, i) => {
+            const x = p.x * cw, y = p.y * ch
+            if (i === 0) ctx.moveTo(x, y)
+            else ctx.lineTo(x, y)
+          })
+          ctx.closePath()
+          if (fillOn) { ctx.globalAlpha = fillOpacity; ctx.fill() }
+          if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
+        }
+      }
+      ctx.globalAlpha = 1
+    }
+
+    // ---- Static draw -------------------------------------------------------
     const drawStatic = () => {
       const cw = container.clientWidth
       const ch = container.clientHeight
@@ -66,7 +120,7 @@ export default function CanvasStage() {
       ctxStatic.setTransform(1, 0, 0, 1, 0, 0)
       ctxStatic.clearRect(0, 0, cvStatic.width, cvStatic.height)
       ctxStatic.scale(dpr, dpr)
-      // Spec §7 static draw step 2: dark grid background (no photo loaded yet)
+      // Background grid (Spec §7 static draw step 2)
       ctxStatic.strokeStyle = '#1a1f2e'
       ctxStatic.lineWidth = 1
       for (let x = 0; x < cw; x += 40) {
@@ -81,38 +135,70 @@ export default function CanvasStage() {
         ctxStatic.lineTo(cw, y + 0.5)
         ctxStatic.stroke()
       }
-      // Spec §7 static draw step 5: render shapes per visible layer order.
-      // Step 3 substrate placeholder — Step 5 will replace with real shapes.
+      // Layer shapes (bottom to top, skipping invisible layers)
       const layers = useAppStore.getState().layers
       for (const layer of layers) {
         if (!layer.visible) continue
-        ctxStatic.strokeStyle = layer.color || '#3b82f6'
-        ctxStatic.lineWidth = layer.strokeWeight || 2
-        ctxStatic.globalAlpha = layer.strokeOpacity ?? 1.0
         for (const shape of layer.shapes || []) {
-          if (shape.type === 'rect' && shape.pts && shape.pts.length === 4) {
-            // Shapes use normalized 0.0–1.0 coords (Spec §20). Map to canvas.
-            const xs = shape.pts.map((p) => p.x * cw)
-            const ys = shape.pts.map((p) => p.y * ch)
-            ctxStatic.beginPath()
-            ctxStatic.moveTo(xs[0], ys[0])
-            for (let i = 1; i < xs.length; i++) ctxStatic.lineTo(xs[i], ys[i])
-            ctxStatic.closePath()
-            ctxStatic.stroke()
-          }
+          drawShapeOnContext(ctxStatic, shape, cw, ch, layer)
         }
       }
-      ctxStatic.globalAlpha = 1
       ctxStatic.restore()
     }
 
+    // ---- Dynamic draw (rubber-band + crosshair) ----------------------------
     const drawDynamic = () => {
       const state = useAppStore.getState()
       ctxDynamic.save()
       ctxDynamic.setTransform(1, 0, 0, 1, 0, 0)
       ctxDynamic.clearRect(0, 0, cvDynamic.width, cvDynamic.height)
       ctxDynamic.scale(dpr, dpr)
-      // Spec §7 dynamic draw step 5: crosshair at cursor
+
+      // Rubber-band preview from draft state
+      if (draft) {
+        const layer = state.layers.find((l) => l.id === state.activeLayerId)
+        const previewColor = layer?.color || '#3fb950'
+        ctxDynamic.setLineDash([6, 4])
+        ctxDynamic.strokeStyle = previewColor
+        ctxDynamic.fillStyle = previewColor
+        ctxDynamic.lineWidth = 2
+
+        if (draft.type === 'poly' || draft.type === 'tri') {
+          const pts = draft.pts
+          if (pts.length > 0) {
+            ctxDynamic.beginPath()
+            ctxDynamic.moveTo(pts[0].x, pts[0].y)
+            for (let i = 1; i < pts.length; i++) ctxDynamic.lineTo(pts[i].x, pts[i].y)
+            ctxDynamic.lineTo(state.cursorX, state.cursorY)
+            ctxDynamic.stroke()
+            ctxDynamic.setLineDash([])
+            for (const p of pts) {
+              ctxDynamic.beginPath()
+              ctxDynamic.arc(p.x, p.y, 3, 0, Math.PI * 2)
+              ctxDynamic.fill()
+            }
+          }
+        } else if (draft.type === 'rect' && isDragging) {
+          ctxDynamic.strokeRect(
+            draft.startX,
+            draft.startY,
+            draft.x - draft.startX,
+            draft.y - draft.startY
+          )
+        } else if (draft.type === 'circ' && isDragging) {
+          ctxDynamic.beginPath()
+          ctxDynamic.arc(draft.cx, draft.cy, draft.r, 0, Math.PI * 2)
+          ctxDynamic.stroke()
+        } else if (draft.type === 'line' && draft.pts.length === 1) {
+          ctxDynamic.beginPath()
+          ctxDynamic.moveTo(draft.pts[0].x, draft.pts[0].y)
+          ctxDynamic.lineTo(state.cursorX, state.cursorY)
+          ctxDynamic.stroke()
+        }
+        ctxDynamic.setLineDash([])
+      }
+
+      // Cursor crosshair (top-most)
       ctxDynamic.strokeStyle = '#00ffcc'
       ctxDynamic.lineWidth = 1
       const x = state.cursorX
@@ -126,7 +212,7 @@ export default function CanvasStage() {
       ctxDynamic.restore()
     }
 
-    // ---- rAF loop -----------------------------------------------------------
+    // ---- rAF loop ----------------------------------------------------------
     let rafHandle = null
     let cancelled = false
     const tick = () => {
@@ -143,28 +229,181 @@ export default function CanvasStage() {
     }
     rafHandle = requestAnimationFrame(tick)
 
-    // ---- Pointer handlers (state + flag only — no direct draw calls) -------
-    const onPointerMove = (clientX, clientY) => {
+    // ---- Draft commit (writes normalized 0–1 shape to active layer) -------
+    const commitDraft = () => {
+      if (!draft) return
+      const cw = container.clientWidth
+      const ch = container.clientHeight
+      const activeLayerId = useAppStore.getState().activeLayerId
+      if (!activeLayerId) {
+        draft = null
+        isDragging = false
+        return
+      }
+      let shape = null
+      if (draft.type === 'poly' || draft.type === 'tri' || draft.type === 'line') {
+        shape = {
+          type: draft.type,
+          pts: draft.pts.map((p) => ({ x: p.x / cw, y: p.y / ch })),
+        }
+      } else if (draft.type === 'rect') {
+        const x1 = Math.min(draft.startX, draft.x) / cw
+        const y1 = Math.min(draft.startY, draft.y) / ch
+        const x2 = Math.max(draft.startX, draft.x) / cw
+        const y2 = Math.max(draft.startY, draft.y) / ch
+        shape = {
+          type: 'rect',
+          pts: [
+            { x: x1, y: y1 }, // TL
+            { x: x2, y: y1 }, // TR
+            { x: x2, y: y2 }, // BR
+            { x: x1, y: y2 }, // BL
+          ],
+        }
+      } else if (draft.type === 'circ') {
+        // Spec §20 — coords normalized. Single scalar r is normalized to
+        // canvas width; render multiplies r by current cw to scale back.
+        shape = {
+          type: 'circ',
+          cx: draft.cx / cw,
+          cy: draft.cy / ch,
+          r: draft.r / cw,
+        }
+      }
+      if (shape) useAppStore.getState().addShape(activeLayerId, shape)
+      draft = null
+      isDragging = false
+    }
+
+    // ---- Pointer handlers (state + flag + draft mutation only) ------------
+    const pointFromClient = (clientX, clientY) => {
       const rect = cvDynamic.getBoundingClientRect()
-      const x = Math.round(clientX - rect.left)
-      const y = Math.round(clientY - rect.top)
+      return {
+        x: Math.round(clientX - rect.left),
+        y: Math.round(clientY - rect.top),
+      }
+    }
+
+    const onMouseMove = (e) => {
+      const { x, y } = pointFromClient(e.clientX, e.clientY)
       useAppStore.getState().setCursor(x, y)
+      if (draft) {
+        if (draft.type === 'rect' && isDragging) { draft.x = x; draft.y = y }
+        else if (draft.type === 'circ' && isDragging) {
+          draft.r = Math.hypot(x - draft.cx, y - draft.cy)
+        }
+      }
       dynamicDirty = true
     }
-    const onMouseMove = (e) => onPointerMove(e.clientX, e.clientY)
+
+    const onMouseDown = (e) => {
+      const t = useAppStore.getState().tool
+      const activeLayerId = useAppStore.getState().activeLayerId
+      if (!t || !activeLayerId) return
+      const { x, y } = pointFromClient(e.clientX, e.clientY)
+      const snap = useAppStore.getState().snapTolerance || SNAP_TOLERANCE_DEFAULT
+
+      if (t === 'poly') {
+        if (!draft) {
+          draft = { type: 'poly', pts: [{ x, y }] }
+        } else {
+          const first = draft.pts[0]
+          if (draft.pts.length >= 3 && Math.hypot(x - first.x, y - first.y) < snap) {
+            commitDraft()
+          } else {
+            draft.pts.push({ x, y })
+          }
+        }
+      } else if (t === 'rect') {
+        draft = { type: 'rect', startX: x, startY: y, x, y }
+        isDragging = true
+      } else if (t === 'tri') {
+        if (!draft) {
+          draft = { type: 'tri', pts: [{ x, y }] }
+        } else {
+          draft.pts.push({ x, y })
+          if (draft.pts.length >= 3) commitDraft()
+        }
+      } else if (t === 'circ') {
+        draft = { type: 'circ', cx: x, cy: y, r: 0 }
+        isDragging = true
+      } else if (t === 'line') {
+        if (!draft) {
+          draft = { type: 'line', pts: [{ x, y }] }
+        } else {
+          draft.pts.push({ x, y })
+          commitDraft()
+        }
+      }
+      dynamicDirty = true
+    }
+
+    const onMouseUp = () => {
+      if (!draft) return
+      if (draft.type === 'rect') {
+        const w = Math.abs(draft.x - draft.startX)
+        const h = Math.abs(draft.y - draft.startY)
+        if (w >= MIN_RECT_SIZE && h >= MIN_RECT_SIZE) commitDraft()
+        else { draft = null; isDragging = false }
+        dynamicDirty = true
+      } else if (draft.type === 'circ') {
+        if (draft.r >= MIN_CIRCLE_R) commitDraft()
+        else { draft = null; isDragging = false }
+        dynamicDirty = true
+      }
+    }
+
+    const onDblClick = () => {
+      if (draft?.type === 'poly' && draft.pts.length >= 3) {
+        commitDraft()
+        dynamicDirty = true
+      }
+    }
+
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape' && draft) {
+        draft = null
+        isDragging = false
+        dynamicDirty = true
+      }
+    }
+
+    const onTouchStart = (e) => {
+      if (e.touches && e.touches.length) {
+        useAppStore.getState().setPointerType('touch')
+        const t = e.touches[0]
+        onMouseDown({ clientX: t.clientX, clientY: t.clientY })
+      }
+    }
     const onTouchMove = (e) => {
       if (e.touches && e.touches.length) {
         useAppStore.getState().setPointerType('touch')
-        onPointerMove(e.touches[0].clientX, e.touches[0].clientY)
+        const t = e.touches[0]
+        onMouseMove({ clientX: t.clientX, clientY: t.clientY })
       }
     }
-    cvDynamic.addEventListener('mousemove', onMouseMove)
-    cvDynamic.addEventListener('touchmove', onTouchMove, { passive: true })
+    const onTouchEnd = () => onMouseUp()
 
-    // ---- Store subscription: flip staticDirty when committed data changes ---
+    cvDynamic.addEventListener('mousedown', onMouseDown)
+    cvDynamic.addEventListener('mousemove', onMouseMove)
+    cvDynamic.addEventListener('mouseup', onMouseUp)
+    cvDynamic.addEventListener('dblclick', onDblClick)
+    cvDynamic.addEventListener('touchstart', onTouchStart, { passive: true })
+    cvDynamic.addEventListener('touchmove', onTouchMove, { passive: true })
+    cvDynamic.addEventListener('touchend', onTouchEnd, { passive: true })
+    document.addEventListener('keydown', onKeyDown)
+
+    // ---- Store subscription -----------------------------------------------
     const unsub = useAppStore.subscribe((state, prev) => {
       if (state.layers !== prev.layers || state.clines !== prev.clines) {
         staticDirty = true
+      }
+      // Tool change clears any in-progress draft so the user doesn't end up
+      // half-drawing one shape while another tool is selected.
+      if (state.tool !== prev.tool && draft) {
+        draft = null
+        isDragging = false
+        dynamicDirty = true
       }
     })
 
@@ -173,14 +412,27 @@ export default function CanvasStage() {
       if (rafHandle) cancelAnimationFrame(rafHandle)
       ro.disconnect()
       window.removeEventListener('resize', resizeAll)
+      cvDynamic.removeEventListener('mousedown', onMouseDown)
       cvDynamic.removeEventListener('mousemove', onMouseMove)
+      cvDynamic.removeEventListener('mouseup', onMouseUp)
+      cvDynamic.removeEventListener('dblclick', onDblClick)
+      cvDynamic.removeEventListener('touchstart', onTouchStart)
       cvDynamic.removeEventListener('touchmove', onTouchMove)
+      cvDynamic.removeEventListener('touchend', onTouchEnd)
+      document.removeEventListener('keydown', onKeyDown)
       unsub()
     }
   }, [])
 
+  // The `tool-active` class on the wrapper is the cue for the cursor change
+  // (CSS .canvas-stage.tool-active .cv-dynamic { cursor: crosshair }).
+  // Re-renders on tool change but the useEffect runs once — closure state
+  // stays intact.
   return (
-    <div className="canvas-stage" ref={containerRef}>
+    <div
+      className={tool ? 'canvas-stage tool-active' : 'canvas-stage'}
+      ref={containerRef}
+    >
       <canvas id="cvStatic" ref={staticCanvasRef} className="cv-static" aria-hidden="true" />
       <canvas id="cvDynamic" ref={dynamicCanvasRef} className="cv-dynamic" aria-hidden="true" />
     </div>

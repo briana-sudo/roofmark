@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>RoofMark Step 5.a — Drawing Tools Block Test</title>
+<!--
+========================================================================
+RoofMark Step 5.a — Drawing Tools Block Functional Test
+========================================================================
+
+Block under test:
+  Five drawing tools per Kickoff Spec §6:
+    poly  — unlimited points; click to place; dbl-click OR snap-close
+            (3+ points + cursor within snapTolerance of first point)
+            commits a polygon shape.
+    rect  — mousedown + drag + mouseup. Stored as 4-point polygon
+            (TL, TR, BR, BL). Min size 3×3 px (smaller is discarded).
+    tri   — three clicks; auto-commits on third click as 3-point polygon.
+    circ  — mousedown sets center; drag sets radius; mouseup commits as
+            { cx, cy, r }. Min radius 3 px.
+    line  — two clicks; auto-commits as 2-point array; no fill.
+  All committed shapes use normalized 0.0–1.0 coordinates relative to
+  canvas size (Spec §20 architecture requirement).
+  Escape cancels any in-progress draft.
+
+Why standalone:
+  Rule 27 — exercise the block in isolation. Same five-tool state
+  machine that ships in src/components/CanvasStage.jsx for Step 5.b,
+  here recreated with no React/Konva/Zustand. Auto-test dispatches
+  synthetic MouseEvents through each tool's interaction sequence and
+  verifies the commit-arr accumulates the expected shape objects.
+
+Runtime targets (Rule 27):
+  Desktop Chrome 1200px+ (auto-test on load) AND **real iPhone Safari**
+  (each tool reachable via touch — the tool buttons + touch-on-canvas
+  sequence). Brian taps through manually and confirms shapes commit
+  in real touch + Safari rAF environment.
+
+Pass criteria (auto-test):
+  P1. POLY  — 4 click points + dblclick commits a poly with 4 pts,
+              all normalized 0.0–1.0; in-progress preview render
+              picks up the rubber-band line to cursor.
+  P2. POLY-SNAP-CLOSE — 3 click points + click near first point (within
+              snapTolerance) commits a poly with 3 pts.
+  P3. RECT  — mousedown + mousemove + mouseup with > 3px each side
+              commits a rect with 4 normalized pts (TL, TR, BR, BL).
+  P4. RECT-MIN — mousedown + mousemove (1px shift) + mouseup does NOT
+              commit (below min 3×3 px).
+  P5. TRI   — three click points commit a tri with 3 normalized pts;
+              no dblclick required.
+  P6. CIRC  — mousedown + mousemove (drag radius 50px) + mouseup
+              commits a circle with normalized cx/cy/r.
+  P7. CIRC-MIN — mousedown + mousemove (2px radius) + mouseup does NOT
+              commit (below min radius 3 px).
+  P8. LINE  — two click points commit a line with 2 normalized pts.
+  P9. ESCAPE — pressing Escape during an in-progress draft (poly with
+              2 points placed) clears the draft without committing.
+  P10. CONSOLE — zero console.error / console.warn during the suite.
+
+Failure modes detected:
+  F1. Min-size guard missing (tiny rects/circles commit anyway).
+  F2. Coordinates not normalized (raw pixel values commit, breaking
+      future calibration features).
+  F3. Snap-close not honored (user-finishes-via-near-first-point fails
+      to commit, leaves them stuck).
+  F4. Escape doesn't cancel a draft (user can't back out).
+
+Permanent regression coverage:
+  This file lives at roofmark/test/step-5-functional.html. Re-run on
+  every modification to the drawing-tool state machine (CanvasStage's
+  per-tool handlers, the commitDraft logic, normalization).
+======================================================================== -->
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", sans-serif; background: #1a1d23; color: #e6edf3; }
+  .test-panel { padding: 14px 18px; border-bottom: 2px solid #444; background: #11141a; }
+  .test-panel h1 { margin: 0 0 6px; font-size: 14px; }
+  .test-panel .meta { font-size: 11px; color: #8b949e; line-height: 1.5; }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+  .btn { padding: 5px 12px; background: #1f6feb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .results { margin-top: 12px; font-family: "SF Mono", Consolas, monospace; font-size: 11px; max-height: 240px; overflow: auto; }
+  .results .pass { color: #3fb950; }
+  .results .fail { color: #f85149; }
+  .results .row { padding: 1px 0; }
+  .summary { margin-top: 10px; padding: 8px 12px; border-radius: 4px; font-weight: 700; font-family: "SF Mono", Consolas, monospace; font-size: 13px; }
+  .summary.pass { background: #1f3320; color: #3fb950; }
+  .summary.fail { background: #321e1e; color: #f85149; }
+  .summary.pending { background: #2d2a1e; color: #d29922; }
+
+  .toolbar { padding: 8px 12px; background: #1f242c; border-bottom: 1px solid #30363d; display: flex; gap: 4px; }
+  .tool-btn {
+    padding: 5px 10px; background: transparent; color: #e6edf3; border: 1px solid #30363d;
+    border-radius: 3px; cursor: pointer; font-size: 12px; font-family: inherit;
+  }
+  .tool-btn:hover { background: #161b22; }
+  .tool-btn.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .stage-wrap { width: 100%; height: 480px; background: #0d1117; position: relative; border-bottom: 1px solid #30363d; }
+  .stage-container { position: absolute; inset: 0; }
+  #cvStatic, #cvDynamic { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #cvStatic { z-index: 1; }
+  #cvDynamic { z-index: 2; cursor: crosshair; touch-action: none; }
+</style>
+</head>
+<body>
+
+<section class="test-panel">
+  <h1>RoofMark Step 5.a — Drawing Tools Block Functional Test</h1>
+  <div class="meta">
+    Block: 5-tool state machine + commit logic, recreated standalone per Spec §6.<br>
+    Auto-runs on load. Open in <strong>desktop Chrome</strong> for the harness pass; <strong>real iPhone Safari</strong> for the iOS-runtime confirmation. No server needed (file:// works).
+  </div>
+  <div class="actions">
+    <button class="btn" id="btnRun">Re-run auto-test</button>
+    <button class="btn" id="btnReset">Reset canvas</button>
+    <span class="meta">Drafted shapes appear in static canvas after commit.</span>
+  </div>
+  <div class="summary pending" id="summary">Running...</div>
+  <div class="results" id="results"></div>
+</section>
+
+<div class="toolbar" id="toolbar">
+  <button class="tool-btn" data-tool="poly">▱ Polygon</button>
+  <button class="tool-btn" data-tool="rect">▭ Rectangle</button>
+  <button class="tool-btn" data-tool="tri">△ Triangle</button>
+  <button class="tool-btn" data-tool="circ">○ Circle</button>
+  <button class="tool-btn" data-tool="line">╱ Line</button>
+</div>
+
+<div class="stage-wrap" id="stage-wrap">
+  <div class="stage-container" id="stage-container">
+    <canvas id="cvStatic"></canvas>
+    <canvas id="cvDynamic"></canvas>
+  </div>
+</div>
+
+<script>
+(function () {
+  // ===== Substrate (mirrors Spec §7 + Step 3) ===============================
+  const container = document.getElementById('stage-container');
+  const cvStatic = document.getElementById('cvStatic');
+  const cvDynamic = document.getElementById('cvDynamic');
+  const ctxStatic = cvStatic.getContext('2d');
+  const ctxDynamic = cvDynamic.getContext('2d');
+
+  const SNAP_TOLERANCE = 12;
+  const MIN_RECT_SIZE = 3;
+  const MIN_CIRCLE_R = 3;
+
+  let DPR = 1;
+  function sizeCanvas(c) {
+    const cw = container.clientWidth, ch = container.clientHeight;
+    DPR = window.devicePixelRatio || 1;
+    c.width = Math.round(cw * DPR);
+    c.height = Math.round(ch * DPR);
+    c.style.width = cw + 'px';
+    c.style.height = ch + 'px';
+  }
+  sizeCanvas(cvStatic); sizeCanvas(cvDynamic);
+
+  // ===== State =============================================================
+  const state = {
+    tool: null,                // 'poly' | 'rect' | 'tri' | 'circ' | 'line' | null
+    cursorX: 0, cursorY: 0,
+    draft: null,               // in-progress shape; see commit/render below
+    isDragging: false,         // for rect/circ
+    commits: [],               // committed shapes (instead of store.addShape)
+    staticDirty: true,
+    dynamicDirty: true,
+  };
+
+  // ===== Tool selection ====================================================
+  function selectTool(toolId) {
+    state.tool = toolId;
+    state.draft = null;
+    state.isDragging = false;
+    state.dynamicDirty = true;
+    document.querySelectorAll('.tool-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.tool === toolId);
+    });
+  }
+  document.querySelectorAll('.tool-btn').forEach((btn) => {
+    btn.addEventListener('click', () => selectTool(btn.dataset.tool));
+  });
+
+  // ===== Mouse events on cvDynamic (state-only contract) ===================
+  function pointFromEvent(e) {
+    const rect = cvDynamic.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  cvDynamic.addEventListener('mousedown', (e) => {
+    const tool = state.tool;
+    if (!tool) return;
+    const { x, y } = pointFromEvent(e);
+
+    if (tool === 'poly') {
+      if (!state.draft) {
+        state.draft = { type: 'poly', pts: [{ x, y }] };
+      } else {
+        const first = state.draft.pts[0];
+        const dist = Math.hypot(x - first.x, y - first.y);
+        if (state.draft.pts.length >= 3 && dist < SNAP_TOLERANCE) {
+          commitDraft();
+        } else {
+          state.draft.pts.push({ x, y });
+        }
+      }
+    } else if (tool === 'rect') {
+      state.draft = { type: 'rect', startX: x, startY: y, x, y };
+      state.isDragging = true;
+    } else if (tool === 'tri') {
+      if (!state.draft) {
+        state.draft = { type: 'tri', pts: [{ x, y }] };
+      } else {
+        state.draft.pts.push({ x, y });
+        if (state.draft.pts.length >= 3) commitDraft();
+      }
+    } else if (tool === 'circ') {
+      state.draft = { type: 'circ', cx: x, cy: y, r: 0 };
+      state.isDragging = true;
+    } else if (tool === 'line') {
+      if (!state.draft) {
+        state.draft = { type: 'line', pts: [{ x, y }] };
+      } else {
+        state.draft.pts.push({ x, y });
+        commitDraft();
+      }
+    }
+    state.dynamicDirty = true;
+  });
+
+  cvDynamic.addEventListener('mousemove', (e) => {
+    const { x, y } = pointFromEvent(e);
+    state.cursorX = x; state.cursorY = y;
+    if (state.draft) {
+      if (state.draft.type === 'rect' && state.isDragging) {
+        state.draft.x = x; state.draft.y = y;
+      } else if (state.draft.type === 'circ' && state.isDragging) {
+        state.draft.r = Math.hypot(x - state.draft.cx, y - state.draft.cy);
+      }
+    }
+    state.dynamicDirty = true;
+  });
+
+  cvDynamic.addEventListener('mouseup', () => {
+    const draft = state.draft;
+    if (!draft) return;
+    if (draft.type === 'rect') {
+      const w = Math.abs(draft.x - draft.startX);
+      const h = Math.abs(draft.y - draft.startY);
+      if (w >= MIN_RECT_SIZE && h >= MIN_RECT_SIZE) commitDraft();
+      else state.draft = null;
+      state.isDragging = false;
+      state.dynamicDirty = true;
+    } else if (draft.type === 'circ') {
+      if (draft.r >= MIN_CIRCLE_R) commitDraft();
+      else state.draft = null;
+      state.isDragging = false;
+      state.dynamicDirty = true;
+    }
+    // poly / tri / line stay in draft until next click commits
+  });
+
+  cvDynamic.addEventListener('dblclick', () => {
+    if (state.draft?.type === 'poly' && state.draft.pts.length >= 3) {
+      commitDraft();
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && state.draft) {
+      state.draft = null;
+      state.isDragging = false;
+      state.dynamicDirty = true;
+    }
+  });
+
+  // ===== Commit (push to commits[] with normalized 0–1 coords) =============
+  function commitDraft() {
+    const draft = state.draft;
+    if (!draft) return;
+    const cw = container.clientWidth, ch = container.clientHeight;
+    let shape = null;
+
+    if (draft.type === 'poly' || draft.type === 'tri' || draft.type === 'line') {
+      shape = {
+        type: draft.type,
+        pts: draft.pts.map((p) => ({ x: p.x / cw, y: p.y / ch })),
+      };
+    } else if (draft.type === 'rect') {
+      const x1 = Math.min(draft.startX, draft.x) / cw;
+      const y1 = Math.min(draft.startY, draft.y) / ch;
+      const x2 = Math.max(draft.startX, draft.x) / cw;
+      const y2 = Math.max(draft.startY, draft.y) / ch;
+      shape = {
+        type: 'rect',
+        pts: [
+          { x: x1, y: y1 }, // TL
+          { x: x2, y: y1 }, // TR
+          { x: x2, y: y2 }, // BR
+          { x: x1, y: y2 }, // BL
+        ],
+      };
+    } else if (draft.type === 'circ') {
+      shape = {
+        type: 'circ',
+        cx: draft.cx / cw,
+        cy: draft.cy / ch,
+        r:  draft.r  / cw, // r normalized to canvas width (Spec §20 — single scalar)
+      };
+    }
+
+    state.commits.push(shape);
+    state.draft = null;
+    state.staticDirty = true;
+    state.dynamicDirty = true;
+  }
+
+  // ===== Rendering =========================================================
+  function drawStatic() {
+    const cw = container.clientWidth, ch = container.clientHeight;
+    ctxStatic.save();
+    ctxStatic.setTransform(1, 0, 0, 1, 0, 0);
+    ctxStatic.clearRect(0, 0, cvStatic.width, cvStatic.height);
+    ctxStatic.scale(DPR, DPR);
+
+    ctxStatic.strokeStyle = '#1a1f2e';
+    ctxStatic.lineWidth = 1;
+    for (let x = 0; x < cw; x += 40) {
+      ctxStatic.beginPath(); ctxStatic.moveTo(x + 0.5, 0); ctxStatic.lineTo(x + 0.5, ch); ctxStatic.stroke();
+    }
+    for (let y = 0; y < ch; y += 40) {
+      ctxStatic.beginPath(); ctxStatic.moveTo(0, y + 0.5); ctxStatic.lineTo(cw, y + 0.5); ctxStatic.stroke();
+    }
+
+    ctxStatic.strokeStyle = '#3b82f6';
+    ctxStatic.lineWidth = 2;
+    for (const sh of state.commits) {
+      if (sh.type === 'circ') {
+        ctxStatic.beginPath();
+        ctxStatic.arc(sh.cx * cw, sh.cy * ch, sh.r * cw, 0, Math.PI * 2);
+        ctxStatic.stroke();
+      } else if (sh.type === 'line') {
+        const a = sh.pts[0], b = sh.pts[1];
+        ctxStatic.beginPath();
+        ctxStatic.moveTo(a.x * cw, a.y * ch);
+        ctxStatic.lineTo(b.x * cw, b.y * ch);
+        ctxStatic.stroke();
+      } else {
+        ctxStatic.beginPath();
+        sh.pts.forEach((p, i) => {
+          const x = p.x * cw, y = p.y * ch;
+          if (i === 0) ctxStatic.moveTo(x, y); else ctxStatic.lineTo(x, y);
+        });
+        ctxStatic.closePath();
+        ctxStatic.stroke();
+      }
+    }
+    ctxStatic.restore();
+  }
+
+  function drawDynamic() {
+    ctxDynamic.save();
+    ctxDynamic.setTransform(1, 0, 0, 1, 0, 0);
+    ctxDynamic.clearRect(0, 0, cvDynamic.width, cvDynamic.height);
+    ctxDynamic.scale(DPR, DPR);
+
+    // Rubber-band preview
+    const draft = state.draft;
+    if (draft) {
+      ctxDynamic.setLineDash([6, 4]);
+      ctxDynamic.strokeStyle = '#3fb950';
+      ctxDynamic.fillStyle = '#3fb950';
+      ctxDynamic.lineWidth = 2;
+
+      if (draft.type === 'poly' || draft.type === 'tri') {
+        const pts = draft.pts;
+        if (pts.length > 0) {
+          ctxDynamic.beginPath();
+          ctxDynamic.moveTo(pts[0].x, pts[0].y);
+          for (let i = 1; i < pts.length; i++) ctxDynamic.lineTo(pts[i].x, pts[i].y);
+          ctxDynamic.lineTo(state.cursorX, state.cursorY);
+          ctxDynamic.stroke();
+          for (const p of pts) {
+            ctxDynamic.beginPath(); ctxDynamic.arc(p.x, p.y, 3, 0, Math.PI * 2); ctxDynamic.fill();
+          }
+        }
+      } else if (draft.type === 'rect' && state.isDragging) {
+        ctxDynamic.strokeRect(draft.startX, draft.startY, draft.x - draft.startX, draft.y - draft.startY);
+      } else if (draft.type === 'circ' && state.isDragging) {
+        ctxDynamic.beginPath(); ctxDynamic.arc(draft.cx, draft.cy, draft.r, 0, Math.PI * 2); ctxDynamic.stroke();
+      } else if (draft.type === 'line' && draft.pts.length === 1) {
+        ctxDynamic.beginPath();
+        ctxDynamic.moveTo(draft.pts[0].x, draft.pts[0].y);
+        ctxDynamic.lineTo(state.cursorX, state.cursorY);
+        ctxDynamic.stroke();
+      }
+      ctxDynamic.setLineDash([]);
+    }
+
+    // Crosshair at cursor
+    ctxDynamic.strokeStyle = '#00ffcc';
+    ctxDynamic.lineWidth = 1;
+    ctxDynamic.beginPath();
+    ctxDynamic.moveTo(state.cursorX - 8, state.cursorY + 0.5);
+    ctxDynamic.lineTo(state.cursorX + 8, state.cursorY + 0.5);
+    ctxDynamic.moveTo(state.cursorX + 0.5, state.cursorY - 8);
+    ctxDynamic.lineTo(state.cursorX + 0.5, state.cursorY + 8);
+    ctxDynamic.stroke();
+    ctxDynamic.restore();
+  }
+
+  function rafTick() {
+    if (state.staticDirty)  { drawStatic();  state.staticDirty  = false; }
+    if (state.dynamicDirty) { drawDynamic(); state.dynamicDirty = false; }
+    requestAnimationFrame(rafTick);
+  }
+  requestAnimationFrame(rafTick);
+
+  // Reset
+  document.getElementById('btnReset').addEventListener('click', () => {
+    state.commits = [];
+    state.draft = null;
+    state.staticDirty = true;
+    state.dynamicDirty = true;
+  });
+
+  // Expose for harness / external smoke
+  window.__step5 = { state, selectTool, commitDraft, container, cvDynamic };
+
+  // ===== Auto-test harness =================================================
+  const consoleIssues = [];
+  const origError = console.error;
+  const origWarn = console.warn;
+  console.error = (...a) => { consoleIssues.push(['error', a.map(String).join(' ')]); origError.apply(console, a); };
+  console.warn  = (...a) => { consoleIssues.push(['warn',  a.map(String).join(' ')]); origWarn.apply(console, a); };
+
+  function fireMouse(type, x, y) {
+    const rect = cvDynamic.getBoundingClientRect();
+    const evt = new MouseEvent(type, {
+      clientX: rect.left + x, clientY: rect.top + y, bubbles: true, cancelable: true, button: 0,
+    });
+    cvDynamic.dispatchEvent(evt);
+  }
+  function fireDblClick(x, y) {
+    const rect = cvDynamic.getBoundingClientRect();
+    const evt = new MouseEvent('dblclick', {
+      clientX: rect.left + x, clientY: rect.top + y, bubbles: true, cancelable: true, button: 0,
+    });
+    cvDynamic.dispatchEvent(evt);
+  }
+
+  function resetState() {
+    state.commits = [];
+    state.draft = null;
+    state.isDragging = false;
+    state.staticDirty = true;
+    state.dynamicDirty = true;
+  }
+
+  function isNorm(v) { return typeof v === 'number' && v >= 0 && v <= 1; }
+  function isNormPt(p) { return p && isNorm(p.x) && isNorm(p.y); }
+
+  async function runTest() {
+    const results = [];
+    const log = (name, pass, detail) => results.push({ name, pass, detail: detail ?? '' });
+    consoleIssues.length = 0;
+    resetState();
+
+    const cw = container.clientWidth, ch = container.clientHeight;
+
+    // ---- P1 POLY ----
+    selectTool('poly');
+    fireMouse('mousedown', 100, 100);
+    fireMouse('mousedown', 200, 100);
+    fireMouse('mousedown', 200, 200);
+    fireMouse('mousedown', 100, 200);
+    fireDblClick(100, 200);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P1.1 poly: 1 commit', state.commits.length === 1, 'count=' + state.commits.length);
+    log('P1.2 poly: type === poly', state.commits[0]?.type === 'poly');
+    log('P1.3 poly: 4 pts', state.commits[0]?.pts?.length === 4, 'len=' + state.commits[0]?.pts?.length);
+    log('P1.4 poly: all pts normalized 0..1', (state.commits[0]?.pts || []).every(isNormPt));
+    log('P1.5 poly: draft cleared after commit', state.draft === null);
+
+    // ---- P2 POLY-SNAP-CLOSE ----
+    resetState();
+    selectTool('poly');
+    fireMouse('mousedown', 100, 100); // first point
+    fireMouse('mousedown', 200, 100);
+    fireMouse('mousedown', 200, 200);
+    fireMouse('mousedown', 105, 102); // within snapTolerance(12) of first
+    await new Promise((r) => setTimeout(r, 30));
+    log('P2.1 poly snap-close: 1 commit (3 pts before close)', state.commits.length === 1);
+    log('P2.2 poly snap-close: 3 pts in commit', state.commits[0]?.pts?.length === 3);
+
+    // ---- P3 RECT ----
+    resetState();
+    selectTool('rect');
+    fireMouse('mousedown', 50, 50);
+    fireMouse('mousemove', 150, 120);
+    fireMouse('mouseup',   150, 120);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P3.1 rect: 1 commit', state.commits.length === 1);
+    log('P3.2 rect: type === rect', state.commits[0]?.type === 'rect');
+    log('P3.3 rect: 4 pts (TL/TR/BR/BL polygon)', state.commits[0]?.pts?.length === 4);
+    const rectPts = state.commits[0]?.pts || [];
+    log('P3.4 rect: all pts normalized', rectPts.every(isNormPt));
+    log('P3.5 rect: TL.x ≈ 50/cw, TR.x ≈ 150/cw',
+        Math.abs(rectPts[0]?.x - 50/cw) < 0.001 && Math.abs(rectPts[1]?.x - 150/cw) < 0.001);
+
+    // ---- P4 RECT-MIN ----
+    resetState();
+    selectTool('rect');
+    fireMouse('mousedown', 200, 200);
+    fireMouse('mousemove', 201, 201);
+    fireMouse('mouseup',   201, 201);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P4.1 rect-min: 1×1 px is discarded (no commit)', state.commits.length === 0);
+    log('P4.2 rect-min: draft cleared', state.draft === null);
+
+    // ---- P5 TRI ----
+    resetState();
+    selectTool('tri');
+    fireMouse('mousedown', 60, 60);
+    fireMouse('mousedown', 160, 60);
+    fireMouse('mousedown', 110, 160);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P5.1 tri: 1 commit on third click', state.commits.length === 1);
+    log('P5.2 tri: type === tri', state.commits[0]?.type === 'tri');
+    log('P5.3 tri: 3 pts', state.commits[0]?.pts?.length === 3);
+    log('P5.4 tri: all pts normalized', (state.commits[0]?.pts || []).every(isNormPt));
+
+    // ---- P6 CIRC ----
+    resetState();
+    selectTool('circ');
+    fireMouse('mousedown', 200, 200);
+    fireMouse('mousemove', 250, 200); // r = 50
+    fireMouse('mouseup',   250, 200);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P6.1 circ: 1 commit', state.commits.length === 1);
+    log('P6.2 circ: type === circ', state.commits[0]?.type === 'circ');
+    log('P6.3 circ: cx/cy normalized', isNorm(state.commits[0]?.cx) && isNorm(state.commits[0]?.cy));
+    log('P6.4 circ: r normalized (≈50/cw)',
+        isNorm(state.commits[0]?.r) && Math.abs(state.commits[0].r - 50/cw) < 0.001,
+        'r=' + state.commits[0]?.r + ' expected=' + 50/cw);
+
+    // ---- P7 CIRC-MIN ----
+    resetState();
+    selectTool('circ');
+    fireMouse('mousedown', 200, 200);
+    fireMouse('mousemove', 202, 200); // r = 2
+    fireMouse('mouseup',   202, 200);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P7.1 circ-min: r=2 is discarded (no commit)', state.commits.length === 0);
+    log('P7.2 circ-min: draft cleared', state.draft === null);
+
+    // ---- P8 LINE ----
+    resetState();
+    selectTool('line');
+    fireMouse('mousedown', 30, 30);
+    fireMouse('mousedown', 90, 90);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P8.1 line: 1 commit on second click', state.commits.length === 1);
+    log('P8.2 line: type === line', state.commits[0]?.type === 'line');
+    log('P8.3 line: 2 pts', state.commits[0]?.pts?.length === 2);
+    log('P8.4 line: pts normalized', (state.commits[0]?.pts || []).every(isNormPt));
+
+    // ---- P9 ESCAPE ----
+    resetState();
+    selectTool('poly');
+    fireMouse('mousedown', 50, 50);
+    fireMouse('mousedown', 100, 50);
+    log('P9-pre: draft is poly with 2 pts', state.draft?.type === 'poly' && state.draft?.pts?.length === 2);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 30));
+    log('P9.1 escape clears draft', state.draft === null);
+    log('P9.2 escape did not commit', state.commits.length === 0);
+
+    // ---- P10 CONSOLE ----
+    log('P10.1 zero console.error/warn during suite', consoleIssues.length === 0,
+        consoleIssues.length ? 'first=' + JSON.stringify(consoleIssues[0]) : '');
+
+    // ---- final cleanup so the demo canvas is not noisy ----
+    resetState();
+    selectTool(null);
+
+    // Render
+    const out = document.getElementById('results');
+    out.textContent = '';
+    results.forEach((r) => {
+      const row = document.createElement('div');
+      row.className = 'row ' + (r.pass ? 'pass' : 'fail');
+      row.textContent = (r.pass ? '✓ PASS  ' : '✗ FAIL  ') + r.name + (r.detail ? '  — ' + r.detail : '');
+      out.appendChild(row);
+    });
+    const failed = results.filter((r) => !r.pass).length;
+    const total = results.length;
+    const sum = document.getElementById('summary');
+    sum.className = 'summary ' + (failed === 0 ? 'pass' : 'fail');
+    sum.textContent = failed === 0
+      ? `STEP 5.a PASS — ${total}/${total} checks passed.`
+      : `STEP 5.a FAIL — ${failed}/${total} checks failed.`;
+
+    window.__step5.lastResults = results;
+    window.__step5.lastSummary = {
+      total, passed: total - failed, failed,
+    };
+    return window.__step5.lastSummary;
+  }
+
+  document.getElementById('btnRun').addEventListener('click', runTest);
+  requestAnimationFrame(() => requestAnimationFrame(runTest));
+})();
+</script>
+</body>
+</html>

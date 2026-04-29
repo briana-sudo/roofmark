@@ -1,6 +1,7 @@
 import { useAppStore } from './store/useAppStore'
 import CanvasStage from './components/CanvasStage'
 import LayerPanel from './components/LayerPanel'
+import DrawingTools from './components/DrawingTools'
 import './App.css'
 
 export default function App() {
@@ -42,7 +43,7 @@ export default function App() {
 
         <main className="canvas-area" aria-label="Canvas">
           <div className="canvas-toolbar">
-            <span className="toolbar-empty">(Drawing tools — Step 5)</span>
+            <DrawingTools />
           </div>
           <CanvasStage />
         </main>

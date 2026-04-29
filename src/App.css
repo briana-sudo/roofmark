@@ -190,6 +190,62 @@ body {
   font-size: 12px;
 }
 
+/* ---- Drawing tools toolbar (Step 5) ---- */
+.drawing-tools {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex: 1;
+}
+
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  background: transparent;
+  color: var(--rm-fg);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.2;
+}
+
+.tool-btn:hover:not(:disabled) {
+  background: var(--rm-panel);
+  border-color: var(--rm-fg-dim);
+}
+
+.tool-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.tool-btn.active {
+  background: var(--rm-accent);
+  border-color: var(--rm-accent);
+  color: #fff;
+}
+
+.tool-btn .tool-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.tool-btn .tool-name {
+  font-size: 11px;
+  letter-spacing: 0.3px;
+}
+
+.tool-hint {
+  margin-left: auto;
+  color: var(--rm-fg-dim);
+  font-size: 11px;
+  font-style: italic;
+}
+
 .canvas-stage {
   flex: 1;
   position: relative;
@@ -210,7 +266,9 @@ body {
 }
 
 .canvas-stage canvas.cv-static  { z-index: 1; }
-.canvas-stage canvas.cv-dynamic { z-index: 2; }
+.canvas-stage canvas.cv-dynamic { z-index: 2; touch-action: none; }
+
+.canvas-stage.tool-active .cv-dynamic { cursor: crosshair; }
 
 /* ---- Status bar ---- */
 .status-bar {
