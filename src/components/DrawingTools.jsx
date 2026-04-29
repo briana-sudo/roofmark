@@ -1,5 +1,6 @@
 import { useRef } from 'react'
 import { useAppStore } from '../store/useAppStore'
+import { savePhoto, clearPhoto } from '../store/photoIDB'
 
 /**
  * DrawingTools — Step 5 of Kickoff Spec §6.
@@ -67,7 +68,14 @@ export default function DrawingTools() {
       const dataURL = ev.target?.result
       if (typeof dataURL !== 'string') return
       const img = new Image()
-      img.onload = () => setBackgroundImage(img)
+      img.onload = () => {
+        setBackgroundImage(img)
+        // Persist to IndexedDB so the photo survives refresh. Fire and
+        // forget — render path doesn't depend on this resolving.
+        savePhoto(dataURL).catch((err) => {
+          console.warn('Failed to persist photo to IndexedDB:', err)
+        })
+      }
       img.onerror = () => {
         // Bad image — surface to console; don't update store.
         console.warn('Failed to decode photo:', file.name)
@@ -75,6 +83,14 @@ export default function DrawingTools() {
       img.src = dataURL
     }
     reader.readAsDataURL(file)
+  }
+
+  const onClearPhoto = () => {
+    clearBackgroundImage()
+    // Also wipe the persisted copy so a refresh doesn't bring it back.
+    clearPhoto().catch((err) => {
+      console.warn('Failed to clear persisted photo from IndexedDB:', err)
+    })
   }
 
   return (
@@ -165,7 +181,7 @@ export default function DrawingTools() {
         <button
           type="button"
           className="tool-btn photo-clear"
-          onClick={clearBackgroundImage}
+          onClick={onClearPhoto}
           title="Clear background photo"
           data-testid="btn-photo-clear"
         >

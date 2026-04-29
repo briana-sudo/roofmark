@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { loadPhoto } from './photoIDB'
 
 // ============================================================================
 // RoofMark application store — Step 2 of Kickoff Spec Section 16
@@ -617,4 +618,28 @@ useAppStore.subscribe((state, prev) => {
 // ============================================================================
 if (typeof window !== 'undefined') {
   window.__appStore = useAppStore
+}
+
+// ============================================================================
+// PHOTO HYDRATION (post-Step-8 fix)
+// Photo is too large for localStorage (Spec §15 originally said don't save
+// at all) but fits IndexedDB easily. Operator-test on Step 8 surfaced that
+// no-persistence is unacceptable UX. Module-level fire-and-forget read at
+// startup; when the data-URL is decoded, set it on the store. Renderer
+// falls back to dark grid until this resolves (typically <50 ms).
+// ============================================================================
+if (typeof window !== 'undefined') {
+  loadPhoto()
+    .then((dataURL) => {
+      if (!dataURL) return
+      const img = new Image()
+      img.onload = () => useAppStore.getState().setBackgroundImage(img)
+      img.onerror = () => {
+        console.warn('Failed to decode persisted photo; ignoring.')
+      }
+      img.src = dataURL
+    })
+    .catch(() => {
+      // IDB unavailable / quota / corruption — skip silently.
+    })
 }
