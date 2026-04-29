@@ -60,6 +60,26 @@ export default function App() {
             <DrawingTools />
           </div>
           <CanvasStage />
+          {/*
+            Drawer-edge handle — belt-and-suspenders affordance for the
+            right drawer toggle (Step 10 partial-completion fix). The
+            header button is the primary control; this floating tab on
+            the canvas right edge provides a visually-obvious "open me"
+            cue when the drawer is collapsed, and a "close me" cue when
+            open. Pinned to the right edge of the canvas-area so it
+            stays reachable regardless of header overflow.
+          */}
+          <button
+            type="button"
+            className="drawer-edge-handle"
+            onClick={toggleRightDrawer}
+            title={rightDrawerOpen ? 'Close properties drawer' : 'Open properties drawer'}
+            aria-label={rightDrawerOpen ? 'Close properties drawer' : 'Open properties drawer'}
+            aria-pressed={rightDrawerOpen}
+            data-testid="btn-drawer-edge"
+          >
+            <span aria-hidden="true">{rightDrawerOpen ? '›' : '‹'}</span>
+          </button>
         </main>
 
         <PropertiesPanel />

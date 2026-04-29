@@ -71,7 +71,16 @@ const sequenceDefaults = (n) => ({
 // ---- Persistence -----------------------------------------------------------
 // Step 10 added `gridSize` (now {x, y} per P12/P14) and `rightDrawerOpen`
 // (drawer state survives refresh per Spec §5/§6 acceptance criteria).
-const PERSIST_KEYS = ['layers', 'sequences', 'clines', 'jobContext', 'gridSize', 'rightDrawerOpen']
+// Step 10 partial-completion fix added `mode` and `activeLayerId` so refresh
+// preserves the operator's working context — otherwise refresh reverts to
+// "nominal state" (Properties panel empty, mode back to DRAW) even though
+// the data itself survives.
+const PERSIST_KEYS = [
+  'layers', 'sequences', 'clines', 'jobContext',
+  'gridSize', 'rightDrawerOpen',
+  'mode', 'activeLayerId',
+]
+const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE', 'TECHNICAL'])
 
 // Step 10 — accept either a number (legacy / square grid) or an {x, y}
 // object (rectangular). Always normalize to {x, y} on the way in.
@@ -141,10 +150,17 @@ const initialState = {
   clines: hydrated?.clines || [],
   jobContext: hydrated?.jobContext || null,
 
-  // ---- UI / app (not persisted) ----
-  mode: 'DRAW',           // 'DRAW' | 'EDIT' | 'SEQUENCE' | 'TECHNICAL'
+  // ---- UI / app ----
+  // `mode` and `activeLayerId` are persisted (Step 10 partial-completion fix)
+  // so refresh restores the operator's working context. Validate on hydration:
+  // unknown modes fall back to DRAW; an activeLayerId pointing at a layer that
+  // no longer exists falls back to null.
+  mode: (hydrated?.mode && VALID_MODES.has(hydrated.mode)) ? hydrated.mode : 'DRAW',
   tool: null,
-  activeLayerId: null,
+  activeLayerId: (
+    hydrated?.activeLayerId
+    && (hydrated?.layers || []).some((l) => l.id === hydrated.activeLayerId)
+  ) ? hydrated.activeLayerId : null,
   activeSeqId: null,
 
   snapEnabled: true,
@@ -626,7 +642,9 @@ useAppStore.subscribe((state, prev) => {
   )
   const uiFlagChanged = (
     state.gridSize !== prev.gridSize ||
-    state.rightDrawerOpen !== prev.rightDrawerOpen
+    state.rightDrawerOpen !== prev.rightDrawerOpen ||
+    state.mode !== prev.mode ||
+    state.activeLayerId !== prev.activeLayerId
   )
   if (!dataChanged && !uiFlagChanged) return
 

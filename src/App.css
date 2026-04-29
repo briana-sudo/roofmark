@@ -74,7 +74,18 @@ body {
   background: var(--rm-border);
 }
 
-.hdr-spacer { flex: 1; }
+.hdr-spacer { flex: 1; min-width: 0; }
+
+/* Job + Scope can shrink + truncate so the right-side controls
+ * (ModeToggle, drawer toggle, save state) never get pushed off-screen
+ * on narrow viewports (iPad portrait, narrow desktop windows). */
+.hdr-job, .hdr-scope {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+}
 
 .hdr-label {
   color: var(--rm-fg-dim);
@@ -82,12 +93,25 @@ body {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
+  flex-shrink: 0;
 }
 
 .hdr-value {
   color: var(--rm-fg);
   font-family: var(--rm-mono);
   font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* Right-side controls must NEVER be pushed off-screen — pin their flex
+ * size so Job / Scope ellipsize first when horizontal space tightens. */
+.app-header > .mode-toggle,
+.app-header > .btn-drawer-toggle,
+.app-header > .hdr-save {
+  flex-shrink: 0;
 }
 
 .hdr-mode {
@@ -328,6 +352,36 @@ body {
 .canvas-stage canvas.cv-dynamic { z-index: 2; touch-action: none; }
 
 .canvas-stage.tool-active .cv-dynamic { cursor: crosshair; }
+
+/* ---- Drawer edge handle (Step 10 partial-completion fix) ----
+ * Floating tab pinned to the right edge of the canvas-area. Always
+ * reachable — independent of header overflow. Chevron points "open"
+ * when drawer is closed and "close" when drawer is open. */
+.drawer-edge-handle {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 56px;
+  background: var(--rm-accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px 0 0 4px;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-shadow: -1px 0 4px rgba(0, 0, 0, 0.4);
+}
+.drawer-edge-handle:hover {
+  background: #4585f0;
+}
 
 /* ---- Status bar ---- */
 .status-bar {
@@ -573,12 +627,16 @@ body {
  * Step 10 — Properties panel + drawer toggle + Grid X/Y inputs (Spec §5/§6)
  * ============================================================================ */
 
-/* ---- Drawer toggle (header) ---- */
+/* ---- Drawer toggle (header) ----
+ * Made discoverable per Step 10 partial-completion fix: inactive (drawer
+ * closed) state must read as "click me, drawer is hidden" — so it carries
+ * an accent-colored border + brighter text, not just a gray label. Active
+ * state remains the filled-pill that matches ModeToggle. */
 .btn-drawer-toggle {
   padding: 3px 10px;
-  background: transparent;
-  color: var(--rm-fg-dim);
-  border: 1px solid var(--rm-border);
+  background: rgba(31, 111, 235, 0.08);
+  color: var(--rm-fg);
+  border: 1px solid var(--rm-accent);
   border-radius: 4px;
   font-family: inherit;
   font-size: 11px;
@@ -589,7 +647,7 @@ body {
   white-space: nowrap;
 }
 
-.btn-drawer-toggle:hover { color: var(--rm-fg); }
+.btn-drawer-toggle:hover { background: rgba(31, 111, 235, 0.2); }
 
 .btn-drawer-toggle.active {
   background: var(--rm-accent);
