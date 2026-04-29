@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>RoofMark Step 3.a — Two-Canvas rAF Block Test</title>
+<!--
+========================================================================
+RoofMark Step 3.a — Two-Canvas rAF Block Functional Test
+========================================================================
+
+Block under test:
+  Two-canvas rendering substrate per Kickoff Spec §7.
+    - cvStatic   (z-index 1) — committed shapes; redraws only when staticDirty
+    - cvDynamic  (z-index 2) — rubber-band + snap indicators; redraws every
+                                frame staticDirty || dynamicDirty is true
+    - rAF loop checks two dirty flags and redraws only what is dirty
+    - DPR compensation: canvas.width = clientWidth × devicePixelRatio,
+      ctx.scale(DPR, DPR) at start of every draw, canvas.style.width in CSS px
+    - Mouse handler ONLY mutates state + sets dynamicDirty; never calls
+      draw functions directly
+    - rAF loop ONLY reads state + renders; never mutates state
+
+Why standalone:
+  Rule 27 — exercise the block in isolation. This file recreates the
+  full canvas substrate in vanilla JS with no React, no Konva, no
+  Zustand. Step 3.b (host integration) wraps the same logic in a
+  React component that subscribes to the Zustand store; the proof
+  that the mechanism works lives here.
+
+Runtime targets (Rule 27):
+  Desktop Chrome 1200px+ (auto-test runs on load) AND **real iPhone
+  Safari** (open the same file from a hosted URL or via dev server;
+  inspect that pass summary still reads PASS, no console errors).
+
+Pass criteria (all groups must pass for Step 3.a):
+  P1. STRUCTURE — two canvases present with ids cvStatic / cvDynamic,
+        z-index 1 / 2, sharing the same container. CSS sizes match.
+  P2. DPR        — both canvases have width === containerW × DPR,
+        height === containerH × DPR, and CSS width/height in CSS px
+        within ±1px tolerance of the container.
+  P3. RAF        — rAF loop runs continuously at ≥ 30 fps sustained
+        across a 2-second window of synthetic mousemoves (target 60fps;
+        floor 30fps to match Testing SOP Rule 11).
+  P4. DIRTY      — during a 60-mousemove burst with no static state
+        changes, staticDrawCount increments ZERO times. dynamicDrawCount
+        increments at least once per rAF tick that observed a dirty flag.
+  P5. STATE-ONLY — mouse handler does not call drawStatic / drawDynamic
+        directly. Verified by an instrumented "draw call source" trail
+        that records 'rAF' for every legitimate call and never records
+        'mousehandler' in P5's burst window.
+  P6. STATIC-DIRTY — programmatically setting staticDirty = true causes
+        exactly one staticDrawCount increment on the next rAF tick.
+  P7. CONSOLE    — zero console.error / console.warn during the test.
+
+Failure modes detected:
+  F1. Static canvas redrawing on every mousemove (dirty flag broken).
+  F2. Mouse handler calling draw functions directly (state-only contract
+      broken).
+  F3. DPR scaling missing (lines blurry on retina; canvas.width === CSS
+      width even on devicePixelRatio = 2 device).
+  F4. rAF cadence falling below 30 fps under load (computation in the
+      hot path is too expensive for the device).
+
+Permanent regression coverage:
+  This file lives at roofmark/test/step-3-functional.html. Re-run on
+  every modification to the canvas substrate (CanvasStage component,
+  rAF loop, dirty-flag logic, DPR compensation).
+======================================================================== -->
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", sans-serif; background: #1a1d23; color: #e6edf3; }
+  .test-panel { padding: 14px 18px; border-bottom: 2px solid #444; background: #11141a; }
+  .test-panel h1 { margin: 0 0 6px; font-size: 14px; }
+  .test-panel .meta { font-size: 11px; color: #8b949e; line-height: 1.5; }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .btn { padding: 5px 12px; background: #1f6feb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .results { margin-top: 12px; font-family: "SF Mono", Consolas, monospace; font-size: 11px; max-height: 240px; overflow: auto; }
+  .results .pass { color: #3fb950; }
+  .results .fail { color: #f85149; }
+  .results .row { padding: 1px 0; }
+  .summary { margin-top: 10px; padding: 8px 12px; border-radius: 4px; font-weight: 700; font-family: "SF Mono", Consolas, monospace; font-size: 13px; }
+  .summary.pass { background: #1f3320; color: #3fb950; }
+  .summary.fail { background: #321e1e; color: #f85149; }
+  .summary.pending { background: #2d2a1e; color: #d29922; }
+  .stage-wrap {
+    width: 100%;
+    height: 480px;
+    background: #0d1117;
+    position: relative;
+    border-top: 1px solid #30363d;
+    border-bottom: 1px solid #30363d;
+  }
+  /* The block under test — two stacked canvases */
+  .stage-container {
+    position: absolute;
+    inset: 0;
+  }
+  #cvStatic, #cvDynamic {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  #cvStatic { z-index: 1; }
+  #cvDynamic { z-index: 2; }
+</style>
+</head>
+<body>
+
+<section class="test-panel">
+  <h1>RoofMark Step 3.a — Two-Canvas rAF Block Functional Test</h1>
+  <div class="meta">
+    Block: vanilla two-canvas + rAF + dirty flags + DPR compensation, recreated standalone per Spec §7.<br>
+    Auto-runs on load. Open in <strong>desktop Chrome</strong> for the harness pass; <strong>real iPhone Safari</strong> for the iOS-runtime confirmation. No server needed (file:// works).
+  </div>
+  <div class="actions">
+    <button class="btn" id="btnRun">Re-run auto-test</button>
+    <button class="btn" id="btnAddStatic">Manual: add static shape (flips staticDirty)</button>
+  </div>
+  <div class="summary pending" id="summary">Running...</div>
+  <div class="results" id="results"></div>
+</section>
+
+<!-- ===== BLOCK UNDER TEST ===== -->
+<div class="stage-wrap" id="stage-wrap">
+  <div class="stage-container" id="stage-container">
+    <canvas id="cvStatic"></canvas>
+    <canvas id="cvDynamic"></canvas>
+  </div>
+</div>
+
+<script>
+(function () {
+  // ===== Block under test ====================================================
+  const container = document.getElementById('stage-container');
+  const cvStatic = document.getElementById('cvStatic');
+  const cvDynamic = document.getElementById('cvDynamic');
+  const ctxStatic = cvStatic.getContext('2d');
+  const ctxDynamic = cvDynamic.getContext('2d');
+
+  // State (mutated by mouse handlers + auto-test driver, READ by rAF loop)
+  const state = {
+    cursorX: 0,
+    cursorY: 0,
+    staticShapes: [],     // committed shapes — drawn on cvStatic
+    staticDirty: true,    // initial render flag
+    dynamicDirty: true,
+  };
+
+  // Instrumentation — counters and draw-call source trail
+  const stats = {
+    rafTicks: 0,
+    staticDrawCount: 0,
+    dynamicDrawCount: 0,
+    drawCallSources: [],     // appended each draw call: {layer, source}
+    mouseEventCount: 0,
+  };
+
+  // DPR compensation
+  let DPR = 1;
+  function sizeCanvas(canvas) {
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    DPR = window.devicePixelRatio || 1;
+    canvas.width = Math.round(cw * DPR);
+    canvas.height = Math.round(ch * DPR);
+    canvas.style.width = cw + 'px';
+    canvas.style.height = ch + 'px';
+  }
+  function resizeAll() {
+    sizeCanvas(cvStatic);
+    sizeCanvas(cvDynamic);
+    state.staticDirty = true;
+    state.dynamicDirty = true;
+  }
+  resizeAll();
+  window.addEventListener('resize', resizeAll);
+
+  // Draw routines — only called from rAF loop
+  function drawStatic(source) {
+    stats.staticDrawCount++;
+    stats.drawCallSources.push({ layer: 'static', source });
+    ctxStatic.save();
+    ctxStatic.setTransform(1, 0, 0, 1, 0, 0);
+    ctxStatic.clearRect(0, 0, cvStatic.width, cvStatic.height);
+    ctxStatic.scale(DPR, DPR);
+    // background grid
+    ctxStatic.strokeStyle = '#1a1f2e';
+    ctxStatic.lineWidth = 1;
+    const cw = container.clientWidth, ch = container.clientHeight;
+    for (let x = 0; x < cw; x += 40) { ctxStatic.beginPath(); ctxStatic.moveTo(x, 0); ctxStatic.lineTo(x, ch); ctxStatic.stroke(); }
+    for (let y = 0; y < ch; y += 40) { ctxStatic.beginPath(); ctxStatic.moveTo(0, y); ctxStatic.lineTo(cw, y); ctxStatic.stroke(); }
+    // committed shapes
+    for (const s of state.staticShapes) {
+      ctxStatic.strokeStyle = s.color || '#3b82f6';
+      ctxStatic.lineWidth = 2;
+      ctxStatic.strokeRect(s.x, s.y, s.w, s.h);
+    }
+    ctxStatic.restore();
+  }
+
+  function drawDynamic(source) {
+    stats.dynamicDrawCount++;
+    stats.drawCallSources.push({ layer: 'dynamic', source });
+    ctxDynamic.save();
+    ctxDynamic.setTransform(1, 0, 0, 1, 0, 0);
+    ctxDynamic.clearRect(0, 0, cvDynamic.width, cvDynamic.height);
+    ctxDynamic.scale(DPR, DPR);
+    // crosshair at cursor
+    ctxDynamic.strokeStyle = '#00ffcc';
+    ctxDynamic.lineWidth = 1;
+    ctxDynamic.beginPath();
+    ctxDynamic.moveTo(state.cursorX - 8, state.cursorY);
+    ctxDynamic.lineTo(state.cursorX + 8, state.cursorY);
+    ctxDynamic.moveTo(state.cursorX, state.cursorY - 8);
+    ctxDynamic.lineTo(state.cursorX, state.cursorY + 8);
+    ctxDynamic.stroke();
+    ctxDynamic.restore();
+  }
+
+  // rAF loop — ONLY reads state + dirty flags + renders. Never mutates state.
+  let rafHandle = null;
+  function rafTick() {
+    stats.rafTicks++;
+    if (state.staticDirty) {
+      drawStatic('rAF');
+      state.staticDirty = false;
+    }
+    if (state.dynamicDirty) {
+      drawDynamic('rAF');
+      state.dynamicDirty = false;
+    }
+    rafHandle = requestAnimationFrame(rafTick);
+  }
+  rafHandle = requestAnimationFrame(rafTick);
+
+  // Mouse handler — ONLY mutates state + flips dynamicDirty. Never calls draw.
+  function onMouseMove(e) {
+    stats.mouseEventCount++;
+    const rect = cvDynamic.getBoundingClientRect();
+    state.cursorX = e.clientX - rect.left;
+    state.cursorY = e.clientY - rect.top;
+    state.dynamicDirty = true;
+    // NB: never call drawDynamic() here — that would break the state-only
+    // contract Spec §7 requires.
+  }
+  cvDynamic.addEventListener('mousemove', onMouseMove);
+  cvDynamic.addEventListener('touchmove', (e) => {
+    if (e.touches && e.touches.length) {
+      const t = e.touches[0];
+      onMouseMove({ clientX: t.clientX, clientY: t.clientY });
+    }
+  }, { passive: true });
+
+  // Manual "add static shape" button — flips staticDirty
+  document.getElementById('btnAddStatic').addEventListener('click', () => {
+    const cw = container.clientWidth, ch = container.clientHeight;
+    state.staticShapes.push({
+      x: Math.random() * (cw - 60) + 10,
+      y: Math.random() * (ch - 60) + 10,
+      w: 40 + Math.random() * 60,
+      h: 40 + Math.random() * 60,
+      color: '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0'),
+    });
+    state.staticDirty = true;
+  });
+
+  // Expose for harness (and for any future console smoke)
+  window.__step3 = { state, stats, drawStatic, drawDynamic, sizeCanvas, container };
+
+  // ===== Auto-test harness ===================================================
+  const consoleIssues = [];
+  const origError = console.error;
+  const origWarn = console.warn;
+  console.error = (...a) => { consoleIssues.push(['error', a.map(String).join(' ')]); origError.apply(console, a); };
+  console.warn  = (...a) => { consoleIssues.push(['warn',  a.map(String).join(' ')]); origWarn.apply(console, a); };
+
+  function runTest() {
+    const results = [];
+    const log = (name, pass, detail) => results.push({ name, pass, detail: detail ?? '' });
+    consoleIssues.length = 0;
+
+    // ---- P1 STRUCTURE ----
+    log('P1.1 cvStatic exists', !!cvStatic);
+    log('P1.2 cvDynamic exists', !!cvDynamic);
+    log('P1.3 cvStatic z-index = 1', getComputedStyle(cvStatic).zIndex === '1', 'got=' + getComputedStyle(cvStatic).zIndex);
+    log('P1.4 cvDynamic z-index = 2', getComputedStyle(cvDynamic).zIndex === '2', 'got=' + getComputedStyle(cvDynamic).zIndex);
+    log('P1.5 same container', cvStatic.parentElement === cvDynamic.parentElement);
+
+    // ---- P2 DPR ----
+    const expectedDPR = window.devicePixelRatio || 1;
+    const cw = container.clientWidth, ch = container.clientHeight;
+    const tol = 1.5;
+    log('P2.1 cvStatic.width ≈ cw × DPR', Math.abs(cvStatic.width - cw * expectedDPR) <= tol, `${cvStatic.width} vs ${cw}×${expectedDPR}`);
+    log('P2.2 cvStatic.height ≈ ch × DPR', Math.abs(cvStatic.height - ch * expectedDPR) <= tol, `${cvStatic.height} vs ${ch}×${expectedDPR}`);
+    log('P2.3 cvDynamic.width ≈ cw × DPR', Math.abs(cvDynamic.width - cw * expectedDPR) <= tol);
+    log('P2.4 cvDynamic.height ≈ ch × DPR', Math.abs(cvDynamic.height - ch * expectedDPR) <= tol);
+    log('P2.5 cvStatic CSS width matches container', cvStatic.style.width === cw + 'px', 'css=' + cvStatic.style.width);
+    log('P2.6 cvDynamic CSS height matches container', cvDynamic.style.height === ch + 'px', 'css=' + cvDynamic.style.height);
+
+    // ---- Burst test setup — used by P3, P4, P5 ----
+    return runBurst(results, log);
+  }
+
+  async function runBurst(results, log) {
+    // Snapshot baseline counters
+    const baseStaticDraws = stats.staticDrawCount;
+    const baseDynamicDraws = stats.dynamicDrawCount;
+    const baseRafTicks = stats.rafTicks;
+    const sourceTrailStart = stats.drawCallSources.length;
+    stats.mouseEventCount = 0;
+
+    // 2-second synthetic mousemove burst at ~60 events/sec
+    const burstMs = 2000;
+    const eventsPerSec = 60;
+    const T0 = performance.now();
+    const interval = 1000 / eventsPerSec;
+    const rect = cvDynamic.getBoundingClientRect();
+    const drive = () => {
+      const t = (performance.now() - T0) / burstMs;
+      const x = rect.left + 100 + Math.sin(t * Math.PI * 4) * 200;
+      const y = rect.top + 100 + Math.cos(t * Math.PI * 4) * 100;
+      const evt = new MouseEvent('mousemove', {
+        clientX: x, clientY: y, bubbles: true,
+      });
+      cvDynamic.dispatchEvent(evt);
+    };
+    const burstTimer = setInterval(drive, interval);
+    await new Promise(r => setTimeout(r, burstMs));
+    clearInterval(burstTimer);
+
+    const elapsedMs = performance.now() - T0;
+    const burstStaticDraws = stats.staticDrawCount - baseStaticDraws;
+    const burstDynamicDraws = stats.dynamicDrawCount - baseDynamicDraws;
+    const burstRafTicks = stats.rafTicks - baseRafTicks;
+    const burstSourceTrail = stats.drawCallSources.slice(sourceTrailStart);
+
+    // ---- P3 RAF cadence ----
+    const fps = (burstRafTicks / elapsedMs) * 1000;
+    log(`P3.1 rAF cadence ≥ 30fps over ${burstMs}ms burst`, fps >= 30, `fps=${fps.toFixed(1)} (rafTicks=${burstRafTicks})`);
+    log(`P3.2 mousemove events delivered during burst`, stats.mouseEventCount >= eventsPerSec * (burstMs / 1000) - 5, `count=${stats.mouseEventCount}`);
+
+    // ---- P4 DIRTY ----
+    log('P4.1 staticDrawCount did NOT increment during mouse burst (dirty flag honored)', burstStaticDraws === 0, `staticDraws=${burstStaticDraws}`);
+    log('P4.2 dynamicDrawCount incremented during mouse burst', burstDynamicDraws > 0, `dynDraws=${burstDynamicDraws}`);
+
+    // ---- P5 STATE-ONLY contract ----
+    const offendingSources = burstSourceTrail.filter(d => d.source !== 'rAF');
+    log('P5.1 every draw call sourced from rAF (no direct calls from mousemove handler)', offendingSources.length === 0, `offenders=${offendingSources.length} (${JSON.stringify(offendingSources.slice(0,3))})`);
+
+    // ---- P6 STATIC DIRTY trigger ----
+    const staticBefore = stats.staticDrawCount;
+    state.staticShapes.push({ x: 10, y: 10, w: 30, h: 30, color: '#3fb950' });
+    state.staticDirty = true;
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); // wait two frames
+    const staticAfter = stats.staticDrawCount;
+    log('P6.1 setting staticDirty triggers exactly one static redraw on next rAF', staticAfter - staticBefore === 1, `delta=${staticAfter - staticBefore}`);
+
+    // ---- P7 CONSOLE clean ----
+    log('P7.1 zero console.error / console.warn during burst', consoleIssues.length === 0, consoleIssues.length ? 'first=' + JSON.stringify(consoleIssues[0]) : '');
+
+    renderResults(results);
+
+    // expose harness summary for external smoke
+    window.__step3.lastResults = results;
+    window.__step3.lastSummary = {
+      total: results.length,
+      passed: results.filter(r => r.pass).length,
+      failed: results.filter(r => !r.pass).length,
+      fps,
+      burstStaticDraws,
+      burstDynamicDraws,
+      burstRafTicks,
+      DPR: window.devicePixelRatio || 1,
+    };
+    return window.__step3.lastSummary;
+  }
+
+  function renderResults(results) {
+    const out = document.getElementById('results');
+    out.textContent = '';
+    results.forEach(r => {
+      const row = document.createElement('div');
+      row.className = 'row ' + (r.pass ? 'pass' : 'fail');
+      row.textContent = (r.pass ? '✓ PASS  ' : '✗ FAIL  ') + r.name + (r.detail ? '  — ' + r.detail : '');
+      out.appendChild(row);
+    });
+    const failed = results.filter(r => !r.pass).length;
+    const total = results.length;
+    const sum = document.getElementById('summary');
+    sum.className = 'summary ' + (failed === 0 ? 'pass' : 'fail');
+    sum.textContent = failed === 0
+      ? `STEP 3.a PASS — ${total}/${total} checks passed.`
+      : `STEP 3.a FAIL — ${failed}/${total} checks failed.`;
+  }
+
+  document.getElementById('btnRun').addEventListener('click', runTest);
+
+  // Auto-run on load (give a frame for layout)
+  requestAnimationFrame(() => requestAnimationFrame(runTest));
+})();
+</script>
+</body>
+</html>

@@ -1,4 +1,5 @@
 import { useAppStore } from './store/useAppStore'
+import CanvasStage from './components/CanvasStage'
 import './App.css'
 
 export default function App() {
@@ -47,12 +48,7 @@ export default function App() {
           <div className="canvas-toolbar">
             <span className="toolbar-empty">(Drawing tools — Step 5)</span>
           </div>
-          <div className="canvas-stage">
-            <div className="canvas-placeholder">
-              <strong>Canvas stage</strong>
-              <span>Two-canvas rAF rendering wires up in Step 3.</span>
-            </div>
-          </div>
+          <CanvasStage />
         </main>
 
         <aside className="panel-right" aria-label="Properties / annotation drawer" aria-hidden={!rightDrawerOpen}>

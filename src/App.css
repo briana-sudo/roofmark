@@ -193,33 +193,24 @@ body {
 .canvas-stage {
   flex: 1;
   position: relative;
-  background:
-    linear-gradient(to right, #1a1f2e 1px, transparent 1px) 0 0 / 40px 40px,
-    linear-gradient(to bottom, #1a1f2e 1px, transparent 1px) 0 0 / 40px 40px,
-    var(--rm-bg);
+  background: var(--rm-bg);
+  /* The grid is drawn into cvStatic by CanvasStage at DPR-correct precision —
+     no CSS background-image so dev-tools overlay and canvas stay in sync. */
+  overflow: hidden;
 }
 
-.canvas-placeholder {
+.canvas-stage canvas {
   position: absolute;
   inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  color: var(--rm-fg-dim);
+  display: block;
+  /* width/height set in JS to match container × DPR; CSS keeps them filling
+     the parent so the box models stay accurate while DPR varies. */
+  width: 100%;
+  height: 100%;
 }
 
-.canvas-placeholder strong {
-  color: var(--rm-fg);
-  font-size: 14px;
-  letter-spacing: 0.3px;
-}
-
-.canvas-placeholder span {
-  font-size: 12px;
-  font-style: italic;
-}
+.canvas-stage canvas.cv-static  { z-index: 1; }
+.canvas-stage canvas.cv-dynamic { z-index: 2; }
 
 /* ---- Status bar ---- */
 .status-bar {
