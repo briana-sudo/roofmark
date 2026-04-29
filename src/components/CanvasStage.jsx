@@ -24,6 +24,14 @@ import { useAppStore } from '../store/useAppStore'
 const SNAP_TOLERANCE_DEFAULT = 12
 const MIN_RECT_SIZE = 3
 const MIN_CIRCLE_R = 3
+// Spec §6.6 — cline categorization tolerances. ORTHO_TOL is the px window
+// within which a drag is treated as horizontal or vertical. MIN_CLINE_DRAG
+// gates accidental clicks-without-drag from creating clines.
+const ORTHO_TOL = 3
+const MIN_CLINE_DRAG = 5
+// Length used to render an angled cline far past the canvas edges so the
+// browser clips it for us. 5000px is plenty for any reasonable canvas size.
+const CLINE_SENT = 5000
 
 export default function CanvasStage() {
   const containerRef = useRef(null)
@@ -135,8 +143,43 @@ export default function CanvasStage() {
         ctxStatic.lineTo(cw, y + 0.5)
         ctxStatic.stroke()
       }
+      // Construction lines (Spec §7 static draw step 4 — rendered after the
+      // background grid, before layer shapes so committed shapes paint over).
+      const storeState = useAppStore.getState()
+      if (storeState.clinesVisible !== false) {
+        ctxStatic.strokeStyle = 'rgba(0, 255, 204, 0.5)'
+        ctxStatic.lineWidth = 1
+        ctxStatic.setLineDash([6, 4])
+        for (const cl of storeState.clines) {
+          if (cl.visible === false) continue
+          if (cl.type === 'h') {
+            const y = cl.y * ch
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(0, y)
+            ctxStatic.lineTo(cw, y)
+            ctxStatic.stroke()
+          } else if (cl.type === 'v') {
+            const x = cl.x * cw
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(x, 0)
+            ctxStatic.lineTo(x, ch)
+            ctxStatic.stroke()
+          } else if (cl.type === 'a') {
+            const ax = cl.px * cw
+            const ay = cl.py * ch
+            const cosA = Math.cos(cl.angle)
+            const sinA = Math.sin(cl.angle)
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(ax - CLINE_SENT * cosA, ay - CLINE_SENT * sinA)
+            ctxStatic.lineTo(ax + CLINE_SENT * cosA, ay + CLINE_SENT * sinA)
+            ctxStatic.stroke()
+          }
+        }
+        ctxStatic.setLineDash([])
+      }
+
       // Layer shapes (bottom to top, skipping invisible layers)
-      const layers = useAppStore.getState().layers
+      const layers = storeState.layers
       for (const layer of layers) {
         if (!layer.visible) continue
         for (const shape of layer.shapes || []) {
@@ -193,6 +236,27 @@ export default function CanvasStage() {
           ctxDynamic.beginPath()
           ctxDynamic.moveTo(draft.pts[0].x, draft.pts[0].y)
           ctxDynamic.lineTo(state.cursorX, state.cursorY)
+          ctxDynamic.stroke()
+        } else if (draft.type === 'cline' && isDragging) {
+          // Rubber-band preview categorized like the eventual commit
+          const cw = container.clientWidth
+          const ch = container.clientHeight
+          const dx = draft.x - draft.startX
+          const dy = draft.y - draft.startY
+          ctxDynamic.beginPath()
+          if (Math.abs(dy) < ORTHO_TOL) {
+            ctxDynamic.moveTo(0, draft.startY)
+            ctxDynamic.lineTo(cw, draft.startY)
+          } else if (Math.abs(dx) < ORTHO_TOL) {
+            ctxDynamic.moveTo(draft.startX, 0)
+            ctxDynamic.lineTo(draft.startX, ch)
+          } else {
+            const ang = Math.atan2(dy, dx)
+            const cosA = Math.cos(ang)
+            const sinA = Math.sin(ang)
+            ctxDynamic.moveTo(draft.startX - CLINE_SENT * cosA, draft.startY - CLINE_SENT * sinA)
+            ctxDynamic.lineTo(draft.startX + CLINE_SENT * cosA, draft.startY + CLINE_SENT * sinA)
+          }
           ctxDynamic.stroke()
         }
         ctxDynamic.setLineDash([])
@@ -275,6 +339,32 @@ export default function CanvasStage() {
       isDragging = false
     }
 
+    // ---- Construction-line commit (no active layer required, lives in
+    // the separate clines array per Spec §6.6).
+    const commitClineDraft = () => {
+      if (!draft || draft.type !== 'cline') return
+      const cw = container.clientWidth
+      const ch = container.clientHeight
+      const dx = draft.x - draft.startX
+      const dy = draft.y - draft.startY
+      let cline
+      if (Math.abs(dy) < ORTHO_TOL) {
+        cline = { type: 'h', y: draft.startY / ch }
+      } else if (Math.abs(dx) < ORTHO_TOL) {
+        cline = { type: 'v', x: draft.startX / cw }
+      } else {
+        cline = {
+          type: 'a',
+          px: draft.startX / cw,
+          py: draft.startY / ch,
+          angle: Math.atan2(dy, dx),
+        }
+      }
+      useAppStore.getState().addCline(cline)
+      draft = null
+      isDragging = false
+    }
+
     // ---- Pointer handlers (state + flag + draft mutation only) ------------
     const pointFromClient = (clientX, clientY) => {
       const rect = cvDynamic.getBoundingClientRect()
@@ -292,6 +382,7 @@ export default function CanvasStage() {
         else if (draft.type === 'circ' && isDragging) {
           draft.r = Math.hypot(x - draft.cx, y - draft.cy)
         }
+        else if (draft.type === 'cline' && isDragging) { draft.x = x; draft.y = y }
       }
       dynamicDirty = true
     }
@@ -299,7 +390,10 @@ export default function CanvasStage() {
     const onMouseDown = (e) => {
       const t = useAppStore.getState().tool
       const activeLayerId = useAppStore.getState().activeLayerId
-      if (!t || !activeLayerId) return
+      if (!t) return
+      // Shape tools commit into the active layer; cline lives in its own
+      // array and doesn't need one (Spec §6.6).
+      if (t !== 'cline' && !activeLayerId) return
       const { x, y } = pointFromClient(e.clientX, e.clientY)
       const snap = useAppStore.getState().snapTolerance || SNAP_TOLERANCE_DEFAULT
 
@@ -334,6 +428,9 @@ export default function CanvasStage() {
           draft.pts.push({ x, y })
           commitDraft()
         }
+      } else if (t === 'cline') {
+        draft = { type: 'cline', startX: x, startY: y, x, y }
+        isDragging = true
       }
       dynamicDirty = true
     }
@@ -348,6 +445,11 @@ export default function CanvasStage() {
         dynamicDirty = true
       } else if (draft.type === 'circ') {
         if (draft.r >= MIN_CIRCLE_R) commitDraft()
+        else { draft = null; isDragging = false }
+        dynamicDirty = true
+      } else if (draft.type === 'cline') {
+        const dist = Math.hypot(draft.x - draft.startX, draft.y - draft.startY)
+        if (dist >= MIN_CLINE_DRAG) commitClineDraft()
         else { draft = null; isDragging = false }
         dynamicDirty = true
       }
@@ -396,6 +498,11 @@ export default function CanvasStage() {
     // ---- Store subscription -----------------------------------------------
     const unsub = useAppStore.subscribe((state, prev) => {
       if (state.layers !== prev.layers || state.clines !== prev.clines) {
+        staticDirty = true
+      }
+      // Toggling the global CLines visibility flag must redraw static so
+      // the lines appear/disappear without a separate mutation to clines.
+      if (state.clinesVisible !== prev.clinesVisible) {
         staticDirty = true
       }
       // Tool change clears any in-progress draft so the user doesn't end up

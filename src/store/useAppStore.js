@@ -144,6 +144,11 @@ const initialState = {
 
   rightDrawerOpen: false,
 
+  // Spec §6.6 — single global show/hide for the entire CLINES set.
+  // Per-cline visible flag still exists for future edit-mode toggling.
+  // This flag is UI-only (not persisted alongside layers/sequences/clines).
+  clinesVisible: true,
+
   saveState: 'saved',     // 'saved' | 'unsaved' | 'saving'
   lastSavedAt: null,
 
@@ -371,6 +376,11 @@ export const useAppStore = create((set, get) => {
           cl.id === id ? { ...cl, visible: !cl.visible } : cl
         ),
       })),
+
+    // Global show/hide for the entire CLINES set (Spec §6.6 — toolbar
+    // "👁 CLines" button). Distinct from per-cline visibility.
+    toggleClinesVisibility: () =>
+      set((s) => ({ clinesVisible: !s.clinesVisible })),
 
     // ============ App state actions =========================================
     setMode: (mode) => set({ mode }),

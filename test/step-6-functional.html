@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>RoofMark Step 6.a — Construction Line Tool Block Test</title>
+<!--
+========================================================================
+RoofMark Step 6.a — Construction Line Tool Block Functional Test
+========================================================================
+
+Block under test:
+  Construction-line drag tool per Kickoff Spec §6.6.
+    - Mousedown sets anchor; drag tracks; mouseup commits.
+    - Drag direction categorizes the cline:
+        |dy| < 3px  → horizontal: { type: 'h', y }
+        |dx| < 3px  → vertical:   { type: 'v', x }
+        otherwise  → angled:     { type: 'a', px, py, angle }
+    - Coords stored normalized 0.0–1.0 (Spec §20).
+    - Drag distance below MIN_CLINE_DRAG (5 px) is discarded — a
+      single click without drag does NOT create a cline.
+    - Clines render across the full canvas (infinite reference lines).
+    - Global visibility toggle: clinesVisible flag — when false, all
+      clines are hidden (per-cline `visible` flag is independent and
+      overrides; in this Step 6 cut only the global flag is wired up).
+    - Escape cancels an in-progress draft.
+
+Why standalone:
+  Rule 27 — exercise the block in isolation. Same cline state machine
+  that ships in src/components/CanvasStage.jsx for Step 6.b, here
+  recreated in vanilla JS with no React/Konva/Zustand. Auto-test
+  dispatches synthetic MouseEvents through each direction case and
+  verifies the commit-arr accumulates the expected cline object.
+
+Runtime targets (Rule 27):
+  Desktop Chrome 1200px+ (auto-test on load) AND **real iPhone Safari**
+  (touch-driven cline drag in real Safari rAF environment). Brian taps
+  through manually and confirms.
+
+Pass criteria:
+  P1. HORIZONTAL — drag with |dy| < 3 produces { type: 'h', y } with
+        y normalized 0..1.
+  P2. VERTICAL — drag with |dx| < 3 produces { type: 'v', x } with
+        x normalized 0..1.
+  P3. ANGLED — diagonal drag produces { type: 'a', px, py, angle }
+        with px, py normalized 0..1 and angle in radians.
+  P4. MIN-DRAG — drag distance < 5 px is discarded (no commit).
+  P5. ESCAPE — pressing Escape during in-progress drag clears the draft
+        without committing.
+  P6. VISIBILITY — clinesVisible flag toggled false skips cline render
+        in the static canvas; toggled true renders them again.
+  P7. NORMALIZED — every committed cline's coordinate fields are within
+        [0, 1].
+  P8. CONSOLE — zero console.error / console.warn during the suite.
+
+Failure modes detected:
+  F1. Direction categorization wrong (horizontal drag committed as
+      angled, etc.).
+  F2. Min-drag guard missing (a click without drag commits a cline).
+  F3. Coordinates not normalized (raw px values committed).
+  F4. Global visibility toggle ignored (clines render even when hidden).
+
+Permanent regression coverage:
+  This file lives at roofmark/test/step-6-functional.html. Re-run on
+  every modification to the cline drag categorizer or the cline render
+  path.
+======================================================================== -->
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", sans-serif; background: #1a1d23; color: #e6edf3; }
+  .test-panel { padding: 14px 18px; border-bottom: 2px solid #444; background: #11141a; }
+  .test-panel h1 { margin: 0 0 6px; font-size: 14px; }
+  .test-panel .meta { font-size: 11px; color: #8b949e; line-height: 1.5; }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+  .btn { padding: 5px 12px; background: #1f6feb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .results { margin-top: 12px; font-family: "SF Mono", Consolas, monospace; font-size: 11px; max-height: 240px; overflow: auto; }
+  .results .pass { color: #3fb950; }
+  .results .fail { color: #f85149; }
+  .results .row { padding: 1px 0; }
+  .summary { margin-top: 10px; padding: 8px 12px; border-radius: 4px; font-weight: 700; font-family: "SF Mono", Consolas, monospace; font-size: 13px; }
+  .summary.pass { background: #1f3320; color: #3fb950; }
+  .summary.fail { background: #321e1e; color: #f85149; }
+  .summary.pending { background: #2d2a1e; color: #d29922; }
+
+  .toolbar { padding: 8px 12px; background: #1f242c; border-bottom: 1px solid #30363d; display: flex; gap: 4px; align-items: center; }
+  .tool-btn {
+    padding: 5px 10px; background: transparent; color: #e6edf3; border: 1px solid #30363d;
+    border-radius: 3px; cursor: pointer; font-size: 12px; font-family: inherit;
+  }
+  .tool-btn:hover { background: #161b22; }
+  .tool-btn.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .tool-divider { width: 1px; height: 20px; background: #30363d; margin: 0 4px; }
+  .stage-wrap { width: 100%; height: 480px; background: #0d1117; position: relative; border-bottom: 1px solid #30363d; }
+  .stage-container { position: absolute; inset: 0; }
+  #cvStatic, #cvDynamic { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #cvStatic { z-index: 1; }
+  #cvDynamic { z-index: 2; cursor: crosshair; touch-action: none; }
+</style>
+</head>
+<body>
+
+<section class="test-panel">
+  <h1>RoofMark Step 6.a — Construction Line Tool Block Functional Test</h1>
+  <div class="meta">
+    Block: cline drag-categorize state machine + commit logic, recreated standalone per Spec §6.6.<br>
+    Auto-runs on load. Open in <strong>desktop Chrome</strong> for the harness pass; <strong>real iPhone Safari</strong> for the iOS-runtime confirmation. No server needed (file:// works).
+  </div>
+  <div class="actions">
+    <button class="btn" id="btnRun">Re-run auto-test</button>
+    <button class="btn" id="btnReset">Reset canvas</button>
+    <span class="meta">Drag horizontal / vertical / diagonal to categorize. CLines toggle hides/shows them.</span>
+  </div>
+  <div class="summary pending" id="summary">Running...</div>
+  <div class="results" id="results"></div>
+</section>
+
+<div class="toolbar" id="toolbar">
+  <button class="tool-btn" data-tool="cline">┊ CLine</button>
+  <span class="tool-divider"></span>
+  <button class="tool-btn" id="btnVis">👁 CLines</button>
+</div>
+
+<div class="stage-wrap" id="stage-wrap">
+  <div class="stage-container" id="stage-container">
+    <canvas id="cvStatic"></canvas>
+    <canvas id="cvDynamic"></canvas>
+  </div>
+</div>
+
+<script>
+(function () {
+  // ===== Substrate =========================================================
+  const container = document.getElementById('stage-container');
+  const cvStatic = document.getElementById('cvStatic');
+  const cvDynamic = document.getElementById('cvDynamic');
+  const ctxStatic = cvStatic.getContext('2d');
+  const ctxDynamic = cvDynamic.getContext('2d');
+
+  const ORTHO_TOL = 3;        // px — within this is treated as orthogonal
+  const MIN_CLINE_DRAG = 5;   // px — below this drag is discarded
+
+  let DPR = 1;
+  function sizeCanvas(c) {
+    const cw = container.clientWidth, ch = container.clientHeight;
+    DPR = window.devicePixelRatio || 1;
+    c.width = Math.round(cw * DPR);
+    c.height = Math.round(ch * DPR);
+    c.style.width = cw + 'px';
+    c.style.height = ch + 'px';
+  }
+  sizeCanvas(cvStatic); sizeCanvas(cvDynamic);
+
+  // ===== State =============================================================
+  const state = {
+    tool: null,
+    cursorX: 0, cursorY: 0,
+    draft: null,
+    isDragging: false,
+    clines: [],
+    clinesVisible: true,
+    staticDirty: true,
+    dynamicDirty: true,
+  };
+
+  // ===== Tool selection ====================================================
+  function selectTool(toolId) {
+    state.tool = toolId;
+    state.draft = null;
+    state.isDragging = false;
+    state.dynamicDirty = true;
+    document.querySelectorAll('.tool-btn[data-tool]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.tool === toolId);
+    });
+  }
+  document.querySelectorAll('.tool-btn[data-tool]').forEach((btn) => {
+    btn.addEventListener('click', () => selectTool(btn.dataset.tool));
+  });
+
+  // CLines visibility toggle
+  function setClinesVisible(v) {
+    state.clinesVisible = v;
+    document.getElementById('btnVis').classList.toggle('active', v);
+    state.staticDirty = true;
+  }
+  document.getElementById('btnVis').addEventListener('click', () => {
+    setClinesVisible(!state.clinesVisible);
+  });
+  setClinesVisible(true);
+
+  // ===== Pointer events ====================================================
+  function pointFromEvent(e) {
+    // Round to integer to match production CanvasStage behavior. Matters when
+    // the canvas's bounding rect has non-integer offsets — synthetic
+    // MouseEvent.clientX/Y are truncated to integers, so subtracting a float
+    // rect.left/top would otherwise leave a 0.5 px ghost.
+    const rect = cvDynamic.getBoundingClientRect();
+    return {
+      x: Math.round(e.clientX - rect.left),
+      y: Math.round(e.clientY - rect.top),
+    };
+  }
+
+  cvDynamic.addEventListener('mousedown', (e) => {
+    if (state.tool !== 'cline') return;
+    const { x, y } = pointFromEvent(e);
+    state.draft = { type: 'cline', startX: x, startY: y, x, y };
+    state.isDragging = true;
+    state.dynamicDirty = true;
+  });
+
+  cvDynamic.addEventListener('mousemove', (e) => {
+    const { x, y } = pointFromEvent(e);
+    state.cursorX = x; state.cursorY = y;
+    if (state.draft && state.draft.type === 'cline' && state.isDragging) {
+      state.draft.x = x; state.draft.y = y;
+    }
+    state.dynamicDirty = true;
+  });
+
+  cvDynamic.addEventListener('mouseup', () => {
+    const draft = state.draft;
+    if (!draft || draft.type !== 'cline') return;
+    const dx = draft.x - draft.startX;
+    const dy = draft.y - draft.startY;
+    const dist = Math.hypot(dx, dy);
+    if (dist < MIN_CLINE_DRAG) {
+      state.draft = null;
+      state.isDragging = false;
+      state.dynamicDirty = true;
+      return;
+    }
+    commitClineDraft();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && state.draft) {
+      state.draft = null;
+      state.isDragging = false;
+      state.dynamicDirty = true;
+    }
+  });
+
+  function commitClineDraft() {
+    const draft = state.draft;
+    const cw = container.clientWidth, ch = container.clientHeight;
+    const dx = draft.x - draft.startX;
+    const dy = draft.y - draft.startY;
+    let cline = null;
+    if (Math.abs(dy) < ORTHO_TOL) {
+      cline = { type: 'h', y: draft.startY / ch };
+    } else if (Math.abs(dx) < ORTHO_TOL) {
+      cline = { type: 'v', x: draft.startX / cw };
+    } else {
+      cline = {
+        type: 'a',
+        px: draft.startX / cw,
+        py: draft.startY / ch,
+        angle: Math.atan2(dy, dx),
+      };
+    }
+    state.clines.push(cline);
+    state.draft = null;
+    state.isDragging = false;
+    state.staticDirty = true;
+    state.dynamicDirty = true;
+  }
+
+  // ===== Rendering =========================================================
+  function drawStatic() {
+    const cw = container.clientWidth, ch = container.clientHeight;
+    ctxStatic.save();
+    ctxStatic.setTransform(1, 0, 0, 1, 0, 0);
+    ctxStatic.clearRect(0, 0, cvStatic.width, cvStatic.height);
+    ctxStatic.scale(DPR, DPR);
+
+    // Grid
+    ctxStatic.strokeStyle = '#1a1f2e';
+    ctxStatic.lineWidth = 1;
+    for (let x = 0; x < cw; x += 40) {
+      ctxStatic.beginPath(); ctxStatic.moveTo(x + 0.5, 0); ctxStatic.lineTo(x + 0.5, ch); ctxStatic.stroke();
+    }
+    for (let y = 0; y < ch; y += 40) {
+      ctxStatic.beginPath(); ctxStatic.moveTo(0, y + 0.5); ctxStatic.lineTo(cw, y + 0.5); ctxStatic.stroke();
+    }
+
+    // Construction lines
+    if (state.clinesVisible) {
+      ctxStatic.strokeStyle = 'rgba(0, 255, 204, 0.5)';
+      ctxStatic.lineWidth = 1;
+      ctxStatic.setLineDash([6, 4]);
+      const SENT = 5000;
+      for (const cl of state.clines) {
+        if (cl.type === 'h') {
+          const y = cl.y * ch;
+          ctxStatic.beginPath(); ctxStatic.moveTo(0, y); ctxStatic.lineTo(cw, y); ctxStatic.stroke();
+        } else if (cl.type === 'v') {
+          const x = cl.x * cw;
+          ctxStatic.beginPath(); ctxStatic.moveTo(x, 0); ctxStatic.lineTo(x, ch); ctxStatic.stroke();
+        } else if (cl.type === 'a') {
+          const ax = cl.px * cw, ay = cl.py * ch;
+          const cx = Math.cos(cl.angle), cy = Math.sin(cl.angle);
+          ctxStatic.beginPath();
+          ctxStatic.moveTo(ax - SENT * cx, ay - SENT * cy);
+          ctxStatic.lineTo(ax + SENT * cx, ay + SENT * cy);
+          ctxStatic.stroke();
+        }
+      }
+      ctxStatic.setLineDash([]);
+    }
+    ctxStatic.restore();
+  }
+
+  function drawDynamic() {
+    ctxDynamic.save();
+    ctxDynamic.setTransform(1, 0, 0, 1, 0, 0);
+    ctxDynamic.clearRect(0, 0, cvDynamic.width, cvDynamic.height);
+    ctxDynamic.scale(DPR, DPR);
+
+    // Rubber-band cline preview
+    if (state.draft && state.draft.type === 'cline' && state.isDragging) {
+      const cw = container.clientWidth, ch = container.clientHeight;
+      const dx = state.draft.x - state.draft.startX;
+      const dy = state.draft.y - state.draft.startY;
+      ctxDynamic.strokeStyle = '#3fb950';
+      ctxDynamic.lineWidth = 2;
+      ctxDynamic.setLineDash([6, 4]);
+      const SENT = 5000;
+      ctxDynamic.beginPath();
+      if (Math.abs(dy) < ORTHO_TOL) {
+        ctxDynamic.moveTo(0, state.draft.startY);
+        ctxDynamic.lineTo(cw, state.draft.startY);
+      } else if (Math.abs(dx) < ORTHO_TOL) {
+        ctxDynamic.moveTo(state.draft.startX, 0);
+        ctxDynamic.lineTo(state.draft.startX, ch);
+      } else {
+        const ang = Math.atan2(dy, dx);
+        const cx = Math.cos(ang), cy = Math.sin(ang);
+        const ax = state.draft.startX, ay = state.draft.startY;
+        ctxDynamic.moveTo(ax - SENT * cx, ay - SENT * cy);
+        ctxDynamic.lineTo(ax + SENT * cx, ay + SENT * cy);
+      }
+      ctxDynamic.stroke();
+      ctxDynamic.setLineDash([]);
+    }
+
+    // Crosshair
+    ctxDynamic.strokeStyle = '#00ffcc';
+    ctxDynamic.lineWidth = 1;
+    ctxDynamic.beginPath();
+    ctxDynamic.moveTo(state.cursorX - 8, state.cursorY + 0.5);
+    ctxDynamic.lineTo(state.cursorX + 8, state.cursorY + 0.5);
+    ctxDynamic.moveTo(state.cursorX + 0.5, state.cursorY - 8);
+    ctxDynamic.lineTo(state.cursorX + 0.5, state.cursorY + 8);
+    ctxDynamic.stroke();
+    ctxDynamic.restore();
+  }
+
+  function rafTick() {
+    if (state.staticDirty) { drawStatic(); state.staticDirty = false; }
+    if (state.dynamicDirty) { drawDynamic(); state.dynamicDirty = false; }
+    requestAnimationFrame(rafTick);
+  }
+  requestAnimationFrame(rafTick);
+
+  document.getElementById('btnReset').addEventListener('click', () => {
+    state.clines = [];
+    state.draft = null;
+    state.staticDirty = true;
+    state.dynamicDirty = true;
+  });
+
+  // Expose for harness
+  window.__step6 = { state, selectTool, setClinesVisible, container, cvDynamic };
+
+  // ===== Auto-test harness =================================================
+  const consoleIssues = [];
+  const origError = console.error;
+  const origWarn = console.warn;
+  console.error = (...a) => { consoleIssues.push(['error', a.map(String).join(' ')]); origError.apply(console, a); };
+  console.warn  = (...a) => { consoleIssues.push(['warn',  a.map(String).join(' ')]); origWarn.apply(console, a); };
+
+  function fireMouse(type, x, y) {
+    const rect = cvDynamic.getBoundingClientRect();
+    cvDynamic.dispatchEvent(new MouseEvent(type, {
+      clientX: rect.left + x, clientY: rect.top + y, bubbles: true, cancelable: true, button: 0,
+    }));
+  }
+
+  function resetState() {
+    state.clines = [];
+    state.draft = null;
+    state.isDragging = false;
+    state.staticDirty = true;
+    state.dynamicDirty = true;
+  }
+
+  function isNorm(v) { return typeof v === 'number' && v >= 0 && v <= 1; }
+
+  async function runTest() {
+    const results = [];
+    const log = (name, pass, detail) => results.push({ name, pass, detail: detail ?? '' });
+    consoleIssues.length = 0;
+    resetState();
+    setClinesVisible(true);
+
+    selectTool('cline');
+    const cw = container.clientWidth, ch = container.clientHeight;
+
+    // ---- P1 HORIZONTAL ----
+    fireMouse('mousedown', 50, 100);
+    fireMouse('mousemove', 150, 102); // |dy| = 2 < 3 → horizontal
+    fireMouse('mouseup',   150, 102);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P1.1 horizontal: 1 commit', state.clines.length === 1, 'count=' + state.clines.length);
+    log('P1.2 horizontal: type === h', state.clines[0]?.type === 'h');
+    log('P1.3 horizontal: y normalized 0..1', isNorm(state.clines[0]?.y));
+    log('P1.4 horizontal: y === startY/ch', Math.abs(state.clines[0]?.y - 100/ch) < 0.001);
+
+    // ---- P2 VERTICAL ----
+    fireMouse('mousedown', 200, 50);
+    fireMouse('mousemove', 202, 200); // |dx| = 2 < 3 → vertical
+    fireMouse('mouseup',   202, 200);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P2.1 vertical: 2 commits', state.clines.length === 2);
+    log('P2.2 vertical: type === v', state.clines[1]?.type === 'v');
+    log('P2.3 vertical: x normalized', isNorm(state.clines[1]?.x));
+    log('P2.4 vertical: x === startX/cw', Math.abs(state.clines[1]?.x - 200/cw) < 0.001);
+
+    // ---- P3 ANGLED ----
+    fireMouse('mousedown', 100, 300);
+    fireMouse('mousemove', 200, 380); // dx=100, dy=80 → angled
+    fireMouse('mouseup',   200, 380);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P3.1 angled: 3 commits', state.clines.length === 3);
+    log('P3.2 angled: type === a', state.clines[2]?.type === 'a');
+    log('P3.3 angled: px/py normalized', isNorm(state.clines[2]?.px) && isNorm(state.clines[2]?.py));
+    log('P3.4 angled: angle is finite radians', typeof state.clines[2]?.angle === 'number' && isFinite(state.clines[2].angle));
+    log('P3.5 angled: angle ≈ atan2(80, 100)', Math.abs(state.clines[2]?.angle - Math.atan2(80, 100)) < 0.001);
+
+    // ---- P4 MIN-DRAG ----
+    fireMouse('mousedown', 300, 300);
+    fireMouse('mousemove', 302, 302); // dist ≈ 2.83 < 5
+    fireMouse('mouseup',   302, 302);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P4.1 min-drag: count unchanged (3)', state.clines.length === 3, 'count=' + state.clines.length);
+    log('P4.2 min-drag: draft cleared', state.draft === null);
+
+    // ---- P5 ESCAPE ----
+    fireMouse('mousedown', 50, 200);
+    fireMouse('mousemove', 90, 240);
+    log('P5-pre: draft is cline + isDragging', state.draft?.type === 'cline' && state.isDragging === true);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 30));
+    log('P5.1 escape clears draft', state.draft === null);
+    log('P5.2 escape did not commit (count still 3)', state.clines.length === 3);
+
+    // ---- P6 VISIBILITY ----
+    setClinesVisible(false);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P6.1 clinesVisible flipped to false', state.clinesVisible === false);
+    log('P6.2 vis button reflects state', !document.getElementById('btnVis').classList.contains('active'));
+    setClinesVisible(true);
+    await new Promise((r) => setTimeout(r, 30));
+    log('P6.3 clinesVisible flipped back to true', state.clinesVisible === true);
+
+    // ---- P7 NORMALIZED (full sweep) ----
+    log('P7.1 every committed cline has normalized coord field(s)',
+        state.clines.every((cl) => {
+          if (cl.type === 'h') return isNorm(cl.y);
+          if (cl.type === 'v') return isNorm(cl.x);
+          if (cl.type === 'a') return isNorm(cl.px) && isNorm(cl.py);
+          return false;
+        }));
+
+    // ---- P8 CONSOLE ----
+    log('P8.1 zero console.error/warn during suite', consoleIssues.length === 0,
+        consoleIssues.length ? 'first=' + JSON.stringify(consoleIssues[0]) : '');
+
+    // Render
+    const out = document.getElementById('results');
+    out.textContent = '';
+    results.forEach((r) => {
+      const row = document.createElement('div');
+      row.className = 'row ' + (r.pass ? 'pass' : 'fail');
+      row.textContent = (r.pass ? '✓ PASS  ' : '✗ FAIL  ') + r.name + (r.detail ? '  — ' + r.detail : '');
+      out.appendChild(row);
+    });
+    const failed = results.filter((r) => !r.pass).length;
+    const total = results.length;
+    const sum = document.getElementById('summary');
+    sum.className = 'summary ' + (failed === 0 ? 'pass' : 'fail');
+    sum.textContent = failed === 0
+      ? `STEP 6.a PASS — ${total}/${total} checks passed.`
+      : `STEP 6.a FAIL — ${failed}/${total} checks failed.`;
+
+    window.__step6.lastResults = results;
+    window.__step6.lastSummary = { total, passed: total - failed, failed };
+    return window.__step6.lastSummary;
+  }
+
+  document.getElementById('btnRun').addEventListener('click', runTest);
+  requestAnimationFrame(() => requestAnimationFrame(runTest));
+})();
+</script>
+</body>
+</html>

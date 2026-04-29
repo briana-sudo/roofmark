@@ -11,7 +11,7 @@ import { useAppStore } from '../store/useAppStore'
  * The actual drawing state machine lives in CanvasStage — this is just
  * the UI for changing the `tool` slice.
  */
-const TOOLS = [
+const SHAPE_TOOLS = [
   { id: 'poly', icon: '▱', name: 'Poly', label: 'Polygon — click to place points, double-click or snap-close to commit' },
   { id: 'rect', icon: '▭', name: 'Rect', label: 'Rectangle — click and drag, release to commit' },
   { id: 'tri',  icon: '△', name: 'Tri',  label: 'Triangle — three clicks; auto-commits on third' },
@@ -19,24 +19,40 @@ const TOOLS = [
   { id: 'line', icon: '╱', name: 'Line', label: 'Line — two clicks; auto-commits on second' },
 ]
 
+const CLINE_TOOL = {
+  id: 'cline',
+  icon: '┊',
+  name: 'CLine',
+  label: 'Construction line — drag to place horizontal / vertical / angled reference line',
+}
+
 export default function DrawingTools() {
   const tool = useAppStore((s) => s.tool)
   const setTool = useAppStore((s) => s.setTool)
   const activeLayerId = useAppStore((s) => s.activeLayerId)
-  const disabled = !activeLayerId
+  const clinesVisible = useAppStore((s) => s.clinesVisible)
+  const toggleClinesVisibility = useAppStore((s) => s.toggleClinesVisibility)
 
-  const onSelect = (id) => setTool(tool === id ? null : id)
+  // Shape tools require an active layer (they commit shapes into it).
+  // CLines do not — they live in their own array, not in any layer.
+  const shapeDisabled = !activeLayerId
+  const clineDisabled = false
+
+  const onSelect = (id, disabled) => {
+    if (disabled) return
+    setTool(tool === id ? null : id)
+  }
 
   return (
     <div className="drawing-tools" role="toolbar" aria-label="Drawing tools">
-      {TOOLS.map((t) => (
+      {SHAPE_TOOLS.map((t) => (
         <button
           key={t.id}
           type="button"
           className={tool === t.id ? 'tool-btn active' : 'tool-btn'}
-          onClick={() => onSelect(t.id)}
-          disabled={disabled}
-          title={disabled ? 'Select a layer first' : t.label}
+          onClick={() => onSelect(t.id, shapeDisabled)}
+          disabled={shapeDisabled}
+          title={shapeDisabled ? 'Select a layer first' : t.label}
           aria-pressed={tool === t.id}
           data-tool={t.id}
         >
@@ -44,7 +60,36 @@ export default function DrawingTools() {
           <span className="tool-name">{t.name}</span>
         </button>
       ))}
-      {disabled && <span className="tool-hint">Select a layer to draw</span>}
+
+      <span className="tool-divider" aria-hidden="true" />
+
+      <button
+        key={CLINE_TOOL.id}
+        type="button"
+        className={tool === CLINE_TOOL.id ? 'tool-btn active' : 'tool-btn'}
+        onClick={() => onSelect(CLINE_TOOL.id, clineDisabled)}
+        disabled={clineDisabled}
+        title={CLINE_TOOL.label}
+        aria-pressed={tool === CLINE_TOOL.id}
+        data-tool={CLINE_TOOL.id}
+      >
+        <span className="tool-icon" aria-hidden="true">{CLINE_TOOL.icon}</span>
+        <span className="tool-name">{CLINE_TOOL.name}</span>
+      </button>
+
+      <button
+        type="button"
+        className={clinesVisible ? 'tool-btn cline-vis active' : 'tool-btn cline-vis'}
+        onClick={toggleClinesVisibility}
+        title={clinesVisible ? 'Hide construction lines' : 'Show construction lines'}
+        aria-pressed={clinesVisible}
+        data-testid="btn-clines-vis"
+      >
+        <span className="tool-icon" aria-hidden="true">👁</span>
+        <span className="tool-name">CLines</span>
+      </button>
+
+      {shapeDisabled && <span className="tool-hint">Select a layer to draw shapes</span>}
     </div>
   )
 }

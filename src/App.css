@@ -239,6 +239,20 @@ body {
   letter-spacing: 0.3px;
 }
 
+.tool-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--rm-border);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+.tool-btn.cline-vis.active {
+  background: rgba(0, 255, 204, 0.15);
+  border-color: var(--rm-green);
+  color: var(--rm-fg);
+}
+
 .tool-hint {
   margin-left: auto;
   color: var(--rm-fg-dim);
