@@ -5,9 +5,8 @@ export default function App() {
   const mode = useAppStore((s) => s.mode)
   const saveState = useAppStore((s) => s.saveState)
   const rightDrawerOpen = useAppStore((s) => s.rightDrawerOpen)
-  const jobAddress = useAppStore((s) => s.jobAddress)
-  const jobScope = useAppStore((s) => s.jobScope)
-  const activeTool = useAppStore((s) => s.activeTool)
+  const jobContext = useAppStore((s) => s.jobContext)
+  const tool = useAppStore((s) => s.tool)
   const activeLayerId = useAppStore((s) => s.activeLayerId)
   const cursorX = useAppStore((s) => s.cursorX)
   const cursorY = useAppStore((s) => s.cursorY)
@@ -23,11 +22,11 @@ export default function App() {
         <span className="hdr-divider" />
         <span className="hdr-job" data-slot="job">
           <span className="hdr-label">Job:</span>
-          <span className="hdr-value">{jobAddress ?? '—'}</span>
+          <span className="hdr-value">{jobContext?.address ?? '—'}</span>
         </span>
         <span className="hdr-scope" data-slot="scope">
           <span className="hdr-label">Scope:</span>
-          <span className="hdr-value">{jobScope ?? '—'}</span>
+          <span className="hdr-value">{jobContext?.scope ?? '—'}</span>
         </span>
         <span className="hdr-spacer" />
         <span className="hdr-mode" data-slot="mode">{mode}</span>
@@ -66,7 +65,7 @@ export default function App() {
 
       <footer className="status-bar" role="status">
         <span className="status-cell">Mode: {mode}</span>
-        <span className="status-cell">Tool: {activeTool ?? '—'}</span>
+        <span className="status-cell">Tool: {tool ?? '—'}</span>
         <span className="status-cell">Layer: {activeLayerId ?? '—'}</span>
         <span className="status-cell">X: {cursorX}</span>
         <span className="status-cell">Y: {cursorY}</span>
