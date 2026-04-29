@@ -619,10 +619,32 @@ export default function CanvasStage() {
     }
 
     const onKeyDown = (e) => {
+      // Don't intercept while the user is typing in inputs/textareas
+      // (layer rename, future annotation textareas, etc.).
+      const tag = (e.target?.tagName || '').toUpperCase()
+      const editable = tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable
+      if (editable) return
+
       if (e.key === 'Escape' && draft) {
         draft = null
         isDragging = false
         dynamicDirty = true
+        return
+      }
+
+      // Spec §15 — undo/redo keyboard. Wired here as a Step 2 partial-
+      // completion fix (the store actions shipped in Step 2 but the keyboard
+      // surface was missing until now). Visible header buttons land at
+      // Step 17 per Project Traveler Field 5.
+      const meta = e.ctrlKey || e.metaKey
+      if (!meta) return
+      const k = (e.key || '').toLowerCase()
+      if (k === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        useAppStore.getState().undo()
+      } else if ((k === 'z' && e.shiftKey) || k === 'y') {
+        e.preventDefault()
+        useAppStore.getState().redo()
       }
     }
 
