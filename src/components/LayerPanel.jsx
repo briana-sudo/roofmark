@@ -156,8 +156,6 @@ function LayerRow({
   onDrop,
   onDragEnd,
 }) {
-  const setActiveLayer = useAppStore((s) => s.setActiveLayer)
-
   const handleDelete = (e) => {
     e.stopPropagation()
     const ok = window.confirm(
@@ -169,6 +167,17 @@ function LayerRow({
   const handleVisibilityToggle = (e) => {
     e.stopPropagation()
     useAppStore.getState().toggleLayerVisibility(layer.id)
+  }
+
+  // Row activation runs on mousedown (not click) so it fires regardless of
+  // which child element the pointer lands on — clicks on the layer-name /
+  // color inputs would otherwise be swallowed by the inputs' own
+  // stopPropagation. Clicking vis/delete buttons also activates the row,
+  // which is harmless: deleteLayer nulls the activeLayerId for the deleted
+  // layer, and the other actions (color, name, visibility) are coherent
+  // with "click on a row → that row is now active."
+  const handleActivate = () => {
+    useAppStore.getState().setActiveLayer(layer.id)
   }
 
   const handleColorChange = (e) => {
@@ -194,7 +203,8 @@ function LayerRow({
       onDragLeave={onDragLeave}
       onDrop={(e) => onDrop(e, index)}
       onDragEnd={onDragEnd}
-      onClick={() => setActiveLayer(layer.id)}
+      onMouseDown={handleActivate}
+      onTouchStart={handleActivate}
       data-layer-id={layer.id}
       data-layer-index={index}
     >
