@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RoofMark Step 1.a — Layout Shell Functional Test</title>
+<!--
+========================================================================
+RoofMark Step 1.a — Layout Shell Functional Test (BACKFILL)
+========================================================================
+
+Backfilled : April 29 2026 (per Brian Brain Working Standards Rule 27).
+              Step 1 shipped April 28 2026 (commit 3abbaa4) without an
+              N.a test. This file is the retroactive proof that the
+              layout-shell BLOCK renders correctly in isolation before
+              integration into the React host app.
+
+Block under test:
+  RoofMark layout shell — persistent header (App / Job / Scope / Mode /
+  Save state) + three-column body (220px left / flex canvas / 240px
+  right drawer collapsed-by-default) + status bar (Mode / Tool / Layer
+  / X / Y / Snap / Shape count). CSS Grid for outer rows and columns.
+
+Why standalone (not the React app):
+  Rule 27 requires the BLOCK exercised in isolation. The block here is
+  the HTML structure + CSS rules — not React. The HTML and CSS below
+  are copied verbatim from src/App.jsx + src/App.css (commit 3abbaa4)
+  with React syntax stripped. No React, Konva, or Zustand is loaded.
+  Step 1.b — host integration verification — was the live URL curl +
+  grep on April 28 2026 and is documented in the Traveler.
+
+Runtime target: desktop Chrome 1200px+ (RoofMark Spec §3 — "PC primary
+  use"). Open this file directly in Chrome (file:// is fine — no
+  external deps, no server needed).
+
+Pass criteria (all four groups must pass for Step 1.a):
+  P1. STRUCTURAL — every selector below present in DOM:
+        .app-header, .hdr-app, .hdr-job, .hdr-scope, .hdr-mode,
+        .hdr-save, .app-body.right-collapsed (default state),
+        .panel-left, .canvas-area, .canvas-toolbar, .canvas-stage,
+        .panel-right, .status-bar (with exactly 7 .status-cell).
+  P2. GRID — computed grid-template-columns of .app-body resolves to
+        "220px <fill>px 0px" when collapsed, and "220px <fill>px
+        240px" when class swapped to right-open.
+  P3. DRAWER — .panel-right computed visibility === "hidden" when body
+        has right-collapsed; flips to "visible" on right-open.
+  P4. CONSOLE — zero console.error and zero console.warn during
+        initial render and during the right-drawer class toggle.
+
+Failure modes detected:
+  F1. Missing structural slot — any selector above absent or wrong arity.
+  F2. Grid columns wrong (e.g. 220px / 1fr / 240px while collapsed —
+        drawer always visible — would be a regression).
+  F3. Drawer visibility not flipping with class toggle.
+  F4. Console errors during render (CSS variable resolution failures,
+        bad shorthand, unknown property values, etc).
+
+Operator override (per April 29 2026 Item 4):
+  Brian retains discretion to declare "skip N.a" on any specific step
+  where the test would be redundant. Default is "every step gets a
+  test." Step 1.a is BACKFILLED here, not skipped.
+
+Permanent regression coverage:
+  This file lives at roofmark/test/step-1-functional.html and is
+  re-run on any future modification to App.css / App.jsx layout
+  structure. Expected outcome: still PASS.
+======================================================================== -->
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", sans-serif; background: #1a1d23; color: #e6edf3; }
+  .test-panel { padding: 16px 20px; border-bottom: 2px solid #444; background: #11141a; }
+  .test-panel h1 { margin: 0 0 8px; font-size: 14px; }
+  .test-panel .meta { font-size: 12px; color: #8b949e; line-height: 1.5; }
+  .results { margin-top: 12px; font-family: "SF Mono", Consolas, monospace; font-size: 12px; }
+  .results .pass { color: #3fb950; }
+  .results .fail { color: #f85149; }
+  .results .row { padding: 2px 0; }
+  .toggle-btn { margin-top: 10px; padding: 5px 14px; background: #1f6feb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .summary { margin-top: 12px; padding: 8px 12px; border-radius: 4px; font-weight: 700; font-family: "SF Mono", Consolas, monospace; font-size: 13px; }
+  .summary.pass { background: #1f3320; color: #3fb950; }
+  .summary.fail { background: #321e1e; color: #f85149; }
+
+  /* =====================================================================
+     BLOCK UNDER TEST — copied verbatim from src/App.css (commit 3abbaa4)
+     Selectors prefixed with `.test-app ` to keep test harness CSS
+     isolated from the block CSS.
+     ===================================================================== */
+  :root {
+    --rm-bg: #0d1117;
+    --rm-fg: #e6edf3;
+    --rm-fg-dim: #8b949e;
+    --rm-panel: #161b22;
+    --rm-panel-2: #1f242c;
+    --rm-border: #30363d;
+    --rm-accent: #1f6feb;
+    --rm-orange: #e8531a;
+    --rm-green: #3fb950;
+    --rm-amber: #d29922;
+
+    --rm-hdr-h: 40px;
+    --rm-toolbar-h: 32px;
+    --rm-status-h: 24px;
+    --rm-left-w: 220px;
+    --rm-right-w: 240px;
+
+    --rm-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --rm-mono: "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+
+  .test-app, .test-app * { box-sizing: border-box; }
+
+  .test-app {
+    display: grid;
+    grid-template-rows: var(--rm-hdr-h) 1fr var(--rm-status-h);
+    height: 600px;
+    width: 100%;
+    background: var(--rm-bg);
+    color: var(--rm-fg);
+    font-family: var(--rm-sans);
+    font-size: 13px;
+  }
+
+  .test-app .app-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 16px;
+    background: var(--rm-panel);
+    border-bottom: 1px solid var(--rm-border);
+  }
+  .test-app .hdr-app { font-weight: 700; color: #fff; }
+  .test-app .hdr-divider { width: 1px; height: 18px; background: var(--rm-border); }
+  .test-app .hdr-spacer { flex: 1; }
+  .test-app .hdr-label { color: var(--rm-fg-dim); margin-right: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .test-app .hdr-value { color: var(--rm-fg); font-family: var(--rm-mono); font-size: 12px; }
+  .test-app .hdr-mode { padding: 3px 10px; background: var(--rm-accent); color: #fff; border-radius: 4px; font-weight: 700; font-size: 11px; letter-spacing: 0.5px; }
+  .test-app .hdr-save { font-weight: 600; font-size: 11px; font-family: var(--rm-mono); color: var(--rm-green); }
+
+  .test-app .app-body {
+    display: grid;
+    grid-template-columns: var(--rm-left-w) 1fr 0px;
+    overflow: hidden;
+    height: 100%;
+    transition: grid-template-columns 180ms ease;
+  }
+  .test-app .app-body.right-open {
+    grid-template-columns: var(--rm-left-w) 1fr var(--rm-right-w);
+  }
+
+  .test-app .panel-left,
+  .test-app .panel-right {
+    background: var(--rm-panel);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .test-app .panel-left { border-right: 1px solid var(--rm-border); }
+  .test-app .panel-right { border-left: 1px solid var(--rm-border); visibility: visible; }
+  .test-app .app-body.right-collapsed .panel-right { visibility: hidden; }
+
+  .test-app .panel-header {
+    height: var(--rm-toolbar-h);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--rm-fg-dim);
+    border-bottom: 1px solid var(--rm-border);
+    background: var(--rm-panel-2);
+  }
+  .test-app .panel-body { flex: 1; overflow: auto; padding: 12px; }
+  .test-app .panel-empty { color: var(--rm-fg-dim); font-style: italic; font-size: 12px; }
+
+  .test-app .canvas-area { display: flex; flex-direction: column; min-width: 0; background: #0a0e14; }
+  .test-app .canvas-toolbar {
+    height: var(--rm-toolbar-h);
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    gap: 6px;
+    background: var(--rm-panel-2);
+    border-bottom: 1px solid var(--rm-border);
+  }
+  .test-app .canvas-stage {
+    flex: 1;
+    position: relative;
+    background:
+      linear-gradient(to right, #1a1f2e 1px, transparent 1px) 0 0 / 40px 40px,
+      linear-gradient(to bottom, #1a1f2e 1px, transparent 1px) 0 0 / 40px 40px,
+      var(--rm-bg);
+  }
+
+  .test-app .status-bar {
+    display: flex;
+    gap: 18px;
+    align-items: center;
+    padding: 0 14px;
+    background: var(--rm-panel);
+    border-top: 1px solid var(--rm-border);
+    font-family: var(--rm-mono);
+    font-size: 11px;
+    color: var(--rm-fg-dim);
+  }
+  .test-app .status-cell { white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<section class="test-panel">
+  <h1>RoofMark Step 1.a — Layout Shell Functional Test (Backfill)</h1>
+  <div class="meta">
+    Block: layout shell HTML + CSS, copied verbatim from src/App.jsx + src/App.css (commit 3abbaa4).<br>
+    Runtime target: desktop Chrome 1200px+. Pass criteria documented in file header.<br>
+    Open this file directly in Chrome (file:// is fine, no server needed). Test runs on load.
+  </div>
+  <button class="toggle-btn" id="toggle">Toggle right drawer (collapse ↔ open) — for visual inspection after auto-test runs</button>
+  <div class="results" id="results"></div>
+  <div class="summary" id="summary"></div>
+</section>
+
+<!-- ===== BLOCK UNDER TEST ===== -->
+<div class="test-app" id="app-under-test">
+  <header class="app-header" role="banner">
+    <span class="hdr-app">RoofMark</span>
+    <span class="hdr-divider"></span>
+    <span class="hdr-job"><span class="hdr-label">Job:</span><span class="hdr-value">—</span></span>
+    <span class="hdr-scope"><span class="hdr-label">Scope:</span><span class="hdr-value">—</span></span>
+    <span class="hdr-spacer"></span>
+    <span class="hdr-mode">DRAW</span>
+    <span class="hdr-save">● saved</span>
+  </header>
+
+  <div class="app-body right-collapsed" id="app-body">
+    <aside class="panel-left">
+      <div class="panel-header">Layers</div>
+      <div class="panel-body panel-empty">(Layer panel — Step 4)</div>
+    </aside>
+    <main class="canvas-area">
+      <div class="canvas-toolbar"></div>
+      <div class="canvas-stage"></div>
+    </main>
+    <aside class="panel-right">
+      <div class="panel-header">Properties</div>
+      <div class="panel-body panel-empty">(Properties drawer — Step 10)</div>
+    </aside>
+  </div>
+
+  <footer class="status-bar" role="status">
+    <span class="status-cell">Mode: DRAW</span>
+    <span class="status-cell">Tool: —</span>
+    <span class="status-cell">Layer: —</span>
+    <span class="status-cell">X: 0</span>
+    <span class="status-cell">Y: 0</span>
+    <span class="status-cell">Snap: —</span>
+    <span class="status-cell">Shapes: 0</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  // Capture console errors/warnings during the render + toggle window.
+  const consoleIssues = [];
+  const origError = console.error;
+  const origWarn  = console.warn;
+  console.error = (...args) => { consoleIssues.push(['error', args.map(String).join(' ')]); origError.apply(console, args); };
+  console.warn  = (...args) => { consoleIssues.push(['warn',  args.map(String).join(' ')]); origWarn.apply(console, args); };
+
+  const results = [];
+  const check = (name, fn) => {
+    let pass = false, detail = '';
+    try {
+      const r = fn();
+      pass = r === true || (r && r.pass === true);
+      detail = (r && r.detail) || '';
+    } catch (e) {
+      pass = false;
+      detail = String(e);
+    }
+    results.push({ name, pass, detail });
+  };
+
+  const root = document.getElementById('app-under-test');
+  const body = document.getElementById('app-body');
+  const drawer = root.querySelector('.panel-right');
+  const gridCols = () => getComputedStyle(body).gridTemplateColumns;
+
+  // ---- P1 STRUCTURAL --------------------------------------------------------
+  check('P1.1 root .test-app present', () => !!root || { pass: false, detail: 'missing' });
+  check('P1.2 .app-header[role=banner]', () => {
+    const h = root.querySelector('.app-header');
+    return h && h.getAttribute('role') === 'banner' || { pass: false, detail: 'missing or wrong role' };
+  });
+  check('P1.3 header has 5 slots (app/job/scope/mode/save)', () => {
+    const slots = ['.hdr-app', '.hdr-job', '.hdr-scope', '.hdr-mode', '.hdr-save'];
+    const missing = slots.filter(s => !root.querySelector(s));
+    return missing.length === 0 || { pass: false, detail: 'missing ' + missing.join(',') };
+  });
+  check('P1.4 .app-body.right-collapsed default', () => !!root.querySelector('.app-body.right-collapsed') || { pass: false, detail: 'missing' });
+  check('P1.5 body has 5 child slots (panel-left/canvas-area/canvas-toolbar/canvas-stage/panel-right)', () => {
+    const slots = ['.panel-left', '.canvas-area', '.canvas-toolbar', '.canvas-stage', '.panel-right'];
+    const missing = slots.filter(s => !root.querySelector(s));
+    return missing.length === 0 || { pass: false, detail: 'missing ' + missing.join(',') };
+  });
+  check('P1.6 .status-bar[role=status] with exactly 7 .status-cell', () => {
+    const sb = root.querySelector('.status-bar');
+    if (!sb) return { pass: false, detail: 'no status-bar' };
+    if (sb.getAttribute('role') !== 'status') return { pass: false, detail: 'role=' + sb.getAttribute('role') };
+    const cells = sb.querySelectorAll('.status-cell');
+    return cells.length === 7 || { pass: false, detail: 'cell count=' + cells.length };
+  });
+
+  // ---- P2 GRID (collapsed) --------------------------------------------------
+  check('P2.1 collapsed grid columns: 220px / fill / 0px', () => {
+    const parts = gridCols().trim().split(/\s+/);
+    if (parts.length !== 3) return { pass: false, detail: 'parts=' + parts.length + ' (' + gridCols() + ')' };
+    if (parts[0] !== '220px') return { pass: false, detail: 'col1=' + parts[0] };
+    if (parts[2] !== '0px')   return { pass: false, detail: 'col3=' + parts[2] };
+    return true;
+  });
+
+  // ---- P3 DRAWER VISIBILITY (collapsed) -------------------------------------
+  check('P3.1 drawer visibility === "hidden" when collapsed', () => {
+    const v = getComputedStyle(drawer).visibility;
+    return v === 'hidden' || { pass: false, detail: 'visibility=' + v };
+  });
+
+  // ---- toggle to right-open --------------------------------------------------
+  body.classList.remove('right-collapsed');
+  body.classList.add('right-open');
+  void body.offsetHeight;  // force reflow
+
+  check('P2.2 expanded grid columns: 220px / fill / 240px', () => {
+    const parts = gridCols().trim().split(/\s+/);
+    if (parts.length !== 3) return { pass: false, detail: 'parts=' + parts.length + ' (' + gridCols() + ')' };
+    if (parts[0] !== '220px') return { pass: false, detail: 'col1=' + parts[0] };
+    if (parts[2] !== '240px') return { pass: false, detail: 'col3=' + parts[2] };
+    return true;
+  });
+
+  check('P3.2 drawer visibility === "visible" when right-open', () => {
+    const v = getComputedStyle(drawer).visibility;
+    return v === 'visible' || { pass: false, detail: 'visibility=' + v };
+  });
+
+  // restore collapsed for visual inspection
+  body.classList.remove('right-open');
+  body.classList.add('right-collapsed');
+
+  // ---- P4 CONSOLE CLEAN ------------------------------------------------------
+  check('P4.1 zero console.error / console.warn during render + toggle', () => {
+    return consoleIssues.length === 0 || { pass: false, detail: consoleIssues.length + ' issue(s); first: ' + JSON.stringify(consoleIssues[0]) };
+  });
+
+  // ---- render -----------------------------------------------------------------
+  const out = document.getElementById('results');
+  results.forEach(r => {
+    const row = document.createElement('div');
+    row.className = 'row ' + (r.pass ? 'pass' : 'fail');
+    row.textContent = (r.pass ? '✓ PASS  ' : '✗ FAIL  ') + r.name + (r.detail ? '  — ' + r.detail : '');
+    out.appendChild(row);
+  });
+  const failed = results.filter(r => !r.pass).length;
+  const total  = results.length;
+  const sum = document.getElementById('summary');
+  sum.className = 'summary ' + (failed === 0 ? 'pass' : 'fail');
+  sum.textContent = failed === 0
+    ? 'STEP 1.a PASS — ' + total + '/' + total + ' checks passed.'
+    : 'STEP 1.a FAIL — ' + failed + '/' + total + ' checks failed (see rows above).';
+
+  console.error = origError;
+  console.warn  = origWarn;
+
+  // toggle for live visual inspection
+  document.getElementById('toggle').addEventListener('click', () => {
+    if (body.classList.contains('right-collapsed')) {
+      body.classList.remove('right-collapsed');
+      body.classList.add('right-open');
+    } else {
+      body.classList.remove('right-open');
+      body.classList.add('right-collapsed');
+    }
+  });
+})();
+</script>
+</body>
+</html>
