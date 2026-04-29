@@ -77,10 +77,11 @@ const sequenceDefaults = (n) => ({
 // the data itself survives.
 const PERSIST_KEYS = [
   'layers', 'sequences', 'clines', 'jobContext',
-  'gridSize', 'rightDrawerOpen',
-  'mode', 'activeLayerId',
+  'gridSize', 'rightDrawerOpen', 'drawerTab',
+  'mode', 'activeLayerId', 'activeSeqId',
 ]
 const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE', 'TECHNICAL'])
+const VALID_DRAWER_TABS = new Set(['properties', 'sequences'])
 
 // Step 10 — accept either a number (legacy / square grid) or an {x, y}
 // object (rectangular). Always normalize to {x, y} on the way in.
@@ -161,7 +162,14 @@ const initialState = {
     hydrated?.activeLayerId
     && (hydrated?.layers || []).some((l) => l.id === hydrated.activeLayerId)
   ) ? hydrated.activeLayerId : null,
-  activeSeqId: null,
+  // Step 11 — `activeSeqId` persisted alongside the sequences themselves so
+  // refresh restores the operator's sequence context. Validate against the
+  // hydrated sequences array; fall back to null if the persisted id no
+  // longer exists.
+  activeSeqId: (
+    hydrated?.activeSeqId
+    && (hydrated?.sequences || []).some((s) => s.id === hydrated.activeSeqId)
+  ) ? hydrated.activeSeqId : null,
 
   snapEnabled: true,
   gridEnabled: false,
@@ -185,6 +193,11 @@ const initialState = {
   selected: null,
 
   rightDrawerOpen: hydrated?.rightDrawerOpen ?? false,
+  // Step 11 — which view fills the right-drawer body. Two values:
+  // 'properties' (per-layer color/fill/stroke) or 'sequences' (sequence
+  // panel). Persisted so the drawer reopens to the same view.
+  drawerTab: (hydrated?.drawerTab && VALID_DRAWER_TABS.has(hydrated.drawerTab))
+    ? hydrated.drawerTab : 'properties',
 
   // Spec §6.6 — single global show/hide for the entire CLINES set.
   // Per-cline visible flag still exists for future edit-mode toggling.
@@ -406,6 +419,18 @@ export const useAppStore = create((set, get) => {
 
     setActiveSequence: (id) => set({ activeSeqId: id }),
 
+    // Step 11 — sequence reorder, mirrors `reorderLayers`. Pass the full
+    // ordered list of ids; missing ids are appended at the end so the call
+    // can never silently drop a sequence.
+    reorderSequences: (idsInOrder) =>
+      set((s) => {
+        const byId = new Map(s.sequences.map((seq) => [seq.id, seq]))
+        const next = idsInOrder.map((id) => byId.get(id)).filter(Boolean)
+        const seen = new Set(idsInOrder)
+        for (const seq of s.sequences) if (!seen.has(seq.id)) next.push(seq)
+        return { sequences: next }
+      }),
+
     // ============ Annotation actions ========================================
     addAnnotation: (seqId, annotation) => {
       pushUndo()
@@ -531,6 +556,13 @@ export const useAppStore = create((set, get) => {
       }),
     toggleRightDrawer: () =>
       set((s) => ({ rightDrawerOpen: !s.rightDrawerOpen })),
+    // Step 11 — switch which tab fills the right-drawer body. Validates
+    // input so an unknown tab silently no-ops rather than corrupting
+    // state.
+    setDrawerTab: (tab) => {
+      if (!VALID_DRAWER_TABS.has(tab)) return
+      set({ drawerTab: tab })
+    },
 
     // ============ Job context (Step 15 populates) ===========================
     setJob: (jobContext) => set({ jobContext }),
@@ -643,8 +675,10 @@ useAppStore.subscribe((state, prev) => {
   const uiFlagChanged = (
     state.gridSize !== prev.gridSize ||
     state.rightDrawerOpen !== prev.rightDrawerOpen ||
+    state.drawerTab !== prev.drawerTab ||
     state.mode !== prev.mode ||
-    state.activeLayerId !== prev.activeLayerId
+    state.activeLayerId !== prev.activeLayerId ||
+    state.activeSeqId !== prev.activeSeqId
   )
   if (!dataChanged && !uiFlagChanged) return
 

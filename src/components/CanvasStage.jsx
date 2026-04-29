@@ -438,10 +438,20 @@ export default function CanvasStage() {
         ctxStatic.setLineDash([])
       }
 
-      // Layer shapes (bottom to top, skipping invisible layers)
+      // Layer shapes (bottom to top, skipping invisible layers).
+      // Step 11 — when SEQUENCE mode is active AND a sequence is active,
+      // additionally filter by the sequence's per-layer visibility map.
+      // Default TRUE (unlisted layers are visible in the sequence) so a
+      // newly added layer doesn't disappear retroactively from existing
+      // sequences. DRAW / EDIT / TECHNICAL modes ignore the sequence
+      // filter entirely — all visible layers paint.
       const layers = storeState.layers
+      const seqFilter = (storeState.mode === 'SEQUENCE' && storeState.activeSeqId)
+        ? (storeState.sequences.find((s) => s.id === storeState.activeSeqId)?.layers || {})
+        : null
       for (const layer of layers) {
         if (!layer.visible) continue
+        if (seqFilter && seqFilter[layer.id] === false) continue
         for (const shape of layer.shapes || []) {
           drawShapeOnContext(ctxStatic, shape, cw, ch, layer)
         }
@@ -1072,12 +1082,19 @@ export default function CanvasStage() {
         staticDirty = true
         dynamicDirty = true
       }
-      // Mode change repaints (handles only show in EDIT) and closes any
-      // open context menu (left-over UI from a prior mode is confusing).
+      // Mode change repaints (handles only show in EDIT, SEQUENCE-mode
+      // changes the layer filter) and closes any open context menu
+      // (left-over UI from a prior mode is confusing).
       if (state.mode !== prev.mode) {
         staticDirty = true
         dynamicDirty = true
         setCtxMenu(null)
+      }
+      // Step 11 — sequence-array change OR active sequence change updates
+      // the SEQUENCE-mode layer filter so the canvas reflects the new
+      // visibility map immediately.
+      if (state.sequences !== prev.sequences || state.activeSeqId !== prev.activeSeqId) {
+        staticDirty = true
       }
       // Toggling the global CLines visibility flag must redraw static so
       // the lines appear/disappear without a separate mutation to clines.

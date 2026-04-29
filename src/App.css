@@ -820,3 +820,191 @@ body {
 .color-palette .swatch-fine-tune:hover {
   border-color: var(--rm-fg-dim);
 }
+
+/* ============================================================================
+ * Step 11 — Drawer tabs + Sequence panel (Spec §10)
+ * ============================================================================ */
+
+/* ---- Drawer tab strip (Properties / Sequences) ---- */
+.drawer-tabs {
+  display: flex;
+  height: var(--rm-toolbar-h);
+  border-bottom: 1px solid var(--rm-border);
+  background: var(--rm-panel-2);
+  flex-shrink: 0;
+}
+
+.drawer-tab {
+  flex: 1;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--rm-fg-dim);
+  border: none;
+  border-right: 1px solid var(--rm-border);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  cursor: pointer;
+  height: 100%;
+}
+
+.drawer-tab:last-child { border-right: none; }
+
+.drawer-tab:hover { color: var(--rm-fg); }
+
+.drawer-tab.active {
+  background: var(--rm-panel);
+  color: var(--rm-fg);
+  box-shadow: inset 0 -2px 0 var(--rm-accent);
+}
+
+.drawer-tab-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ---- Sequence panel ---- */
+.sequence-panel-header {
+  gap: 8px;
+}
+
+.sequence-panel-header .panel-title {
+  flex: 1;
+}
+
+.sequence-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px;
+}
+
+.sequence-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sequence-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--rm-panel-2);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sequence-row:hover { border-color: var(--rm-fg-dim); }
+
+.sequence-row.active {
+  border-color: var(--rm-accent);
+  background: rgba(31, 111, 235, 0.12);
+}
+
+.sequence-row.drag-over { border-top: 2px solid var(--rm-accent); }
+
+.sequence-row .drag-handle {
+  color: var(--rm-fg-dim);
+  cursor: grab;
+  font-size: 13px;
+  padding: 0 2px;
+}
+
+.sequence-row .seq-active-dot {
+  color: var(--rm-fg-dim);
+  font-size: 12px;
+  width: 12px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.sequence-row .seq-active-dot.active {
+  color: var(--rm-accent);
+}
+
+.sequence-row .sequence-title {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--rm-fg);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 2px;
+  min-width: 0;
+}
+
+.sequence-row .sequence-title:focus {
+  background: var(--rm-bg);
+  box-shadow: 0 0 0 1px var(--rm-accent);
+}
+
+/* ---- Per-active-sequence layer toggles ---- */
+.sequence-layer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--rm-border);
+  padding-top: 12px;
+}
+
+.sequence-layer-list-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--rm-fg-dim);
+  padding-bottom: 4px;
+}
+
+.sequence-layer-toggles {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sequence-layer-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 3px;
+}
+
+.sequence-layer-toggle-row:hover {
+  background: var(--rm-panel-2);
+}
+
+.sequence-layer-toggle-row .btn-vis {
+  font-size: 12px;
+  width: 18px;
+  flex-shrink: 0;
+}
+
+.sequence-layer-toggle-row .btn-vis.off {
+  color: var(--rm-fg-dim);
+  opacity: 0.5;
+}
+
+.sequence-layer-toggle-row .sequence-layer-name {
+  font-size: 12px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

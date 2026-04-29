@@ -3,7 +3,8 @@ import { useAppStore } from '../store/useAppStore'
 /**
  * PropertiesPanel — Step 10 of Kickoff Spec §5/§6.
  *
- * Right-drawer panel that edits the ACTIVE layer's render properties:
+ * Tab body for the Properties tab in the right drawer. Edits the ACTIVE
+ * layer's render properties:
  *   - Color (10-swatch palette + native fine-tune picker for custom RGB)
  *   - Fill on/off + opacity slider
  *   - Stroke on/off + weight (px) + opacity slider
@@ -13,10 +14,10 @@ import { useAppStore } from '../store/useAppStore'
  * and the canvas renderer reflect changes immediately. The Properties panel
  * and the LayerPanel are parallel views of the same underlying layer state.
  *
- * Mounted inside the right drawer; `<aside class="panel-right">` wrapper
- * is owned here (parallel to LayerPanel owning `panel-left`). Visibility
- * (open vs collapsed) is controlled by App.jsx via the body grid columns
- * + `aria-hidden` flag, NOT by this component.
+ * Step 11 refactor: the `<aside class="panel-right">` wrapper moved to
+ * App.jsx so the drawer can host two tab bodies (Properties + Sequences).
+ * This component returns the tab body content only (a panel-header for
+ * the active layer name, plus a panel-body div).
  */
 const COLOR_PALETTE = [
   // KCC brand
@@ -35,7 +36,6 @@ const COLOR_PALETTE = [
 
 export default function PropertiesPanel() {
   const activeLayerId = useAppStore((s) => s.activeLayerId)
-  const rightDrawerOpen = useAppStore((s) => s.rightDrawerOpen)
   const layer = useAppStore((s) =>
     s.layers.find((l) => l.id === activeLayerId) || null
   )
@@ -43,16 +43,14 @@ export default function PropertiesPanel() {
   const setColor = (color) => useAppStore.getState().setLayerColor(layer.id, color)
   const setProps = (partial) => useAppStore.getState().updateLayerProps(layer.id, partial)
 
-  const ariaHidden = !rightDrawerOpen
-
   if (!layer) {
     return (
-      <aside className="panel-right" aria-label="Layer properties" aria-hidden={ariaHidden}>
+      <>
         <div className="panel-header">Properties</div>
         <div className="panel-body panel-empty">
           Select a layer to edit its properties.
         </div>
-      </aside>
+      </>
     )
   }
 
@@ -65,7 +63,7 @@ export default function PropertiesPanel() {
   const strokeWeight = layer.strokeWeight ?? 2
 
   return (
-    <aside className="panel-right" aria-label="Layer properties" aria-hidden={ariaHidden}>
+    <>
       <div className="panel-header">
         <span className="panel-title">{layer.name || 'Layer'}</span>
       </div>
@@ -178,6 +176,6 @@ export default function PropertiesPanel() {
           </label>
         </section>
       </div>
-    </aside>
+    </>
   )
 }

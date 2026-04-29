@@ -4,6 +4,7 @@ import LayerPanel from './components/LayerPanel'
 import DrawingTools from './components/DrawingTools'
 import ModeToggle from './components/ModeToggle'
 import PropertiesPanel from './components/PropertiesPanel'
+import SequencePanel from './components/SequencePanel'
 import './App.css'
 
 export default function App() {
@@ -11,6 +12,9 @@ export default function App() {
   const saveState = useAppStore((s) => s.saveState)
   const rightDrawerOpen = useAppStore((s) => s.rightDrawerOpen)
   const toggleRightDrawer = useAppStore((s) => s.toggleRightDrawer)
+  // Step 11 — drawer tab determines which body fills the right drawer.
+  const drawerTab = useAppStore((s) => s.drawerTab)
+  const setDrawerTab = useAppStore((s) => s.setDrawerTab)
   const jobContext = useAppStore((s) => s.jobContext)
   const tool = useAppStore((s) => s.tool)
   const activeLayerId = useAppStore((s) => s.activeLayerId)
@@ -82,7 +86,46 @@ export default function App() {
           </button>
         </main>
 
-        <PropertiesPanel />
+        {/*
+          Step 11 — right drawer hosts a two-tab view: Properties (per-active-
+          layer color/fill/stroke from Step 10) and Sequences (per-sequence
+          layer-visibility from Step 11). Tabs are visible chips at the top of
+          the drawer (Rule 28: every new affordance must be operator-discoverable
+          via natural UI exploration). Drawer wrapper + tab strip live here so
+          the body can swap content without re-mounting the wrapper.
+        */}
+        <aside
+          className="panel-right"
+          aria-label="Properties / Sequences drawer"
+          aria-hidden={!rightDrawerOpen}
+          id="panel-right"
+        >
+          <div className="drawer-tabs" role="tablist" aria-label="Drawer view">
+            <button
+              type="button"
+              role="tab"
+              className={drawerTab === 'properties' ? 'drawer-tab active' : 'drawer-tab'}
+              onClick={() => setDrawerTab('properties')}
+              aria-selected={drawerTab === 'properties'}
+              data-testid="drawer-tab-properties"
+            >
+              Properties
+            </button>
+            <button
+              type="button"
+              role="tab"
+              className={drawerTab === 'sequences' ? 'drawer-tab active' : 'drawer-tab'}
+              onClick={() => setDrawerTab('sequences')}
+              aria-selected={drawerTab === 'sequences'}
+              data-testid="drawer-tab-sequences"
+            >
+              Sequences
+            </button>
+          </div>
+          <div className="drawer-tab-body" role="tabpanel">
+            {drawerTab === 'sequences' ? <SequencePanel /> : <PropertiesPanel />}
+          </div>
+        </aside>
       </div>
 
       <footer className="status-bar" role="status">
