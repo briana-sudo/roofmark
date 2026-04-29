@@ -43,7 +43,9 @@ const newClineId = () => `cl${++_clineSeq}`
 const newAnnoId = () => `a${++_annoSeq}`
 
 // ---- Defaults --------------------------------------------------------------
-const DEFAULT_LAYER_COLOR = '#3b82f6'
+// Spec §5: "+ Add Layer button — creates blank layer with name 'New Layer',
+// color #ffffff". User picks the real color via the layer panel color picker.
+const DEFAULT_LAYER_COLOR = '#ffffff'
 
 const layerDefaults = () => ({
   id: newLayerId(),

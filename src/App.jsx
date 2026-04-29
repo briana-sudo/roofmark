@@ -1,5 +1,6 @@
 import { useAppStore } from './store/useAppStore'
 import CanvasStage from './components/CanvasStage'
+import LayerPanel from './components/LayerPanel'
 import './App.css'
 
 export default function App() {
@@ -37,12 +38,7 @@ export default function App() {
       </header>
 
       <div className={`app-body ${rightDrawerOpen ? 'right-open' : 'right-collapsed'}`}>
-        <aside className="panel-left" aria-label="Layer / sequence panel">
-          <div className="panel-header">Layers</div>
-          <div className="panel-body panel-empty">
-            (Layer panel — Step 4)
-          </div>
-        </aside>
+        <LayerPanel />
 
         <main className="canvas-area" aria-label="Canvas">
           <div className="canvas-toolbar">
