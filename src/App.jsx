@@ -2,6 +2,7 @@ import { useAppStore } from './store/useAppStore'
 import CanvasStage from './components/CanvasStage'
 import LayerPanel from './components/LayerPanel'
 import DrawingTools from './components/DrawingTools'
+import ModeToggle from './components/ModeToggle'
 import './App.css'
 
 export default function App() {
@@ -32,7 +33,7 @@ export default function App() {
           <span className="hdr-value">{jobContext?.scope ?? '—'}</span>
         </span>
         <span className="hdr-spacer" />
-        <span className="hdr-mode" data-slot="mode">{mode}</span>
+        <ModeToggle />
         <span className={`hdr-save state-${saveState}`} data-slot="save">
           ● {saveState}
         </span>

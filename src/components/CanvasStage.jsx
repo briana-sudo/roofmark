@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
+import ContextMenu from './ContextMenu'
 
 /**
  * CanvasStage — Step 3 substrate + Step 5 drawing tools (Spec §6, §7).
@@ -62,6 +63,108 @@ function projectOntoCline(cursorX, cursorY, cl, cw, ch) {
   const dx = cursorX - ax, dy = cursorY - ay
   const t = dx * cosA + dy * sinA
   return { x: ax + t * cosA, y: ay + t * sinA }
+}
+
+// Spec §9 — edit-mode hit-test + handle helpers. Same math as the block
+// test at /test/step-9-functional.html.
+function pointInPolygon(px, py, pts) {
+  let inside = false
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x, yi = pts[i].y
+    const xj = pts[j].x, yj = pts[j].y
+    const intersect = ((yi > py) !== (yj > py))
+      && (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi)
+    if (intersect) inside = !inside
+  }
+  return inside
+}
+
+function distToSegment(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay
+  const lenSq = dx * dx + dy * dy
+  if (lenSq < 1e-12) {
+    const ex = px - ax, ey = py - ay
+    return Math.sqrt(ex * ex + ey * ey)
+  }
+  let t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+  t = Math.max(0, Math.min(1, t))
+  const cx = ax + t * dx, cy = ay + t * dy
+  const ex = px - cx, ey = py - cy
+  return Math.sqrt(ex * ex + ey * ey)
+}
+
+function shapeHit(shape, pxNorm, pyNorm, cw, ch) {
+  if (shape.type === 'circ') {
+    const dx = pxNorm * cw - shape.cx * cw
+    const dy = pyNorm * ch - shape.cy * ch
+    return Math.sqrt(dx * dx + dy * dy) <= shape.r * cw
+  }
+  if (shape.type === 'line') {
+    if (!shape.pts || shape.pts.length < 2) return false
+    const a = { x: shape.pts[0].x * cw, y: shape.pts[0].y * ch }
+    const b = { x: shape.pts[1].x * cw, y: shape.pts[1].y * ch }
+    return distToSegment(pxNorm * cw, pyNorm * ch, a.x, a.y, b.x, b.y) <= 6
+  }
+  if (!shape.pts || shape.pts.length < 3) return false
+  const denormPts = shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }))
+  return pointInPolygon(pxNorm * cw, pyNorm * ch, denormPts)
+}
+
+function hitTest(pxNorm, pyNorm, layers, cw, ch) {
+  for (let i = layers.length - 1; i >= 0; i--) {
+    const layer = layers[i]
+    if (!layer.visible) continue
+    const shapes = layer.shapes || []
+    for (let j = shapes.length - 1; j >= 0; j--) {
+      if (shapeHit(shapes[j], pxNorm, pyNorm, cw, ch)) {
+        return { layerId: layer.id, shapeId: shapes[j].id }
+      }
+    }
+  }
+  return null
+}
+
+function shapeHandlePoints(shape, cw, ch) {
+  if (shape.type === 'circ') {
+    return [
+      { x: shape.cx * cw, y: shape.cy * ch },
+      { x: (shape.cx + shape.r) * cw, y: shape.cy * ch },
+    ]
+  }
+  if (!shape.pts) return []
+  return shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }))
+}
+
+function shapeCentroid(shape, cw, ch) {
+  if (shape.type === 'circ') return { x: shape.cx * cw, y: shape.cy * ch }
+  if (!shape.pts || shape.pts.length === 0) return null
+  let sx = 0, sy = 0
+  for (const p of shape.pts) { sx += p.x; sy += p.y }
+  return { x: (sx / shape.pts.length) * cw, y: (sy / shape.pts.length) * ch }
+}
+
+function movePoint(shape, pointIndex, newCanvasPt, cw, ch) {
+  if (shape.type === 'circ') {
+    if (pointIndex === 0) return { ...shape, cx: newCanvasPt.x / cw, cy: newCanvasPt.y / ch }
+    const cxPx = shape.cx * cw
+    const cyPx = shape.cy * ch
+    const dx = newCanvasPt.x - cxPx
+    const dy = newCanvasPt.y - cyPx
+    return { ...shape, r: Math.sqrt(dx * dx + dy * dy) / cw }
+  }
+  if (!shape.pts) return shape
+  const newPts = shape.pts.map((p, i) =>
+    i === pointIndex ? { x: newCanvasPt.x / cw, y: newCanvasPt.y / ch } : p
+  )
+  return { ...shape, pts: newPts }
+}
+
+function moveBody(shape, deltaCanvas, cw, ch) {
+  const dxN = deltaCanvas.x / cw
+  const dyN = deltaCanvas.y / ch
+  if (shape.type === 'circ') return { ...shape, cx: shape.cx + dxN, cy: shape.cy + dyN }
+  if (!shape.pts) return shape
+  return { ...shape, pts: shape.pts.map((p) => ({ x: p.x + dxN, y: p.y + dyN })) }
 }
 
 function computeSnap(args) {
@@ -139,6 +242,10 @@ export default function CanvasStage() {
   const staticCanvasRef = useRef(null)
   const dynamicCanvasRef = useRef(null)
   const tool = useAppStore((s) => s.tool)
+  // Spec §9 — context menu state lives at component-level so the JSX can
+  // render <ContextMenu> conditionally. The useEffect captures setCtxMenu
+  // (stable across renders) to call from inside the contextmenu handler.
+  const [ctxMenu, setCtxMenu] = useState(null)
 
   useEffect(() => {
     const container = containerRef.current
@@ -168,6 +275,20 @@ export default function CanvasStage() {
     // from React render). The rAF draw routine reads these directly.
     let draft = null
     let isDragging = false
+
+    // Spec §9 — edit-mode drag state (closure-scoped). Set on mousedown
+    // when a handle or body-center is hit; mutated each mousemove via
+    // movePoint / moveBody; cleared on mouseup.
+    //   mode:        'point' | 'body'
+    //   layerId:     id of the layer containing the dragged shape
+    //   shapeId:     id of the dragged shape
+    //   pointIndex:  for 'point' drag, which handle (0…N-1); for circle,
+    //                0 = center, 1 = radius handle
+    //   originShape: deep-clone of the shape at drag start; movePoint /
+    //                moveBody apply against this so re-drags compose
+    //                from the same baseline
+    //   originCursor: cursor canvas-px at drag start (for body delta)
+    let editDrag = null
 
     const resizeAll = () => {
       sizeCanvas(cvStatic)
@@ -317,6 +438,39 @@ export default function CanvasStage() {
           drawShapeOnContext(ctxStatic, shape, cw, ch, layer)
         }
       }
+
+      // Spec §9 — selected shape outline (white, +1 stroke weight)
+      const sel = storeState.selected
+      if (sel) {
+        const layer = layers.find((l) => l.id === sel.layerId)
+        const shape = layer?.visible
+          ? (layer.shapes || []).find((sh) => sh.id === sel.shapeId)
+          : null
+        if (shape) {
+          ctxStatic.strokeStyle = '#ffffff'
+          ctxStatic.lineWidth = (layer.strokeWeight || 2) + 1
+          ctxStatic.globalAlpha = 1
+          if (shape.type === 'circ') {
+            ctxStatic.beginPath()
+            ctxStatic.arc(shape.cx * cw, shape.cy * ch, shape.r * cw, 0, Math.PI * 2)
+            ctxStatic.stroke()
+          } else if (shape.type === 'line' && shape.pts && shape.pts.length === 2) {
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(shape.pts[0].x * cw, shape.pts[0].y * ch)
+            ctxStatic.lineTo(shape.pts[1].x * cw, shape.pts[1].y * ch)
+            ctxStatic.stroke()
+          } else if (shape.pts && shape.pts.length >= 2) {
+            ctxStatic.beginPath()
+            shape.pts.forEach((p, i) => {
+              const x = p.x * cw, y = p.y * ch
+              if (i === 0) ctxStatic.moveTo(x, y)
+              else ctxStatic.lineTo(x, y)
+            })
+            ctxStatic.closePath()
+            ctxStatic.stroke()
+          }
+        }
+      }
       ctxStatic.restore()
     }
 
@@ -391,6 +545,47 @@ export default function CanvasStage() {
           ctxDynamic.stroke()
         }
         ctxDynamic.setLineDash([])
+      }
+
+      // Spec §9 — selection handles when in EDIT mode with a selection.
+      // Painted before the snap indicator so snap targets stay visible.
+      if (state.mode === 'EDIT' && state.selected) {
+        const sel = state.selected
+        const layer = state.layers.find((l) => l.id === sel.layerId)
+        const shape = layer?.visible
+          ? (layer.shapes || []).find((sh) => sh.id === sel.shapeId)
+          : null
+        if (shape) {
+          const layerColor = layer.color || '#3b82f6'
+          // Point handles
+          const handles = shapeHandlePoints(shape, container.clientWidth, container.clientHeight)
+          for (const p of handles) {
+            ctxDynamic.fillStyle = layerColor
+            ctxDynamic.strokeStyle = '#ffffff'
+            ctxDynamic.lineWidth = 1.5
+            ctxDynamic.beginPath()
+            ctxDynamic.arc(p.x, p.y, 5, 0, Math.PI * 2)
+            ctxDynamic.fill()
+            ctxDynamic.stroke()
+          }
+          // Body center handle (only for non-circle, since circle's pt[0] IS center)
+          if (shape.type !== 'circ') {
+            const c = shapeCentroid(shape, container.clientWidth, container.clientHeight)
+            if (c) {
+              ctxDynamic.strokeStyle = '#ffffff'
+              ctxDynamic.lineWidth = 1.5
+              ctxDynamic.beginPath()
+              ctxDynamic.arc(c.x, c.y, 8, 0, Math.PI * 2)
+              ctxDynamic.stroke()
+              ctxDynamic.beginPath()
+              ctxDynamic.moveTo(c.x - 5, c.y + 0.5)
+              ctxDynamic.lineTo(c.x + 5, c.y + 0.5)
+              ctxDynamic.moveTo(c.x + 0.5, c.y - 5)
+              ctxDynamic.lineTo(c.x + 0.5, c.y + 5)
+              ctxDynamic.stroke()
+            }
+          }
+        }
       }
 
       // Snap indicator (Spec §8 colors + shapes)
@@ -563,18 +758,108 @@ export default function CanvasStage() {
         && prev.x === snapPt.x && prev.y === snapPt.y && prev.type === snapPt.type)
         || (prev === null && snapPt === null)
       if (!same) store.setSnap(snapPt)
+
+      // Spec §9 — edit-mode handle drag. Applies the delta or new point
+      // against the original shape baseline so re-entering / leaving the
+      // canvas during drag stays stable.
+      if (editDrag) {
+        const cw = container.clientWidth
+        const ch = container.clientHeight
+        // Use snap target when available (Spec §9: "Snap applies while
+        // dragging handles") for point drags; body drags use raw cursor.
+        const useX = (editDrag.mode === 'point' && snapPt) ? Math.round(snapPt.x) : x
+        const useY = (editDrag.mode === 'point' && snapPt) ? Math.round(snapPt.y) : y
+        let newShape
+        if (editDrag.mode === 'point') {
+          newShape = movePoint(editDrag.originShape, editDrag.pointIndex, { x: useX, y: useY }, cw, ch)
+        } else {
+          const dx = useX - editDrag.originCursor.x
+          const dy = useY - editDrag.originCursor.y
+          newShape = moveBody(editDrag.originShape, { x: dx, y: dy }, cw, ch)
+        }
+        // Apply the move via store updateShape — the layers reference
+        // change triggers staticDirty via the existing subscription.
+        store.updateShape(editDrag.layerId, editDrag.shapeId, newShape)
+      }
+
       dynamicDirty = true
     }
 
     const onMouseDown = (e) => {
       const store = useAppStore.getState()
+      const cw = container.clientWidth
+      const ch = container.clientHeight
+      const raw = pointFromClient(e.clientX, e.clientY)
+
+      // Spec §9 — EDIT mode branches BEFORE the tool dispatch.
+      if (store.mode === 'EDIT') {
+        // Don't intercept right-clicks (handled by onContextMenu instead).
+        if (e.button === 2) return
+        const sel = store.selected
+        // 1. If something is already selected, check handle proximity first
+        if (sel) {
+          const layer = store.layers.find((l) => l.id === sel.layerId)
+          const shape = layer?.visible
+            ? (layer.shapes || []).find((sh) => sh.id === sel.shapeId)
+            : null
+          if (shape) {
+            const handles = shapeHandlePoints(shape, cw, ch)
+            const HANDLE_TOL_SQ = 49 // 7-px radius
+            for (let i = 0; i < handles.length; i++) {
+              const dx = raw.x - handles[i].x
+              const dy = raw.y - handles[i].y
+              if (dx * dx + dy * dy <= HANDLE_TOL_SQ) {
+                editDrag = {
+                  mode: 'point',
+                  layerId: sel.layerId,
+                  shapeId: sel.shapeId,
+                  pointIndex: i,
+                  originShape: JSON.parse(JSON.stringify(shape)),
+                  originCursor: { x: raw.x, y: raw.y },
+                }
+                dynamicDirty = true
+                return
+              }
+            }
+            // Body center handle (non-circle only — circle's handle 0 IS center)
+            if (shape.type !== 'circ') {
+              const c = shapeCentroid(shape, cw, ch)
+              if (c) {
+                const dx = raw.x - c.x
+                const dy = raw.y - c.y
+                if (dx * dx + dy * dy <= 81) { // 9-px radius
+                  editDrag = {
+                    mode: 'body',
+                    layerId: sel.layerId,
+                    shapeId: sel.shapeId,
+                    originShape: JSON.parse(JSON.stringify(shape)),
+                    originCursor: { x: raw.x, y: raw.y },
+                  }
+                  dynamicDirty = true
+                  return
+                }
+              }
+            }
+          }
+        }
+        // 2. No handle hit — do shape hit-test for new selection
+        const hit = hitTest(raw.x / cw, raw.y / ch, store.layers, cw, ch)
+        if (hit) {
+          store.setSelected(hit)
+        } else {
+          store.clearSelection()
+        }
+        dynamicDirty = true
+        return
+      }
+
+      // ---- DRAW mode (existing tool dispatch) ----
       const t = store.tool
       const activeLayerId = store.activeLayerId
       if (!t) return
       // Shape tools commit into the active layer; cline lives in its own
       // array and doesn't need one (Spec §6.6).
       if (t !== 'cline' && !activeLayerId) return
-      const raw = pointFromClient(e.clientX, e.clientY)
       // Spec §8 — committing a point uses the active snap target if any.
       // Snap is the cleanest precision boundary: shape commit, cline anchor,
       // poly point placement all flow through the same coords.
@@ -622,6 +907,12 @@ export default function CanvasStage() {
     }
 
     const onMouseUp = () => {
+      // Spec §9 — end edit-mode drag if active
+      if (editDrag) {
+        editDrag = null
+        dynamicDirty = true
+        return
+      }
       if (!draft) return
       if (draft.type === 'rect') {
         const w = Math.abs(draft.x - draft.startX)
@@ -655,11 +946,37 @@ export default function CanvasStage() {
       const editable = tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable
       if (editable) return
 
-      if (e.key === 'Escape' && draft) {
-        draft = null
-        isDragging = false
-        dynamicDirty = true
-        return
+      if (e.key === 'Escape') {
+        // Priority: cancel in-progress draw draft → cancel edit drag →
+        // clear selection. Each layer is independent so Escape always
+        // unwinds the topmost interaction.
+        if (draft) {
+          draft = null
+          isDragging = false
+          dynamicDirty = true
+          return
+        }
+        if (editDrag) {
+          editDrag = null
+          dynamicDirty = true
+          return
+        }
+        const s = useAppStore.getState()
+        if (s.mode === 'EDIT' && s.selected) {
+          s.clearSelection()
+          return
+        }
+      }
+
+      // Spec §9 — Delete / Backspace removes the selected shape (no
+      // confirm dialog per spec; rely on undo).
+      if ((e.key === 'Delete' || e.key === 'Backspace')) {
+        const s = useAppStore.getState()
+        if (s.mode === 'EDIT' && s.selected) {
+          e.preventDefault()
+          s.deleteShape(s.selected.layerId, s.selected.shapeId)
+          return
+        }
       }
 
       // Spec §15 — undo/redo keyboard. Wired here as a Step 2 partial-
@@ -694,10 +1011,43 @@ export default function CanvasStage() {
     }
     const onTouchEnd = () => onMouseUp()
 
+    // Spec §9 — right-click context menu in EDIT mode (Delete / Duplicate
+    // / Move to layer). Hits the shape under the cursor (or stays on the
+    // current selection if cursor is over it) and opens the menu at the
+    // event position. Long-press equivalent for touch is Punch List
+    // candidate (P9 keyboard / mobile audit at Step 18).
+    const onContextMenu = (e) => {
+      const store = useAppStore.getState()
+      if (store.mode !== 'EDIT') return
+      e.preventDefault()
+      const cw = container.clientWidth
+      const ch = container.clientHeight
+      const raw = pointFromClient(e.clientX, e.clientY)
+      // Hit-test under cursor; if hit, set selection AND open menu. Capture
+      // canvas size at click-time (refs are safe to read here, unlike during
+      // render).
+      const sizeSnapshot = { cw, ch }
+      const hit = hitTest(raw.x / cw, raw.y / ch, store.layers, cw, ch)
+      if (hit) {
+        store.setSelected(hit)
+        setCtxMenu({ x: raw.x, y: raw.y, layerId: hit.layerId, shapeId: hit.shapeId, canvasSize: sizeSnapshot })
+      } else if (store.selected) {
+        // No hit — but if a shape was already selected, keep selection
+        // and open menu for it (operator may right-click empty area to
+        // see options on the current selection).
+        setCtxMenu({
+          x: raw.x, y: raw.y,
+          layerId: store.selected.layerId, shapeId: store.selected.shapeId,
+          canvasSize: sizeSnapshot,
+        })
+      }
+    }
+
     cvDynamic.addEventListener('mousedown', onMouseDown)
     cvDynamic.addEventListener('mousemove', onMouseMove)
     cvDynamic.addEventListener('mouseup', onMouseUp)
     cvDynamic.addEventListener('dblclick', onDblClick)
+    cvDynamic.addEventListener('contextmenu', onContextMenu)
     cvDynamic.addEventListener('touchstart', onTouchStart, { passive: true })
     cvDynamic.addEventListener('touchmove', onTouchMove, { passive: true })
     cvDynamic.addEventListener('touchend', onTouchEnd, { passive: true })
@@ -707,6 +1057,19 @@ export default function CanvasStage() {
     const unsub = useAppStore.subscribe((state, prev) => {
       if (state.layers !== prev.layers || state.clines !== prev.clines) {
         staticDirty = true
+      }
+      // Spec §9 — selection change repaints both static (selected outline)
+      // and dynamic (handles).
+      if (state.selected !== prev.selected) {
+        staticDirty = true
+        dynamicDirty = true
+      }
+      // Mode change repaints (handles only show in EDIT) and closes any
+      // open context menu (left-over UI from a prior mode is confusing).
+      if (state.mode !== prev.mode) {
+        staticDirty = true
+        dynamicDirty = true
+        setCtxMenu(null)
       }
       // Toggling the global CLines visibility flag must redraw static so
       // the lines appear/disappear without a separate mutation to clines.
@@ -742,6 +1105,7 @@ export default function CanvasStage() {
       cvDynamic.removeEventListener('mousemove', onMouseMove)
       cvDynamic.removeEventListener('mouseup', onMouseUp)
       cvDynamic.removeEventListener('dblclick', onDblClick)
+      cvDynamic.removeEventListener('contextmenu', onContextMenu)
       cvDynamic.removeEventListener('touchstart', onTouchStart)
       cvDynamic.removeEventListener('touchmove', onTouchMove)
       cvDynamic.removeEventListener('touchend', onTouchEnd)
@@ -761,6 +1125,16 @@ export default function CanvasStage() {
     >
       <canvas id="cvStatic" ref={staticCanvasRef} className="cv-static" aria-hidden="true" />
       <canvas id="cvDynamic" ref={dynamicCanvasRef} className="cv-dynamic" aria-hidden="true" />
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          layerId={ctxMenu.layerId}
+          shapeId={ctxMenu.shapeId}
+          canvasSize={ctxMenu.canvasSize}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
     </div>
   )
 }

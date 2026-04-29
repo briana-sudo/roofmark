@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>RoofMark Step 9.a — Edit Mode (Hit-Test + Handle Drag) Block Test</title>
+<!--
+========================================================================
+RoofMark Step 9.a — Edit Mode Hit-Test + Handle-Drag Block Test
+========================================================================
+
+Block under test (Spec §9):
+  Pure-function hit-testing + handle-drag math used by Edit mode.
+    hitTest(pt, layers, cw, ch) → { layerId, shapeId } | null
+      - Iterates visible layers TOP DOWN (last-rendered first)
+      - Tests each shape: poly/tri/rect via point-in-polygon ray cast,
+        circle via distance-from-center within r, line via point-to-
+        segment distance within 6 px
+      - First match wins; click on empty space returns null
+    movePoint(shape, pointIndex, newCanvasPt, cw, ch) → newShape
+      - For poly/tri/rect: replaces pts[i].x and pts[i].y (normalized)
+      - For circle pointIndex 0 (center): moves cx, cy
+      - For circle pointIndex 1 (radius handle): recalc r
+    moveBody(shape, deltaCanvas, cw, ch) → newShape
+      - Shifts all pts by delta, or cx/cy for circle
+      - r unchanged
+
+Why standalone:
+  Rule 27 — exercise the hit-test + drag math in isolation. Edit
+  mode integration in CanvasStage uses the same functions; if these
+  pass on synthetic data the integration only needs to verify the
+  mouse-event wiring + visual feedback, not the math itself.
+
+Runtime targets:
+  Desktop Chrome (auto-test on load). iPhone Safari runtime pass is
+  the integration's job (touch hit-test geometry is the same math
+  but with 22 px tolerance instead of 12 — the math is identical).
+
+Pass criteria:
+  Hit-test:
+    P1. POLY-INSIDE      — click inside polygon returns shape
+    P2. POLY-OUTSIDE     — click outside returns null
+    P3. RECT-INSIDE      — click inside rect returns shape
+    P4. TRI-INSIDE       — click inside triangle returns shape
+    P5. CIRC-INSIDE      — click within radius returns shape
+    P6. CIRC-OUTSIDE     — click outside radius returns null
+    P7. LINE-NEAR        — click within 6 px of line returns shape
+    P8. LINE-FAR         — click far from line returns null
+    P9. TOP-WINS         — overlapping shapes: top layer wins
+    P10. INVIS-SKIP      — invisible layer skipped
+    P11. EMPTY-NULL      — click on empty space returns null
+  Handle drag math:
+    P12. POLY-POINT-MOVE — pts[i].x/y replaced; siblings unchanged
+    P13. RECT-POINT-MOVE — same shape contract for rect (4-pt poly)
+    P14. CIRC-CENTER     — pointIndex 0 moves cx/cy, r unchanged
+    P15. CIRC-RADIUS     — pointIndex 1 recalcs r from distance
+    P16. POLY-BODY-MOVE  — all pts shifted by delta (preserves shape)
+    P17. CIRC-BODY-MOVE  — cx/cy shifted by delta, r unchanged
+    P18. LINE-BODY-MOVE  — both endpoints shifted by delta
+  Console:
+    P19. CONSOLE         — zero error/warn during the suite
+
+Failure modes detected:
+  F1. Hit-test misses inside-shape clicks (point-in-polygon broken).
+  F2. Hit-test returns shape on click outside (false positive).
+  F3. First-match-wins broken (returns bottom layer's shape).
+  F4. Handle drag mutates wrong point or skips siblings.
+  F5. Body drag changes shape (delta-applied unevenly).
+  F6. Circle radius drag overwrites cx/cy.
+======================================================================== -->
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", sans-serif; background: #1a1d23; color: #e6edf3; }
+  .test-panel { padding: 14px 18px; border-bottom: 2px solid #444; background: #11141a; }
+  .test-panel h1 { margin: 0 0 6px; font-size: 14px; }
+  .test-panel .meta { font-size: 11px; color: #8b949e; line-height: 1.5; }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+  .btn { padding: 5px 12px; background: #1f6feb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .results { margin-top: 12px; font-family: "SF Mono", Consolas, monospace; font-size: 11px; max-height: 320px; overflow: auto; }
+  .results .pass { color: #3fb950; }
+  .results .fail { color: #f85149; }
+  .results .row { padding: 1px 0; }
+  .summary { margin-top: 10px; padding: 8px 12px; border-radius: 4px; font-weight: 700; font-family: "SF Mono", Consolas, monospace; font-size: 13px; }
+  .summary.pass { background: #1f3320; color: #3fb950; }
+  .summary.fail { background: #321e1e; color: #f85149; }
+  .summary.pending { background: #2d2a1e; color: #d29922; }
+</style>
+</head>
+<body>
+
+<section class="test-panel">
+  <h1>RoofMark Step 9.a — Edit Mode Hit-Test + Handle-Drag Block Test</h1>
+  <div class="meta">
+    Block: pure-function hit-test + drag math, recreated standalone per Spec §9.<br>
+    Auto-runs on load. Pure unit-test shape — no canvas interaction needed; the integration covers visual + event wiring.
+  </div>
+  <div class="actions">
+    <button class="btn" id="btnRun">Re-run auto-test</button>
+  </div>
+  <div class="summary pending" id="summary">Running...</div>
+  <div class="results" id="results"></div>
+</section>
+
+<script>
+(function () {
+  // ===== Pure-function hit-test (denormalized inputs in canvas px) ===========
+  function pointInPolygon(px, py, pts) {
+    // Standard ray-casting algorithm. pts is canvas-px array [{x,y},...]
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const xi = pts[i].x, yi = pts[i].y;
+      const xj = pts[j].x, yj = pts[j].y;
+      const intersect = ((yi > py) !== (yj > py))
+        && (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  function distToSegment(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-12) {
+      // Degenerate segment — distance to point
+      const ex = px - ax, ey = py - ay;
+      return Math.sqrt(ex * ex + ey * ey);
+    }
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    const cx = ax + t * dx, cy = ay + t * dy;
+    const ex = px - cx, ey = py - cy;
+    return Math.sqrt(ex * ex + ey * ey);
+  }
+
+  function shapeHit(shape, pxNorm, pyNorm, cw, ch) {
+    if (shape.type === 'circ') {
+      const dx = pxNorm * cw - shape.cx * cw;
+      const dy = pyNorm * ch - shape.cy * ch;
+      return Math.sqrt(dx * dx + dy * dy) <= shape.r * cw;
+    }
+    if (shape.type === 'line') {
+      if (!shape.pts || shape.pts.length < 2) return false;
+      const a = { x: shape.pts[0].x * cw, y: shape.pts[0].y * ch };
+      const b = { x: shape.pts[1].x * cw, y: shape.pts[1].y * ch };
+      return distToSegment(pxNorm * cw, pyNorm * ch, a.x, a.y, b.x, b.y) <= 6;
+    }
+    if (!shape.pts || shape.pts.length < 3) return false;
+    const denormPts = shape.pts.map((p) => ({ x: p.x * cw, y: p.y * ch }));
+    return pointInPolygon(pxNorm * cw, pyNorm * ch, denormPts);
+  }
+
+  function hitTest(pxNorm, pyNorm, layers, cw, ch) {
+    // Iterate top-down: layers[layers.length-1] is rendered last (on top).
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const layer = layers[i];
+      if (!layer.visible) continue;
+      const shapes = layer.shapes || [];
+      for (let j = shapes.length - 1; j >= 0; j--) {
+        if (shapeHit(shapes[j], pxNorm, pyNorm, cw, ch)) {
+          return { layerId: layer.id, shapeId: shapes[j].id };
+        }
+      }
+    }
+    return null;
+  }
+
+  // ===== Pure-function handle drag math ====================================
+  // newCanvasPt and deltaCanvas are in canvas px; outputs are normalized
+  // shapes (matching Spec §20).
+  function movePoint(shape, pointIndex, newCanvasPt, cw, ch) {
+    if (shape.type === 'circ') {
+      if (pointIndex === 0) {
+        // center handle
+        return { ...shape, cx: newCanvasPt.x / cw, cy: newCanvasPt.y / ch };
+      }
+      // radius handle (any other index)
+      const cx = shape.cx * cw;
+      const cy = shape.cy * ch;
+      const dx = newCanvasPt.x - cx;
+      const dy = newCanvasPt.y - cy;
+      return { ...shape, r: Math.sqrt(dx * dx + dy * dy) / cw };
+    }
+    if (!shape.pts) return shape;
+    const newPts = shape.pts.map((p, i) =>
+      i === pointIndex ? { x: newCanvasPt.x / cw, y: newCanvasPt.y / ch } : p
+    );
+    return { ...shape, pts: newPts };
+  }
+
+  function moveBody(shape, deltaCanvas, cw, ch) {
+    const dxN = deltaCanvas.x / cw;
+    const dyN = deltaCanvas.y / ch;
+    if (shape.type === 'circ') {
+      return { ...shape, cx: shape.cx + dxN, cy: shape.cy + dyN };
+    }
+    if (!shape.pts) return shape;
+    return { ...shape, pts: shape.pts.map((p) => ({ x: p.x + dxN, y: p.y + dyN })) };
+  }
+
+  // Expose for any external caller / debugging
+  window.__step9 = {
+    hitTest, shapeHit, pointInPolygon, distToSegment, movePoint, moveBody,
+  };
+
+  // ===== Auto-test =========================================================
+  const consoleIssues = [];
+  const origError = console.error, origWarn = console.warn;
+  console.error = (...a) => { consoleIssues.push(['error', a.map(String).join(' ')]); origError.apply(console, a); };
+  console.warn  = (...a) => { consoleIssues.push(['warn',  a.map(String).join(' ')]); origWarn.apply(console, a); };
+
+  function runTest() {
+    consoleIssues.length = 0;
+    const results = [];
+    const log = (n, p, d) => results.push({ name: n, pass: p, detail: d ?? '' });
+
+    const cw = 600, ch = 400;
+
+    // Test data
+    const polyShape = {
+      id: 'sh1', type: 'poly',
+      pts: [{ x: 0.20, y: 0.20 }, { x: 0.40, y: 0.20 }, { x: 0.40, y: 0.40 }, { x: 0.20, y: 0.40 }],
+    };
+    const rectShape = {
+      id: 'sh2', type: 'rect',
+      pts: [{ x: 0.50, y: 0.10 }, { x: 0.70, y: 0.10 }, { x: 0.70, y: 0.30 }, { x: 0.50, y: 0.30 }],
+    };
+    const triShape = {
+      id: 'sh3', type: 'tri',
+      pts: [{ x: 0.10, y: 0.60 }, { x: 0.30, y: 0.60 }, { x: 0.20, y: 0.80 }],
+    };
+    const circShape = { id: 'sh4', type: 'circ', cx: 0.80, cy: 0.50, r: 0.06 };
+    const lineShape = {
+      id: 'sh5', type: 'line',
+      pts: [{ x: 0.50, y: 0.60 }, { x: 0.70, y: 0.70 }],
+    };
+
+    const layerA = { id: 'lA', visible: true, shapes: [polyShape, rectShape, triShape, circShape, lineShape] };
+
+    // ---- Hit-test ----
+    // P1 POLY-INSIDE — center of poly at norm (0.30, 0.30)
+    log('P1.1 POLY-INSIDE: click at (0.30, 0.30) hits poly',
+        hitTest(0.30, 0.30, [layerA], cw, ch)?.shapeId === 'sh1');
+
+    // P2 POLY-OUTSIDE
+    log('P2.1 POLY-OUTSIDE: click at (0.05, 0.05) returns null',
+        hitTest(0.05, 0.05, [layerA], cw, ch) === null);
+
+    // P3 RECT-INSIDE — center (0.60, 0.20)
+    log('P3.1 RECT-INSIDE: click at (0.60, 0.20) hits rect',
+        hitTest(0.60, 0.20, [layerA], cw, ch)?.shapeId === 'sh2');
+
+    // P4 TRI-INSIDE — centroid ≈ (0.20, 0.667)
+    log('P4.1 TRI-INSIDE: click at (0.20, 0.67) hits triangle',
+        hitTest(0.20, 0.67, [layerA], cw, ch)?.shapeId === 'sh3');
+
+    // P5 CIRC-INSIDE — center (0.80, 0.50), r=0.06 → at canvas px center (480, 200), r=36
+    log('P5.1 CIRC-INSIDE: click at (0.80, 0.50) hits circle',
+        hitTest(0.80, 0.50, [layerA], cw, ch)?.shapeId === 'sh4');
+    // Just inside the radius (0.835, 0.50) → 0.035 norm × 600 = 21 px from center, < 36
+    log('P5.2 CIRC near edge (0.835, 0.50) hits',
+        hitTest(0.835, 0.50, [layerA], cw, ch)?.shapeId === 'sh4');
+
+    // P6 CIRC-OUTSIDE — well outside radius
+    log('P6.1 CIRC-OUTSIDE: click at (0.50, 0.50) does NOT hit circle',
+        hitTest(0.50, 0.50, [layerA], cw, ch)?.shapeId !== 'sh4');
+
+    // P7 LINE-NEAR — line from (0.50, 0.60) to (0.70, 0.70). Midpoint (0.60, 0.65).
+    // Click 5px below midpoint (in canvas px = 5/400 = 0.0125 norm in y) → still close.
+    log('P7.1 LINE-NEAR: click ~5 px from midpoint hits line',
+        hitTest(0.60, 0.6625, [layerA], cw, ch)?.shapeId === 'sh5');
+
+    // P8 LINE-FAR — click far above the line
+    log('P8.1 LINE-FAR: click at (0.60, 0.40) does NOT hit line',
+        hitTest(0.60, 0.40, [layerA], cw, ch)?.shapeId !== 'sh5');
+
+    // P9 TOP-WINS — two overlapping polys, top layer wins
+    const polyA = { id: 'pA', type: 'poly', pts: polyShape.pts };
+    const polyB = { id: 'pB', type: 'poly', pts: polyShape.pts };
+    const layerBottom = { id: 'lBot', visible: true, shapes: [polyA] };
+    const layerTop    = { id: 'lTop', visible: true, shapes: [polyB] };
+    log('P9.1 TOP-WINS: overlapping polys, top layer\'s shape returned',
+        hitTest(0.30, 0.30, [layerBottom, layerTop], cw, ch)?.layerId === 'lTop');
+
+    // P10 INVIS-SKIP — invisible layer's shape never hit
+    const layerInvis = { id: 'lInvis', visible: false, shapes: [polyA] };
+    log('P10.1 INVIS-SKIP: invisible layer shape not returned',
+        hitTest(0.30, 0.30, [layerInvis], cw, ch) === null);
+
+    // P11 EMPTY-NULL — corner of canvas, no shapes
+    log('P11.1 EMPTY-NULL: click at empty space',
+        hitTest(0.95, 0.95, [layerA], cw, ch) === null);
+
+    // ---- Handle drag math ----
+    // P12 POLY-POINT-MOVE — move pts[0] from (0.20, 0.20) to canvas (300, 200) → norm (0.50, 0.50)
+    const moved12 = movePoint(polyShape, 0, { x: 300, y: 200 }, cw, ch);
+    log('P12.1 POLY-POINT-MOVE: pts[0] updated',
+        Math.abs(moved12.pts[0].x - 0.50) < 0.001 && Math.abs(moved12.pts[0].y - 0.50) < 0.001);
+    log('P12.2 POLY-POINT-MOVE: pts[1] unchanged',
+        moved12.pts[1].x === polyShape.pts[1].x && moved12.pts[1].y === polyShape.pts[1].y);
+    log('P12.3 POLY-POINT-MOVE: pts[2] unchanged',
+        moved12.pts[2].x === polyShape.pts[2].x);
+    log('P12.4 POLY-POINT-MOVE: pts[3] unchanged',
+        moved12.pts[3].x === polyShape.pts[3].x);
+
+    // P13 RECT-POINT-MOVE — same contract
+    const moved13 = movePoint(rectShape, 2, { x: 600, y: 400 }, cw, ch);
+    log('P13.1 RECT-POINT-MOVE: pts[2] = (1.0, 1.0)',
+        Math.abs(moved13.pts[2].x - 1.0) < 0.001 && Math.abs(moved13.pts[2].y - 1.0) < 0.001);
+
+    // P14 CIRC-CENTER — pointIndex 0 moves cx/cy
+    const moved14 = movePoint(circShape, 0, { x: 300, y: 200 }, cw, ch);
+    log('P14.1 CIRC-CENTER: cx/cy updated',
+        Math.abs(moved14.cx - 0.50) < 0.001 && Math.abs(moved14.cy - 0.50) < 0.001);
+    log('P14.2 CIRC-CENTER: r unchanged',
+        moved14.r === circShape.r);
+
+    // P15 CIRC-RADIUS — pointIndex 1 → recalculates r from distance
+    // Center at (480, 200) (norm 0.80 × 600). Drag to (520, 200) → 40 px dist → r = 40/600 = 0.0667
+    const moved15 = movePoint(circShape, 1, { x: 520, y: 200 }, cw, ch);
+    log('P15.1 CIRC-RADIUS: r recalculated from distance',
+        Math.abs(moved15.r - 40 / 600) < 0.001, 'r=' + moved15.r);
+    log('P15.2 CIRC-RADIUS: cx/cy unchanged',
+        moved15.cx === circShape.cx && moved15.cy === circShape.cy);
+
+    // P16 POLY-BODY-MOVE — shift by (60, 40) px (norm 0.10, 0.10)
+    const moved16 = moveBody(polyShape, { x: 60, y: 40 }, cw, ch);
+    log('P16.1 POLY-BODY-MOVE: all pts shifted by (0.10, 0.10)',
+        moved16.pts.every((p, i) =>
+          Math.abs(p.x - (polyShape.pts[i].x + 0.10)) < 0.001 &&
+          Math.abs(p.y - (polyShape.pts[i].y + 0.10)) < 0.001));
+
+    // P17 CIRC-BODY-MOVE
+    const moved17 = moveBody(circShape, { x: 30, y: 20 }, cw, ch);
+    log('P17.1 CIRC-BODY-MOVE: cx/cy shifted',
+        Math.abs(moved17.cx - (circShape.cx + 30 / 600)) < 0.001 &&
+        Math.abs(moved17.cy - (circShape.cy + 20 / 400)) < 0.001);
+    log('P17.2 CIRC-BODY-MOVE: r unchanged',
+        moved17.r === circShape.r);
+
+    // P18 LINE-BODY-MOVE
+    const moved18 = moveBody(lineShape, { x: 60, y: 40 }, cw, ch);
+    log('P18.1 LINE-BODY-MOVE: both endpoints shifted',
+        Math.abs(moved18.pts[0].x - (lineShape.pts[0].x + 0.10)) < 0.001 &&
+        Math.abs(moved18.pts[1].y - (lineShape.pts[1].y + 0.10)) < 0.001);
+
+    // P19 CONSOLE
+    log('P19.1 zero console.error/warn during suite',
+        consoleIssues.length === 0,
+        consoleIssues.length ? 'first=' + JSON.stringify(consoleIssues[0]) : '');
+
+    // Render results
+    const out = document.getElementById('results');
+    out.textContent = '';
+    results.forEach((r) => {
+      const row = document.createElement('div');
+      row.className = 'row ' + (r.pass ? 'pass' : 'fail');
+      row.textContent = (r.pass ? '✓ PASS  ' : '✗ FAIL  ') + r.name + (r.detail ? '  — ' + r.detail : '');
+      out.appendChild(row);
+    });
+    const failed = results.filter((r) => !r.pass).length;
+    const total = results.length;
+    const sum = document.getElementById('summary');
+    sum.className = 'summary ' + (failed === 0 ? 'pass' : 'fail');
+    sum.textContent = failed === 0
+      ? `STEP 9.a PASS — ${total}/${total} checks passed.`
+      : `STEP 9.a FAIL — ${failed}/${total} checks failed.`;
+
+    window.__step9.lastResults = results;
+    window.__step9.lastSummary = { total, passed: total - failed, failed };
+    return window.__step9.lastSummary;
+  }
+
+  document.getElementById('btnRun').addEventListener('click', runTest);
+  requestAnimationFrame(() => requestAnimationFrame(runTest));
+})();
+</script>
+</body>
+</html>

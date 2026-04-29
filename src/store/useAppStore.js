@@ -145,6 +145,11 @@ const initialState = {
   // engine on every mousemove; read by drawDynamic + onMouseDown commit.
   snapPt: null,
 
+  // Spec §9 — edit-mode selection. { layerId, shapeId } or null. Set by
+  // hit-test on click in EDIT mode; cleared on click-empty / Escape /
+  // mode change / shape delete.
+  selected: null,
+
   rightDrawerOpen: false,
 
   // Spec §6.6 — single global show/hide for the entire CLINES set.
@@ -282,7 +287,54 @@ export const useAppStore = create((set, get) => {
             ? l
             : { ...l, shapes: l.shapes.filter((sh) => sh.id !== shapeId) }
         ),
+        // Clear selection if the deleted shape was selected
+        selected: (s.selected && s.selected.layerId === layerId && s.selected.shapeId === shapeId)
+          ? null : s.selected,
       }))
+    },
+
+    // Spec §9 — context-menu actions.
+    duplicateShape: (layerId, shapeId, offsetCanvasPx = { x: 10, y: 10 }, canvasSize) => {
+      pushUndo()
+      const id = newShapeId()
+      const cw = canvasSize?.cw || 1
+      const ch = canvasSize?.ch || 1
+      set((s) => ({
+        layers: s.layers.map((l) => {
+          if (l.id !== layerId) return l
+          const orig = (l.shapes || []).find((sh) => sh.id === shapeId)
+          if (!orig) return l
+          const dxN = offsetCanvasPx.x / cw
+          const dyN = offsetCanvasPx.y / ch
+          let dup
+          if (orig.type === 'circ') {
+            dup = { ...orig, id, cx: orig.cx + dxN, cy: orig.cy + dyN }
+          } else {
+            dup = { ...orig, id, pts: orig.pts.map((p) => ({ x: p.x + dxN, y: p.y + dyN })) }
+          }
+          return { ...l, shapes: [...l.shapes, dup] }
+        }),
+        selected: { layerId, shapeId: id },
+      }))
+      return id
+    },
+
+    moveShapeToLayer: (fromLayerId, shapeId, toLayerId) => {
+      if (fromLayerId === toLayerId) return
+      pushUndo()
+      set((s) => {
+        const fromLayer = s.layers.find((l) => l.id === fromLayerId)
+        const shape = fromLayer?.shapes?.find((sh) => sh.id === shapeId)
+        if (!shape) return {}
+        return {
+          layers: s.layers.map((l) => {
+            if (l.id === fromLayerId) return { ...l, shapes: l.shapes.filter((sh) => sh.id !== shapeId) }
+            if (l.id === toLayerId)   return { ...l, shapes: [...(l.shapes || []), shape] }
+            return l
+          }),
+          selected: { layerId: toLayerId, shapeId },
+        }
+      })
     },
 
     // ============ Sequence actions ==========================================
@@ -398,8 +450,21 @@ export const useAppStore = create((set, get) => {
     setBackgroundImage: (image) => set({ backgroundImage: image }),
     clearBackgroundImage: () => set({ backgroundImage: null }),
 
+    // ============ Selection (Spec §9) =======================================
+    setSelected: (sel) => set({ selected: sel }),
+    clearSelection: () => set({ selected: null }),
+
     // ============ App state actions =========================================
-    setMode: (mode) => set({ mode }),
+    setMode: (mode) =>
+      set((s) => ({
+        mode,
+        // Mode change clears selection (Spec §9 — DRAW and EDIT mutually
+        // exclusive; selection only meaningful in EDIT)
+        selected: mode === s.mode ? s.selected : null,
+        // Mode change also clears any active tool — drawing tools don't
+        // apply outside DRAW mode
+        tool: mode === 'DRAW' || mode === 'TECHNICAL' ? s.tool : null,
+      })),
     setTool: (tool) => set({ tool }),
     setCursor: (x, y) => set({ cursorX: x, cursorY: y }),
     setSnapType: (snapType) => set({ snapType }),
