@@ -183,10 +183,14 @@ function computeSnap(args) {
     if (dx * dx + dy * dy < tolSq) return { x: first.x, y: first.y, type: 'close' }
   }
 
-  // 2. GRID
+  // 2. GRID — Step 10 / P12+P14 rectangular grid: independent X / Y spacing.
+  // gridSize is normalized to {x, y} in the store; defensively coerce a
+  // legacy number value for any caller that hasn't migrated yet.
   if (gridEnabled) {
-    const gx = Math.round(cursorX / gridSize) * gridSize
-    const gy = Math.round(cursorY / gridSize) * gridSize
+    const gxStep = (typeof gridSize === 'object' ? gridSize.x : gridSize) || 20
+    const gyStep = (typeof gridSize === 'object' ? gridSize.y : gridSize) || 20
+    const gx = Math.round(cursorX / gxStep) * gxStep
+    const gy = Math.round(cursorY / gyStep) * gyStep
     const dx = cursorX - gx, dy = cursorY - gy
     if (dx * dx + dy * dy < tolSq) return { x: gx, y: gy, type: 'grid' }
   }
@@ -378,17 +382,21 @@ export default function CanvasStage() {
       // Spec §7 step 3 — snap grid overlay when gridEnabled. Subtle cyan
       // tint at gridSize spacing. Renders over the photo (or dark grid) so
       // operators see the snap geometry regardless of background.
+      // Step 10 / P12+P14 — independent X / Y spacing for standing-seam
+      // panel layouts (e.g. X = 24 px = 1", Y = 384 px = 16" panel width).
       if (storeState.gridEnabled) {
-        const gs = storeState.gridSize || 20
+        const gs = storeState.gridSize
+        const gxStep = (typeof gs === 'object' ? gs.x : gs) || 20
+        const gyStep = (typeof gs === 'object' ? gs.y : gs) || 20
         ctxStatic.strokeStyle = 'rgba(0, 255, 204, 0.16)'
         ctxStatic.lineWidth = 1
-        for (let x = 0; x < cw; x += gs) {
+        for (let x = 0; x < cw; x += gxStep) {
           ctxStatic.beginPath()
           ctxStatic.moveTo(x + 0.5, 0)
           ctxStatic.lineTo(x + 0.5, ch)
           ctxStatic.stroke()
         }
-        for (let y = 0; y < ch; y += gs) {
+        for (let y = 0; y < ch; y += gyStep) {
           ctxStatic.beginPath()
           ctxStatic.moveTo(0, y + 0.5)
           ctxStatic.lineTo(cw, y + 0.5)

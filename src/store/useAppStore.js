@@ -69,7 +69,21 @@ const sequenceDefaults = (n) => ({
 })
 
 // ---- Persistence -----------------------------------------------------------
-const PERSIST_KEYS = ['layers', 'sequences', 'clines', 'jobContext']
+// Step 10 added `gridSize` (now {x, y} per P12/P14) and `rightDrawerOpen`
+// (drawer state survives refresh per Spec §5/§6 acceptance criteria).
+const PERSIST_KEYS = ['layers', 'sequences', 'clines', 'jobContext', 'gridSize', 'rightDrawerOpen']
+
+// Step 10 — accept either a number (legacy / square grid) or an {x, y}
+// object (rectangular). Always normalize to {x, y} on the way in.
+const normalizeGridSize = (g) => {
+  if (typeof g === 'number' && isFinite(g) && g > 0) return { x: g, y: g }
+  if (g && typeof g === 'object'
+    && typeof g.x === 'number' && isFinite(g.x) && g.x > 0
+    && typeof g.y === 'number' && isFinite(g.y) && g.y > 0) {
+    return { x: g.x, y: g.y }
+  }
+  return { x: 20, y: 20 }
+}
 
 const loadFromStorage = () => {
   if (typeof localStorage === 'undefined') return null
@@ -135,7 +149,10 @@ const initialState = {
 
   snapEnabled: true,
   gridEnabled: false,
-  gridSize: 20,
+  // Step 10 / P12+P14 — grid spacing is operator-adjustable AND independently
+  // sized on X and Y axes (rectangular grid for standing-seam panel layouts).
+  // Default 20×20 px keeps the Step 7 square-grid behavior unchanged.
+  gridSize: normalizeGridSize(hydrated?.gridSize),
   snapTolerance: 12,      // 12 mouse / 22 touch (Spec §8 amendment)
   pointerType: 'mouse',
 
@@ -151,7 +168,7 @@ const initialState = {
   // mode change / shape delete.
   selected: null,
 
-  rightDrawerOpen: false,
+  rightDrawerOpen: hydrated?.rightDrawerOpen ?? false,
 
   // Spec §6.6 — single global show/hide for the entire CLINES set.
   // Per-cline visible flag still exists for future edit-mode toggling.
@@ -478,7 +495,18 @@ export const useAppStore = create((set, get) => {
     }),
     toggleSnap: () => set((s) => ({ snapEnabled: !s.snapEnabled })),
     toggleGrid: () => set((s) => ({ gridEnabled: !s.gridEnabled })),
-    setGridSize: (gridSize) => set({ gridSize }),
+    // Step 10 / P12+P14 — accept number (square) or {x, y} (rectangular).
+    // Internal state always lives as {x, y}.
+    setGridSize: (gridSize) => set({ gridSize: normalizeGridSize(gridSize) }),
+    // Single-axis setter for the UI's two number inputs. Coerces to a
+    // positive integer; ignores anything else so a transient empty input
+    // value doesn't blow away the existing axis value.
+    setGridSizeAxis: (axis, value) => {
+      if (axis !== 'x' && axis !== 'y') return
+      const n = Math.round(Number(value))
+      if (!isFinite(n) || n <= 0) return
+      set((s) => ({ gridSize: { ...s.gridSize, [axis]: n } }))
+    },
     setSnapTolerance: (snapTolerance) => set({ snapTolerance }),
     setPointerType: (pointerType) =>
       set({
@@ -577,29 +605,45 @@ export const useAppStore = create((set, get) => {
 })
 
 // ============================================================================
-// AUTOSAVE — debounced 2s after any data mutation (Spec §15)
+// AUTOSAVE — debounced 2s after any persisted-key mutation (Spec §15)
 // Reference-equality guard ensures cursor / tool / mode / snap mutations
 // don't trigger the autosave or flip saveState to 'unsaved'.
+//
+// Step 10 added `gridSize` and `rightDrawerOpen` to PERSIST_KEYS — those
+// are tiny UI flags so they don't deserve the saveState='unsaved' flicker
+// that data mutations get, but they DO need to be re-persisted on change.
+// Pattern: data changes flip saveState; UI-flag changes silently extend
+// the persist timer.
 // ============================================================================
 let _saveTimer = null
+let _pendingDataWrite = false
 useAppStore.subscribe((state, prev) => {
-  if (
-    state.layers === prev.layers &&
-    state.sequences === prev.sequences &&
-    state.clines === prev.clines &&
-    state.jobContext === prev.jobContext
-  ) {
-    return
-  }
+  const dataChanged = (
+    state.layers !== prev.layers ||
+    state.sequences !== prev.sequences ||
+    state.clines !== prev.clines ||
+    state.jobContext !== prev.jobContext
+  )
+  const uiFlagChanged = (
+    state.gridSize !== prev.gridSize ||
+    state.rightDrawerOpen !== prev.rightDrawerOpen
+  )
+  if (!dataChanged && !uiFlagChanged) return
 
-  if (state.saveState !== 'unsaved') {
-    queueMicrotask(() => useAppStore.setState({ saveState: 'unsaved' }))
+  if (dataChanged) {
+    _pendingDataWrite = true
+    if (state.saveState !== 'unsaved') {
+      queueMicrotask(() => useAppStore.setState({ saveState: 'unsaved' }))
+    }
   }
 
   if (_saveTimer) clearTimeout(_saveTimer)
   _saveTimer = setTimeout(() => {
     persist(useAppStore.getState())
-    useAppStore.setState({ saveState: 'saved', lastSavedAt: Date.now() })
+    if (_pendingDataWrite) {
+      _pendingDataWrite = false
+      useAppStore.setState({ saveState: 'saved', lastSavedAt: Date.now() })
+    }
   }, AUTOSAVE_DEBOUNCE_MS)
 })
 

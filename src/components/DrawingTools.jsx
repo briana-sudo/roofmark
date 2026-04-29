@@ -38,6 +38,9 @@ export default function DrawingTools() {
   const toggleSnap = useAppStore((s) => s.toggleSnap)
   const gridEnabled = useAppStore((s) => s.gridEnabled)
   const toggleGrid = useAppStore((s) => s.toggleGrid)
+  // Step 10 / P12+P14 — operator-adjustable rectangular grid spacing.
+  const gridSize = useAppStore((s) => s.gridSize)
+  const setGridSizeAxis = useAppStore((s) => s.setGridSizeAxis)
   const backgroundImage = useAppStore((s) => s.backgroundImage)
   const setBackgroundImage = useAppStore((s) => s.setBackgroundImage)
   const clearBackgroundImage = useAppStore((s) => s.clearBackgroundImage)
@@ -164,6 +167,36 @@ export default function DrawingTools() {
         <span className="tool-icon" aria-hidden="true">▦</span>
         <span className="tool-name">Grid</span>
       </button>
+
+      {/*
+        Grid X / Grid Y inputs — Step 10 / P12 + P14.
+        Independent X and Y spacing for rectangular grids (e.g. standing-seam
+        panel layouts: X = 24 px = 1", Y = 384 px = 16" panel width). Default
+        20×20 keeps Step 7 square-grid behavior. Clamped to positive integers
+        in `setGridSizeAxis`.
+      */}
+      <label className="grid-axis-input" title="Grid X spacing in pixels">
+        <span className="grid-axis-label">X</span>
+        <input
+          type="number"
+          min="1"
+          step="1"
+          value={gridSize?.x ?? 20}
+          onChange={(e) => setGridSizeAxis('x', e.target.value)}
+          data-testid="input-grid-x"
+        />
+      </label>
+      <label className="grid-axis-input" title="Grid Y spacing in pixels">
+        <span className="grid-axis-label">Y</span>
+        <input
+          type="number"
+          min="1"
+          step="1"
+          value={gridSize?.y ?? 20}
+          onChange={(e) => setGridSizeAxis('y', e.target.value)}
+          data-testid="input-grid-y"
+        />
+      </label>
 
       <span className="tool-divider" aria-hidden="true" />
 

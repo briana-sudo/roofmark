@@ -3,12 +3,14 @@ import CanvasStage from './components/CanvasStage'
 import LayerPanel from './components/LayerPanel'
 import DrawingTools from './components/DrawingTools'
 import ModeToggle from './components/ModeToggle'
+import PropertiesPanel from './components/PropertiesPanel'
 import './App.css'
 
 export default function App() {
   const mode = useAppStore((s) => s.mode)
   const saveState = useAppStore((s) => s.saveState)
   const rightDrawerOpen = useAppStore((s) => s.rightDrawerOpen)
+  const toggleRightDrawer = useAppStore((s) => s.toggleRightDrawer)
   const jobContext = useAppStore((s) => s.jobContext)
   const tool = useAppStore((s) => s.tool)
   const activeLayerId = useAppStore((s) => s.activeLayerId)
@@ -34,6 +36,17 @@ export default function App() {
         </span>
         <span className="hdr-spacer" />
         <ModeToggle />
+        <button
+          type="button"
+          className={rightDrawerOpen ? 'btn-drawer-toggle active' : 'btn-drawer-toggle'}
+          onClick={toggleRightDrawer}
+          title={rightDrawerOpen ? 'Hide properties drawer' : 'Show properties drawer'}
+          aria-pressed={rightDrawerOpen}
+          aria-controls="panel-right"
+          data-testid="btn-drawer-toggle"
+        >
+          ⚙ Properties
+        </button>
         <span className={`hdr-save state-${saveState}`} data-slot="save">
           ● {saveState}
         </span>
@@ -49,12 +62,7 @@ export default function App() {
           <CanvasStage />
         </main>
 
-        <aside className="panel-right" aria-label="Properties / annotation drawer" aria-hidden={!rightDrawerOpen}>
-          <div className="panel-header">Properties</div>
-          <div className="panel-body panel-empty">
-            (Properties drawer — Step 10)
-          </div>
-        </aside>
+        <PropertiesPanel />
       </div>
 
       <footer className="status-bar" role="status">

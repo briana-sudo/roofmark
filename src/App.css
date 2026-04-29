@@ -568,3 +568,197 @@ body {
   color: var(--rm-fg-dim);
   margin-left: 4px;
 }
+
+/* ============================================================================
+ * Step 10 — Properties panel + drawer toggle + Grid X/Y inputs (Spec §5/§6)
+ * ============================================================================ */
+
+/* ---- Drawer toggle (header) ---- */
+.btn-drawer-toggle {
+  padding: 3px 10px;
+  background: transparent;
+  color: var(--rm-fg-dim);
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-drawer-toggle:hover { color: var(--rm-fg); }
+
+.btn-drawer-toggle.active {
+  background: var(--rm-accent);
+  border-color: var(--rm-accent);
+  color: #fff;
+}
+
+/* ---- Grid X / Y inputs (canvas toolbar) ---- */
+.grid-axis-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  background: var(--rm-panel);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  height: 24px;
+}
+
+.grid-axis-input .grid-axis-label {
+  color: var(--rm-fg-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.grid-axis-input input[type="number"] {
+  width: 42px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--rm-fg);
+  font-family: var(--rm-mono);
+  font-size: 11px;
+  padding: 1px 0;
+  text-align: right;
+  -moz-appearance: textfield;
+}
+.grid-axis-input input[type="number"]::-webkit-outer-spin-button,
+.grid-axis-input input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ---- Properties panel sections ---- */
+.props-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.props-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.props-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--rm-fg-dim);
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--rm-border);
+}
+
+.prop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--rm-fg);
+}
+
+.prop-row .prop-label {
+  min-width: 50px;
+  color: var(--rm-fg-dim);
+  font-size: 11px;
+}
+
+.prop-row .prop-value {
+  min-width: 36px;
+  text-align: right;
+  color: var(--rm-fg-dim);
+  font-family: var(--rm-mono);
+  font-size: 11px;
+}
+
+.prop-row.prop-toggle input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.prop-row.prop-slider input[type="range"] {
+  flex: 1;
+  cursor: pointer;
+  accent-color: var(--rm-accent);
+}
+
+.prop-row.prop-slider input[type="range"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.prop-row.prop-number input[type="number"] {
+  width: 56px;
+  background: var(--rm-panel-2);
+  color: var(--rm-fg);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-family: var(--rm-mono);
+  font-size: 11px;
+  text-align: right;
+  -moz-appearance: textfield;
+}
+.prop-row.prop-number input[type="number"]::-webkit-outer-spin-button,
+.prop-row.prop-number input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.prop-row.prop-number input[type="number"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---- Color palette (P5) ---- */
+.color-palette {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+  align-items: center;
+}
+
+.color-palette .swatch {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+  transition: transform 80ms ease, border-color 80ms ease;
+}
+
+.color-palette .swatch:hover {
+  border-color: var(--rm-fg-dim);
+  transform: scale(1.06);
+}
+
+.color-palette .swatch.active {
+  border-color: var(--rm-fg);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);
+}
+
+/* The fine-tune affordance — repurpose the native color input as the
+ * 11th cell so operators always have an escape hatch to custom RGB. */
+.color-palette .swatch-fine-tune {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background:
+    repeating-conic-gradient(#444 0 25%, #2a2a2a 0 50%) 50% 50% / 8px 8px;
+  border: 1px dashed var(--rm-border);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.color-palette .swatch-fine-tune:hover {
+  border-color: var(--rm-fg-dim);
+}
