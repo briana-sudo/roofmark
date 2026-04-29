@@ -414,6 +414,16 @@ body {
 
 .status-cell { white-space: nowrap; }
 
+/* Step 12 partial-completion fix — operator-verifiable build marker.
+ * Pinned to the right edge of the status bar so it's always discoverable
+ * without competing with the active-state status cells. */
+.status-cell.status-build {
+  margin-left: auto;
+  color: var(--rm-fg-dim);
+  font-size: 10px;
+  letter-spacing: 0.3px;
+}
+
 /* ---- Layer panel (Step 4) ---- */
 .layer-panel-header {
   gap: 8px;

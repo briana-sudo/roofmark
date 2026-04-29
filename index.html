@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Step 12 partial-completion fix — prevent index.html from being
+      cached so operators always fetch the latest hashed-asset references
+      after a deploy. Without this, the GitHub Pages default
+      `Cache-Control: max-age=600` can leave a tab loading old bundle
+      hashes for up to 10 minutes after a deploy. The hashed JS/CSS
+      bundles still cache aggressively (their URLs change per build).
+    -->
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>RoofMark</title>
   </head>
   <body>

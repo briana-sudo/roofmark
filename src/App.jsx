@@ -136,6 +136,15 @@ export default function App() {
         <span className="status-cell">Y: {cursorY}</span>
         <span className="status-cell">Snap: {snapType ?? '—'}</span>
         <span className="status-cell">Shapes: {shapeCount}</span>
+        {/*
+          Step 12 partial-completion fix — operator-verifiable build marker.
+          Lets the operator confirm the page is loading the latest deployed
+          bundle (not a stale browser cache). Compare to the commit SHA of
+          the most-recent deploy. Defined at build time via Vite `define`.
+        */}
+        <span className="status-cell status-build" title="Loaded build commit (short SHA)" data-testid="status-build">
+          Build: {typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev'}
+        </span>
       </footer>
     </div>
   )
