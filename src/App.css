@@ -1113,3 +1113,92 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ============================================================================
+ * Step 13 — Annotation panel cards (Spec §11/§13)
+ * ============================================================================ */
+.anno-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.anno-card {
+  background: var(--rm-panel-2);
+  border: 1px solid var(--rm-border);
+  border-left: 3px solid rgba(245, 166, 35, 0.6);
+  border-radius: 4px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.anno-card:hover { border-color: var(--rm-fg-dim); border-left-color: var(--rm-amber); }
+
+.anno-card.active {
+  border-color: var(--rm-amber);
+  border-left-color: var(--rm-amber);
+  background: rgba(245, 166, 35, 0.10);
+  box-shadow: 0 0 0 1px rgba(245, 166, 35, 0.5) inset;
+}
+
+.anno-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.anno-card-icon {
+  font-size: 13px;
+  color: var(--rm-amber);
+  width: 16px;
+  text-align: center;
+}
+
+.anno-card-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--rm-fg);
+}
+
+.anno-card-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.anno-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.anno-field-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--rm-fg-dim);
+}
+
+.anno-textarea, .anno-text-input {
+  background: var(--rm-bg);
+  color: var(--rm-fg);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 12px;
+  resize: vertical;
+  outline: none;
+}
+
+.anno-textarea:focus, .anno-text-input:focus {
+  border-color: var(--rm-amber);
+  box-shadow: 0 0 0 1px var(--rm-amber);
+}

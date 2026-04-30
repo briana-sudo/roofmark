@@ -652,6 +652,30 @@ export default function CanvasStage() {
         for (const a of activeSeq.annotations) drawAnnotationOnContext(ctxStatic, a, viewport, photoSize)
       }
 
+      // Step 13 — annotation selection highlight (white ring around the
+      // primary anchor of the panel-selected annotation). Painted on top
+      // so it sits above the annotation itself.
+      const selAnno = storeState.selectedAnnotation
+      if (selAnno && activeSeq && selAnno.sequenceId === activeSeq.id) {
+        const a = (activeSeq.annotations || []).find((x) => x.id === selAnno.annotationId)
+        if (a) {
+          let anchor = null
+          if (a.type === 'note') anchor = a.at
+          else if (a.type === 'callout') anchor = a.tail
+          else if (a.type === 'dimline') anchor = { x: (a.a.x + a.b.x) / 2, y: (a.a.y + a.b.y) / 2 }
+          if (anchor) {
+            const c = photoNormToCanvas(anchor, viewport, photoSize)
+            ctxStatic.save()
+            ctxStatic.strokeStyle = '#ffffff'
+            ctxStatic.lineWidth = 2.5
+            ctxStatic.beginPath()
+            ctxStatic.arc(c.x, c.y, 12, 0, Math.PI * 2)
+            ctxStatic.stroke()
+            ctxStatic.restore()
+          }
+        }
+      }
+
       // Spec §9 — selected shape outline (white, +1 stroke weight). Render
       // through viewport so it tracks the underlying shape.
       const sel = storeState.selected
@@ -1593,6 +1617,11 @@ export default function CanvasStage() {
       // the SEQUENCE-mode layer filter so the canvas reflects the new
       // visibility map immediately.
       if (state.sequences !== prev.sequences || state.activeSeqId !== prev.activeSeqId) {
+        staticDirty = true
+      }
+      // Step 13 — annotation panel selection paints a white highlight
+      // ring; flip staticDirty whenever the selection changes.
+      if (state.selectedAnnotation !== prev.selectedAnnotation) {
         staticDirty = true
       }
       // Toggling the global CLines visibility flag must redraw static so

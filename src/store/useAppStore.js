@@ -85,7 +85,12 @@ const PERSIST_KEYS = [
   'viewport', 'photoMeta', 'cropMeta',
 ]
 const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE', 'TECHNICAL'])
-const VALID_DRAWER_TABS = new Set(['properties', 'sequences'])
+// Step 13 — third tab for the per-annotation editing panel. The tab button
+// only renders in App.jsx when mode === 'SEQUENCE' and activeSeqId is set;
+// `drawerTab === 'annotations'` outside that gate falls back to 'properties'
+// for body rendering (the persisted tab choice is preserved for when the
+// gate re-opens).
+const VALID_DRAWER_TABS = new Set(['properties', 'sequences', 'annotations'])
 
 // Default viewport when no photo (or before fit-to-viewport runs). Render
 // math degenerates cleanly: shapeNormX * canvasW * 1 + 0 = shapeNormX * canvasW
@@ -219,6 +224,14 @@ const initialState = {
   // hit-test on click in EDIT mode; cleared on click-empty / Escape /
   // mode change / shape delete.
   selected: null,
+
+  // Step 13 — annotation card selection in the right-drawer Annotations
+  // tab. { sequenceId, annotationId } or null. Set when operator clicks
+  // an annotation card; CanvasStage paints a small white highlight ring
+  // around the corresponding canvas annotation. Transient UI (not
+  // persisted). Cleared on mode change, sequence change, deletion of
+  // the selected annotation.
+  selectedAnnotation: null,
 
   // Section 7.A — viewport state (canvas-as-viewport-onto-photo). Persists
   // so refresh restores the operator's pan/zoom. Default zoom of 1.0 is
@@ -464,7 +477,13 @@ export const useAppStore = create((set, get) => {
         ),
       })),
 
-    setActiveSequence: (id) => set({ activeSeqId: id }),
+    setActiveSequence: (id) => set((s) => ({
+      activeSeqId: id,
+      // Step 13 — sequence change clears the panel-driven annotation
+      // selection (the previously-selected annotation belonged to a
+      // different sequence and would otherwise outlive its scope).
+      selectedAnnotation: id === s.activeSeqId ? s.selectedAnnotation : null,
+    })),
 
     // Step 11 — sequence reorder, mirrors `reorderLayers`. Pass the full
     // ordered list of ids; missing ids are appended at the end so the call
@@ -520,6 +539,13 @@ export const useAppStore = create((set, get) => {
                 ),
               }
         ),
+        // Step 13 — clear the panel selection if the deleted annotation
+        // was the selected one (otherwise the canvas highlight would
+        // outlive its target).
+        selectedAnnotation: (s.selectedAnnotation
+          && s.selectedAnnotation.sequenceId === seqId
+          && s.selectedAnnotation.annotationId === annoId)
+          ? null : s.selectedAnnotation,
       }))
     },
 
@@ -600,6 +626,11 @@ export const useAppStore = create((set, get) => {
     setSelected: (sel) => set({ selected: sel }),
     clearSelection: () => set({ selected: null }),
 
+    // Step 13 — annotation panel selection. setSelectedAnnotation accepts
+    // { sequenceId, annotationId } or null. Transient UI; not persisted.
+    setSelectedAnnotation: (sel) => set({ selectedAnnotation: sel }),
+    clearSelectedAnnotation: () => set({ selectedAnnotation: null }),
+
     // ============ App state actions =========================================
     setMode: (mode) =>
       set((s) => ({
@@ -607,6 +638,11 @@ export const useAppStore = create((set, get) => {
         // Mode change clears selection (Spec §9 — DRAW and EDIT mutually
         // exclusive; selection only meaningful in EDIT)
         selected: mode === s.mode ? s.selected : null,
+        // Step 13 — annotation card selection is SEQUENCE-mode-scoped;
+        // any mode change drops the panel-driven highlight so the canvas
+        // doesn't keep painting a halo for an annotation the operator
+        // can no longer see in the (now-hidden) Annotations tab.
+        selectedAnnotation: mode === s.mode ? s.selectedAnnotation : null,
         // Mode change also clears any active tool — drawing tools don't
         // apply outside DRAW mode
         tool: mode === 'DRAW' || mode === 'TECHNICAL' ? s.tool : null,

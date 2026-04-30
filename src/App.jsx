@@ -5,6 +5,7 @@ import DrawingTools from './components/DrawingTools'
 import ModeToggle from './components/ModeToggle'
 import PropertiesPanel from './components/PropertiesPanel'
 import SequencePanel from './components/SequencePanel'
+import AnnotationPanel from './components/AnnotationPanel'
 import './App.css'
 
 export default function App() {
@@ -24,6 +25,16 @@ export default function App() {
   const layers = useAppStore((s) => s.layers)
   // Section 7.A — viewport zoom level for the status bar readout.
   const viewportZoom = useAppStore((s) => s.viewport?.zoom ?? 1)
+  // Step 13 — Annotations tab is gated to SEQUENCE mode + active sequence.
+  // The tab BUTTON only renders under that gate; if drawerTab persisted
+  // as 'annotations' from a prior session but the gate is closed now, the
+  // body falls back to 'properties' for rendering. The persisted choice
+  // is preserved so the operator returns to the Annotations tab when the
+  // gate re-opens.
+  const activeSeqId = useAppStore((s) => s.activeSeqId)
+  const showAnnotationsTab = mode === 'SEQUENCE' && !!activeSeqId
+  const effectiveDrawerTab =
+    drawerTab === 'annotations' && !showAnnotationsTab ? 'properties' : drawerTab
 
   const shapeCount = layers.reduce((n, l) => n + (l.shapes?.length || 0), 0)
 
@@ -106,9 +117,9 @@ export default function App() {
             <button
               type="button"
               role="tab"
-              className={drawerTab === 'properties' ? 'drawer-tab active' : 'drawer-tab'}
+              className={effectiveDrawerTab === 'properties' ? 'drawer-tab active' : 'drawer-tab'}
               onClick={() => setDrawerTab('properties')}
-              aria-selected={drawerTab === 'properties'}
+              aria-selected={effectiveDrawerTab === 'properties'}
               data-testid="drawer-tab-properties"
             >
               Properties
@@ -116,16 +127,32 @@ export default function App() {
             <button
               type="button"
               role="tab"
-              className={drawerTab === 'sequences' ? 'drawer-tab active' : 'drawer-tab'}
+              className={effectiveDrawerTab === 'sequences' ? 'drawer-tab active' : 'drawer-tab'}
               onClick={() => setDrawerTab('sequences')}
-              aria-selected={drawerTab === 'sequences'}
+              aria-selected={effectiveDrawerTab === 'sequences'}
               data-testid="drawer-tab-sequences"
             >
               Sequences
             </button>
+            {showAnnotationsTab && (
+              <button
+                type="button"
+                role="tab"
+                className={effectiveDrawerTab === 'annotations' ? 'drawer-tab active' : 'drawer-tab'}
+                onClick={() => setDrawerTab('annotations')}
+                aria-selected={effectiveDrawerTab === 'annotations'}
+                data-testid="drawer-tab-annotations"
+              >
+                Annotations
+              </button>
+            )}
           </div>
           <div className="drawer-tab-body" role="tabpanel">
-            {drawerTab === 'sequences' ? <SequencePanel /> : <PropertiesPanel />}
+            {effectiveDrawerTab === 'annotations'
+              ? <AnnotationPanel />
+              : effectiveDrawerTab === 'sequences'
+              ? <SequencePanel />
+              : <PropertiesPanel />}
           </div>
         </aside>
       </div>
