@@ -233,28 +233,6 @@ const initialState = {
   // the selected annotation.
   selectedAnnotation: null,
 
-  // Step 15 — Job Registry session state (transient; not persisted in
-  // PERSIST_KEYS so a fresh fetch happens each session — the registry
-  // sheet may have updated since last visit). Auth token mirrors
-  // localStorage keys `kcc_token` / `kcc_token_expiry` used by sibling
-  // KCC apps (roof-inspector, flat-roof-inspector) so signing into one
-  // grants access across the suite.
-  registry: {
-    accessToken: null,
-    expiresAt: 0,
-    headers: null,        // raw header row as array
-    headerIndex: null,    // Map<lowercase column name, column index>
-    fieldMap: null,       // { jobId: idx, address: idx, owner: idx, status: idx, scope: idx, crew: idx }
-    rows: [],             // raw rows[] from Sheets API
-    jobs: [],             // canonicalized [{jobId, address, owner, status, scope, crew, _rawRow}]
-    loadingState: 'idle', // 'idle' | 'auth' | 'fetching' | 'ready' | 'error'
-    error: null,
-    pickerOpen: false,
-    pickerStage: 'job',   // 'job' | 'scope' | 'crew'
-    pendingPick: null,    // partial selection while operator advances stages
-    fetchedAt: 0,
-  },
-
   // Section 7.A — viewport state (canvas-as-viewport-onto-photo). Persists
   // so refresh restores the operator's pan/zoom. Default zoom of 1.0 is
   // overridden by fit-to-viewport when a photo loads (deferred until after
@@ -712,30 +690,6 @@ export const useAppStore = create((set, get) => {
     // ============ Job context (Step 15 populates) ===========================
     setJob: (jobContext) => set({ jobContext }),
     clearJob: () => set({ jobContext: null }),
-
-    // ============ Step 15 — Job Registry ====================================
-    // Patch into the registry slice. Each action takes a partial `{...}` and
-    // merges. The registry slice is transient (not in PERSIST_KEYS) so these
-    // mutations don't trigger autosave.
-    patchRegistry: (partial) => set((s) => ({ registry: { ...s.registry, ...partial } })),
-    setRegistryAuth: (accessToken, expiresAt) => set((s) => ({
-      registry: { ...s.registry, accessToken, expiresAt },
-    })),
-    clearRegistryAuth: () => set((s) => ({
-      registry: { ...s.registry, accessToken: null, expiresAt: 0 },
-    })),
-    openJobPicker: () => set((s) => ({
-      registry: { ...s.registry, pickerOpen: true, pickerStage: 'job', pendingPick: null },
-    })),
-    closeJobPicker: () => set((s) => ({
-      registry: { ...s.registry, pickerOpen: false, pickerStage: 'job', pendingPick: null },
-    })),
-    setPickerStage: (stage) => set((s) => ({
-      registry: { ...s.registry, pickerStage: stage },
-    })),
-    setPendingPick: (pendingPick) => set((s) => ({
-      registry: { ...s.registry, pendingPick },
-    })),
 
     // ============ Save state ================================================
     setSaveState: (saveState) => set({ saveState }),
