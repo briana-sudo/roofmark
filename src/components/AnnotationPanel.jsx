@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { useAppStore } from '../store/useAppStore'
 
 /**
@@ -86,6 +87,38 @@ function AnnotationCard({ seqId, anno, calloutNumber, isSelected }) {
     useAppStore.getState().updateAnnotation(seqId, anno.id, { [field]: value })
   }
 
+  // Step 17 partial-completion fix (Failure 1, Option B). Each annotation
+  // text input gets a focus→blur edit-session: focus captures the full
+  // pre-edit dataSnapshot + the original field value into refs. Blur
+  // compares; if changed, pushes the captured snapshot onto the undo
+  // stack. Result: one undo entry per edit session, regardless of
+  // keystroke count. Matches the rest of the app's "one action = one
+  // undo" convention.
+  //
+  // Per-input scoping: the field name is read from each element's
+  // data-field attribute (set in the JSX), so a single pair of handlers
+  // serves all 3-5 inputs without curried factories — react-hooks/refs
+  // disallows ref reads inside curried render-time factories.
+  const preEditSnapshotRef = useRef({})
+  const originalValueRef = useRef({})
+  const onFieldFocus = (e) => {
+    const field = e.target.dataset.field
+    if (!field) return
+    preEditSnapshotRef.current[field] = useAppStore.getState().captureUndoSnapshot()
+    originalValueRef.current[field] = e.target.value
+  }
+  const onFieldBlur = (e) => {
+    const field = e.target.dataset.field
+    if (!field) return
+    const original = originalValueRef.current[field]
+    const snap = preEditSnapshotRef.current[field]
+    if (typeof original === 'string' && e.target.value !== original && typeof snap === 'string') {
+      useAppStore.getState().pushCapturedSnapshot(snap)
+    }
+    delete preEditSnapshotRef.current[field]
+    delete originalValueRef.current[field]
+  }
+
   // Click anywhere on the card surface (except the controls) toggles
   // the panel selection. Step 9 mousedown-vs-click pattern carried
   // forward — activation fires on `onMouseDown` so clicking the
@@ -144,9 +177,12 @@ function AnnotationCard({ seqId, anno, calloutNumber, isSelected }) {
               className="anno-textarea"
               value={anno.textEN || ''}
               onChange={(e) => updateField('textEN', e.target.value)}
+              onFocus={onFieldFocus}
+              onBlur={onFieldBlur}
               onMouseDown={(e) => e.stopPropagation()}
               placeholder={anno.type === 'callout' ? 'English label for this callout…' : 'English note…'}
               rows={2}
+              data-field="textEN"
               data-testid={`anno-card-en-${anno.id}`}
             />
           </label>
@@ -156,9 +192,12 @@ function AnnotationCard({ seqId, anno, calloutNumber, isSelected }) {
               className="anno-textarea"
               value={anno.textES || ''}
               onChange={(e) => updateField('textES', e.target.value)}
+              onFocus={onFieldFocus}
+              onBlur={onFieldBlur}
               onMouseDown={(e) => e.stopPropagation()}
               placeholder={anno.type === 'callout' ? 'Etiqueta en español para este callout…' : 'Nota en español…'}
               rows={2}
+              data-field="textES"
               data-testid={`anno-card-es-${anno.id}`}
             />
           </label>
@@ -173,8 +212,11 @@ function AnnotationCard({ seqId, anno, calloutNumber, isSelected }) {
               className="anno-text-input"
               value={anno.value || ''}
               onChange={(e) => updateField('value', e.target.value)}
+              onFocus={onFieldFocus}
+              onBlur={onFieldBlur}
               onMouseDown={(e) => e.stopPropagation()}
               placeholder={'e.g. 12\'-6", 3.5 m, 4/12 pitch'}
+              data-field="value"
               data-testid={`anno-card-value-${anno.id}`}
             />
           </label>

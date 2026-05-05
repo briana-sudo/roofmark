@@ -34,7 +34,16 @@ const UNDO_LIMIT = 50
 // Step 17 — JSON export/import schema version. Bump when exportJSON's
 // payload shape changes incompatibly. importJSON rejects mismatched
 // versions rather than corrupting state.
-const SCHEMA_VERSION = 1
+//
+// v1 (initial Step 17) — geometry-only payload. Photo blobs lived in
+//                        IndexedDB and were NOT exported.
+// v2 (Step 17 partial-completion fix, Failure 2) — embeds both photo
+//                        slots ('cropped' + 'source') under `_photos`
+//                        as data-URL strings so a project file is
+//                        self-contained. v1 imports continue to work
+//                        (photo absent — operator re-uploads via 📷).
+const SCHEMA_VERSION = 2
+const SUPPORTED_IMPORT_VERSIONS = new Set([1, 2])
 
 // ---- ID generators ---------------------------------------------------------
 let _layerSeq = 0
@@ -704,28 +713,55 @@ export const useAppStore = create((set, get) => {
     },
 
     // ============ Import / Export (Step 17, Spec §15) =======================
-    // Step 17 — `exportJSON` returns a JSON string carrying the FULL
-    // PERSIST_KEYS set + a schemaVersion + exportedAt timestamp. Photo
-    // binary blobs (cropped + source) are NOT embedded — JSON stays
-    // text-only and portable. The operator re-uploads the photo on the
-    // importing device via the existing 📷 Photo button. (Future
-    // enhancement: optional "Export with Photo" path that base64-
-    // embeds the cropped blob — deferred per Step 17 brief.)
-    exportJSON: () => {
+    // Step 17 — `exportJSON` returns a Promise<string> carrying the FULL
+    // PERSIST_KEYS set + a schemaVersion + exportedAt timestamp + (in v2)
+    // both photo slots embedded as data-URL strings under `_photos`.
+    //
+    // Why async (Step 17 partial-completion fix, Failure 2):
+    //   Photo blobs live in IndexedDB; reading them is async. A project
+    //   without its photo isn't a usable project for resuming work, so v2
+    //   embeds them by default. Files become 5–9 MB typical (worst case
+    //   12 MB for an iPhone source) — acceptable cost for self-contained
+    //   project files.
+    //
+    // _photos shape:
+    //   { cropped: 'data:image/jpeg;base64,...',
+    //     source:  'data:image/jpeg;base64,...' }
+    // Either or both may be absent. If both absent, the `_photos` key is
+    // omitted entirely so v2 files for never-photo'd projects stay tiny.
+    exportJSON: async () => {
       const s = get()
       const slice = {}
       for (const k of PERSIST_KEYS) slice[k] = s[k]
-      return JSON.stringify(
-        {
-          schemaVersion: SCHEMA_VERSION,
-          exportedAt: new Date().toISOString(),
-          ...slice,
-        },
-        null,
-        2
-      )
+      const payload = {
+        schemaVersion: SCHEMA_VERSION,
+        exportedAt: new Date().toISOString(),
+        ...slice,
+      }
+      // Read both IDB slots in parallel; treat read failures as "no photo
+      // available" rather than failing the whole export.
+      const [croppedURL, sourceURL] = await Promise.all([
+        loadPhoto('cropped').catch(() => null),
+        loadPhoto('source').catch(() => null),
+      ])
+      const photos = {}
+      if (typeof croppedURL === 'string' && croppedURL.length > 0) {
+        photos.cropped = croppedURL
+      }
+      if (typeof sourceURL === 'string' && sourceURL.length > 0) {
+        photos.source = sourceURL
+      }
+      if (Object.keys(photos).length > 0) {
+        payload._photos = photos
+      }
+      return JSON.stringify(payload, null, 2)
     },
-    importJSON: (data) => {
+    // importJSON returns Promise<void>. v1 + v2 supported; v1 has no
+    // embedded photo (warn + clear IDB so a stale photo from a previous
+    // project doesn't render under the imported geometry); v2 may carry
+    // either, both, or neither photo slot — restore what's present, clear
+    // what isn't.
+    importJSON: async (data) => {
       const obj = typeof data === 'string' ? JSON.parse(data) : data
       if (!obj || typeof obj !== 'object') {
         throw new Error('Imported file must be a JSON object.')
@@ -733,8 +769,8 @@ export const useAppStore = create((set, get) => {
       if (typeof obj.schemaVersion !== 'number') {
         throw new Error('Missing schemaVersion field — file is not a RoofMark export.')
       }
-      if (obj.schemaVersion !== SCHEMA_VERSION) {
-        throw new Error(`Schema version mismatch: file is v${obj.schemaVersion}, app expects v${SCHEMA_VERSION}.`)
+      if (!SUPPORTED_IMPORT_VERSIONS.has(obj.schemaVersion)) {
+        throw new Error(`Schema version mismatch: file is v${obj.schemaVersion}, app supports v1, v2.`)
       }
       pushUndo()
       reseedCounters(obj)
@@ -752,6 +788,44 @@ export const useAppStore = create((set, get) => {
       const activeSeqId = obj.activeSeqId
         && sequences.some((s) => s.id === obj.activeSeqId)
         ? obj.activeSeqId : null
+
+      // Photo restoration. v1 has no photo data; v2 may carry one or both
+      // slots under `_photos`. Always reconcile IDB to the file's intent
+      // (clear absent slots) so the imported project doesn't inherit a
+      // stale photo from whatever was loaded before.
+      let backgroundImage = null
+      let hasSourcePhoto = false
+      const photos = (obj.schemaVersion === 2 && obj._photos) ? obj._photos : null
+      if (obj.schemaVersion === 1) {
+        console.warn('RoofMark: importing v1 project file — no photo embedded. Use 📷 Photo to upload one.')
+        await Promise.all([
+          clearPhoto('cropped').catch(() => {}),
+          clearPhoto('source').catch(() => {}),
+          clearPhoto('background').catch(() => {}),
+        ])
+      } else {
+        // v2 — write whatever slots are present, clear the rest.
+        const croppedURL = (photos && typeof photos.cropped === 'string') ? photos.cropped : null
+        const sourceURL  = (photos && typeof photos.source  === 'string') ? photos.source  : null
+        await Promise.all([
+          croppedURL ? savePhoto(croppedURL, 'cropped').catch(() => {})
+                     : clearPhoto('cropped').catch(() => {}),
+          sourceURL  ? savePhoto(sourceURL,  'source').catch(() => {})
+                     : clearPhoto('source').catch(() => {}),
+          // Legacy 'background' key — always cleared post-§7.A.
+          clearPhoto('background').catch(() => {}),
+        ])
+        if (croppedURL) {
+          backgroundImage = await new Promise((resolve) => {
+            const img = new Image()
+            img.onload = () => resolve(img)
+            img.onerror = () => { console.warn('Failed to decode embedded photo; ignoring.'); resolve(null) }
+            img.src = croppedURL
+          })
+        }
+        hasSourcePhoto = !!sourceURL
+      }
+
       set({
         layers,
         sequences,
@@ -766,15 +840,40 @@ export const useAppStore = create((set, get) => {
         viewport: normalizeViewport(obj.viewport),
         photoMeta: normalizePhotoMeta(obj.photoMeta),
         cropMeta: obj.cropMeta || null,
-        // Reset transient session state so the imported project starts
-        // clean. Photo binary stays in IndexedDB if present (operator
-        // can re-upload via 📷 Photo to load the matching photo into
-        // the canvas; or click 📷 with a different photo to replace).
-        backgroundImage: null,
-        hasSourcePhoto: false,
+        backgroundImage,
+        hasSourcePhoto,
         selected: null,
         selectedAnnotation: null,
         tool: null,
+      })
+    },
+
+    // ============ Caller-controlled undo snapshots (Step 17 partial fix) ====
+    // Most actions that mutate data call the closure-private pushUndo() at
+    // the top of the action (see addLayer/addShape/addAnnotation/etc).
+    // That works for "one click = one logical edit" mutations, but it's
+    // wrong for fast-flowing per-keystroke mutations: holding a key in an
+    // annotation textarea would push 33 entries onto the 50-step stack
+    // for a 33-char paste.
+    //
+    // Failure 1 of Step 17 operator verification surfaced this:
+    // updateAnnotation has no pushUndo() (deliberately — same convention
+    // as renameLayer / setLayerColor / updateLayerProps), but operators
+    // expect Cmd+Z to reverse a typo. Instead of pushing per keystroke,
+    // AnnotationPanel uses the focus→blur edit-session pattern:
+    //
+    //   onFocus: capture the current dataSnapshot string into a ref
+    //   onBlur:  if value changed, push the captured snapshot
+    //
+    // That gives one undo entry per "edit session" — consistent with
+    // "one logical action = one undo" elsewhere in the app.
+    captureUndoSnapshot: () => dataSnapshot(get()),
+    pushCapturedSnapshot: (snap) => {
+      if (typeof snap !== 'string' || snap.length === 0) return
+      set((s) => {
+        const next = [...s.undoStack, snap]
+        while (next.length > UNDO_LIMIT) next.shift()
+        return { undoStack: next, redoStack: [] }
       })
     },
 

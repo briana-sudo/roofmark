@@ -14,22 +14,29 @@
 </style>
 </head>
 <body>
-<h1>RoofMark — Step 17 Block Test (Save/Load round-trip + Undo capacity)</h1>
+<h1>RoofMark — Step 17 Block Test (Save/Load round-trip + Undo capacity + Schema v2 photo round-trip)</h1>
 <div class="summary" id="summary"></div>
 <script>
 /*
   Step 17 block test — pure-JS reproduction of:
     buildExportPayload  — produces JSON-serializable payload from store-shape state
-    parseImportPayload  — validates schemaVersion, returns the payload (or throws)
+                          (now embeds _photos when slots are present, schema v2)
+    parseImportPayload  — validates schemaVersion in {1, 2}, returns the payload
+                          (v1 imports continue to work, no _photos on v1)
     suggestedFilename   — "roofmark-project-YYYY-MM-DD-HHMM.json"
     pushUndoCapped      — undo stack with UNDO_LIMIT cap (50)
     deepEqualJSON       — round-trip equality helper
 
   These are mirrored verbatim in src/store/useAppStore.js so the React
   clone behaves identically.
+
+  Step 17 partial-completion fix (Failure 2): SCHEMA_VERSION bumped to 2.
+  v1 imports still accepted (geometry only, no photo). v2 imports may
+  carry { _photos: { cropped, source } } — both optional.
 */
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
+const SUPPORTED_IMPORT_VERSIONS = new Set([1, 2])
 const UNDO_LIMIT = 50
 const PERSIST_KEYS = [
   'layers', 'sequences', 'clines', 'jobContext',
@@ -38,14 +45,22 @@ const PERSIST_KEYS = [
   'viewport', 'photoMeta', 'cropMeta',
 ]
 
-function buildExportPayload(state, isoNowFn = () => new Date().toISOString()) {
+// buildExportPayload now optionally embeds _photos. Pass photos={cropped, source}
+// (either may be undefined/null). When both are absent the _photos key is omitted.
+function buildExportPayload(state, isoNowFn = () => new Date().toISOString(), photos = null) {
   const slice = {}
   for (const k of PERSIST_KEYS) slice[k] = state[k]
-  return {
+  const payload = {
     schemaVersion: SCHEMA_VERSION,
     exportedAt: isoNowFn(),
     ...slice,
   }
+  if (photos && (photos.cropped || photos.source)) {
+    payload._photos = {}
+    if (typeof photos.cropped === 'string' && photos.cropped.length > 0) payload._photos.cropped = photos.cropped
+    if (typeof photos.source  === 'string' && photos.source.length  > 0) payload._photos.source  = photos.source
+  }
+  return payload
 }
 
 function parseImportPayload(jsonText) {
@@ -54,8 +69,8 @@ function parseImportPayload(jsonText) {
   catch (e) { throw new Error('Invalid JSON: ' + (e.message || e)) }
   if (!obj || typeof obj !== 'object') throw new Error('Imported file must be a JSON object.')
   if (typeof obj.schemaVersion !== 'number') throw new Error('Missing schemaVersion field.')
-  if (obj.schemaVersion !== SCHEMA_VERSION) {
-    throw new Error(`Schema version mismatch: file is v${obj.schemaVersion}, app expects v${SCHEMA_VERSION}.`)
+  if (!SUPPORTED_IMPORT_VERSIONS.has(obj.schemaVersion)) {
+    throw new Error(`Schema version mismatch: file is v${obj.schemaVersion}, app supports v1, v2.`)
   }
   return obj
 }
@@ -87,6 +102,10 @@ const pass = (name, cond, extra) => tests.push({ name, ok: !!cond, extra })
 
 // 1. buildExportPayload — schemaVersion + exportedAt + all PERSIST_KEYS
 const fixedNow = () => '2026-05-05T18:30:00.000Z'
+// Tiny synthetic data-URLs for photo round-trip tests. Real photos are
+// 1–7 MB; these fakes only need to round-trip as strings, not decode.
+const FAKE_CROPPED = 'data:image/jpeg;base64,/9j/CROPPED-FIXTURE'
+const FAKE_SOURCE  = 'data:image/jpeg;base64,/9j/SOURCE-FIXTURE'
 const stateA = {
   layers: [{ id: 'l1', name: 'Roof', shapes: [] }],
   sequences: [{ id: 's1', title: 'S1', layers: { l1: true }, annotations: [] }],
@@ -107,7 +126,7 @@ const stateA = {
   backgroundImage: { naturalWidth: 1920 }, // also excluded
 }
 const exported = buildExportPayload(stateA, fixedNow)
-pass('export has schemaVersion === 1', exported.schemaVersion === 1)
+pass('export has schemaVersion === 2', exported.schemaVersion === 2)
 pass('export has exportedAt timestamp', exported.exportedAt === '2026-05-05T18:30:00.000Z')
 pass('export contains layers', deepEqualJSON(exported.layers, stateA.layers))
 pass('export contains sequences', deepEqualJSON(exported.sequences, stateA.sequences))
@@ -125,6 +144,8 @@ pass('export contains cropMeta', deepEqualJSON(exported.cropMeta, stateA.cropMet
 pass('export EXCLUDES selected (transient)', !('selected' in exported))
 pass('export EXCLUDES cursorX (transient)', !('cursorX' in exported))
 pass('export EXCLUDES backgroundImage (binary)', !('backgroundImage' in exported))
+// v2 — _photos is omitted when no photos passed in (project never had one)
+pass('export OMITS _photos when no photos provided', !('_photos' in exported))
 
 // 2. JSON.stringify produces parseable text + round-trip
 const text = JSON.stringify(exported, null, 2)
@@ -132,17 +153,40 @@ const reparsed = JSON.parse(text)
 pass('JSON serializes to a string', typeof text === 'string' && text.length > 100)
 pass('JSON round-trips via stringify/parse', deepEqualJSON(reparsed, exported))
 
-// 3. parseImportPayload — happy path
+// 3. parseImportPayload — happy path (v2)
 const imported = parseImportPayload(text)
-pass('parseImportPayload accepts valid v1 JSON', imported.schemaVersion === 1)
+pass('parseImportPayload accepts valid v2 JSON', imported.schemaVersion === 2)
 pass('parseImportPayload preserves all PERSIST_KEYS', PERSIST_KEYS.every(k => deepEqualJSON(imported[k], stateA[k])))
 
-// 4. parseImportPayload — schema mismatch rejected
+// 3b. v1 imports continue to work (backward-compat)
+const v1Payload = JSON.stringify({
+  schemaVersion: 1,
+  exportedAt: '2026-05-04T10:00:00.000Z',
+  layers: stateA.layers,
+  sequences: stateA.sequences,
+  clines: stateA.clines,
+  jobContext: stateA.jobContext,
+  gridSize: stateA.gridSize,
+  rightDrawerOpen: stateA.rightDrawerOpen,
+  drawerTab: stateA.drawerTab,
+  mode: stateA.mode,
+  activeLayerId: stateA.activeLayerId,
+  activeSeqId: stateA.activeSeqId,
+  viewport: stateA.viewport,
+  photoMeta: stateA.photoMeta,
+  cropMeta: stateA.cropMeta,
+})
+const v1Imported = parseImportPayload(v1Payload)
+pass('parseImportPayload accepts valid v1 JSON (backward-compat)', v1Imported.schemaVersion === 1)
+pass('v1 import preserves all PERSIST_KEYS', PERSIST_KEYS.every(k => deepEqualJSON(v1Imported[k], stateA[k])))
+pass('v1 import has no _photos (geometry only)', !('_photos' in v1Imported))
+
+// 4. parseImportPayload — schema v3 (unknown future) rejected
 try {
-  parseImportPayload(JSON.stringify({ schemaVersion: 2, layers: [] }))
-  pass('schema v2 rejected with throw', false)
+  parseImportPayload(JSON.stringify({ schemaVersion: 3, layers: [] }))
+  pass('schema v3 rejected with throw', false)
 } catch (e) {
-  pass('schema v2 rejected with throw', /v2.*v1|mismatch/i.test(e.message), { msg: e.message })
+  pass('schema v3 rejected with throw', /v3.*v1.*v2|mismatch/i.test(e.message), { msg: e.message })
 }
 
 // 5. parseImportPayload — missing schemaVersion rejected
@@ -182,6 +226,24 @@ const roundTripped = parseImportPayload(JSON.stringify(buildExportPayload(stateA
 for (const k of PERSIST_KEYS) {
   pass(`round-trip preserves ${k}`, deepEqualJSON(roundTripped[k], stateA[k]))
 }
+
+// 9b. v2 photo round-trip — both slots embedded
+const withBoth = buildExportPayload(stateA, fixedNow, { cropped: FAKE_CROPPED, source: FAKE_SOURCE })
+pass('export embeds _photos when provided', !!withBoth._photos)
+pass('export _photos.cropped matches input', withBoth._photos.cropped === FAKE_CROPPED)
+pass('export _photos.source matches input', withBoth._photos.source === FAKE_SOURCE)
+const rtBoth = parseImportPayload(JSON.stringify(withBoth))
+pass('v2 round-trip preserves _photos.cropped', rtBoth._photos.cropped === FAKE_CROPPED)
+pass('v2 round-trip preserves _photos.source', rtBoth._photos.source === FAKE_SOURCE)
+
+// 9c. v2 partial photo — cropped only (source absent — re-crop disabled scenario)
+const croppedOnly = buildExportPayload(stateA, fixedNow, { cropped: FAKE_CROPPED, source: null })
+pass('export with cropped-only includes cropped', croppedOnly._photos.cropped === FAKE_CROPPED)
+pass('export with cropped-only omits source field', !('source' in (croppedOnly._photos || {})))
+
+// 9d. v2 explicit-empty photos — _photos omitted entirely (no orphan empty object)
+const noPhotos = buildExportPayload(stateA, fixedNow, { cropped: null, source: null })
+pass('export with both null photos OMITS _photos entirely', !('_photos' in noPhotos))
 
 // 10. pushUndoCapped — capacity test (50)
 let stack = []

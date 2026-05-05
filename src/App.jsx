@@ -55,21 +55,31 @@ export default function App() {
   // to ● saved" — `saveNow()` does both atomically; the JSON export
   // happens after, so a download interrupted mid-flow still leaves the
   // localStorage save in place.
-  const handleSave = () => {
-    useAppStore.getState().saveNow()
-    const json = useAppStore.getState().exportJSON()
-    const blob = new Blob([json], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const d = new Date()
-    const pad2 = (n) => String(n).padStart(2, '0')
-    const filename = `roofmark-project-${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}.json`
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  //
+  // Async (Step 17 partial-completion fix, Failure 2): exportJSON now
+  // awaits IndexedDB reads to embed both photo slots inline. Typical
+  // file is 5–9 MB; the download fires after the IDB reads resolve
+  // (sub-second on local browsers).
+  const handleSave = async () => {
+    try {
+      useAppStore.getState().saveNow()
+      const json = await useAppStore.getState().exportJSON()
+      const blob = new Blob([json], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const d = new Date()
+      const pad2 = (n) => String(n).padStart(2, '0')
+      const filename = `roofmark-project-${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}.json`
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (err) {
+      const msg = err?.message || String(err)
+      window.alert(`Save failed: ${msg}`)
+    }
   }
 
   // Step 17 — Cmd+S / Ctrl+S keyboard handler. Document-level so it

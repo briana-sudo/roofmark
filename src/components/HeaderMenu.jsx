@@ -64,19 +64,23 @@ export default function HeaderMenu() {
     setImportError('')
     fileInputRef.current?.click()
   }
+  // Step 17 partial-completion fix (Failure 2): importJSON is async to
+  // restore embedded photos to IndexedDB before flipping store state.
+  // The FileReader.onload handler is itself async so a v2 file's photo
+  // round-trip lands cleanly before the canvas re-renders.
   const onFilePicked = (e) => {
     const file = e.target.files?.[0]
     e.target.value = '' // allow picking the same file again later
     if (!file) return
     const reader = new FileReader()
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       const text = ev.target?.result
       if (typeof text !== 'string') {
         window.alert('Could not read file as text.')
         return
       }
       try {
-        useAppStore.getState().importJSON(text)
+        await useAppStore.getState().importJSON(text)
       } catch (err) {
         const msg = err?.message || String(err)
         window.alert(`Load failed: ${msg}`)
