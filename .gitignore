@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Local-pending session log captures (Rule 28 workaround when Notion
+# parent pages are write-locked). Audit-trail markdown for backfill
+# tracking; not project source.
+roofmark_pending_session_logs/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

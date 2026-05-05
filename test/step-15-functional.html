@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RoofMark — Step 15 Functional (Job Registry Integration)</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #0d1117; color: #e6edf3; padding: 16px; }
+  h1 { margin: 0 0 12px; font-size: 18px; }
+  .summary { font-family: "SF Mono", Consolas, monospace; font-size: 12px; }
+  .pass { color: #3fb950; }
+  .fail { color: #f85149; }
+  .row { padding: 2px 0; }
+</style>
+</head>
+<body>
+<h1>RoofMark — Step 15 Block Test (Registry Header Mapping + Search Filter)</h1>
+<div class="summary" id="summary"></div>
+<script>
+/*
+  Step 15 block test — pure-JS reproduction of the registry module's
+  PURE FUNCTIONS (no auth, no network):
+    findHeaderRow         — tries first 3 rows; picks the one that looks most like headers
+    buildHeaderIndex      — maps lowercase column name -> column index
+    resolveCanonicalField — given canonical name + alias list, find matching column
+    buildJobOptions       — convert raw rows -> {jobId, address, owner, status, scope, crew} list
+    filterJobs            — case-insensitive substring match against jobId / address / owner
+    splitMultiValue       — handles scope/crew strings split on common delimiters
+
+  Per Rule 19 / Rule 24: register column names dynamically; never hardcode
+  letters or indices. This block test verifies the dynamic resolution math
+  before integration so the React clone in src/store/registry.js can match
+  it verbatim.
+*/
+
+// ---- Implementations under test (will be ported to src/store/registry.js) ----
+
+function buildHeaderIndex(headerCells) {
+  const map = new Map()
+  headerCells.forEach((cell, idx) => {
+    if (typeof cell !== 'string') return
+    const key = cell.trim().toLowerCase()
+    if (key && !map.has(key)) map.set(key, idx)
+  })
+  return map
+}
+
+function findHeaderRow(rows) {
+  // Returns the index of the row most likely to be the header row.
+  // Heuristic: the first row whose cells are mostly non-empty, mostly short
+  // strings (< 40 chars), and that contains at least one canonical-ish
+  // word like "id", "address", "job", "name", "status".
+  const probe = ['id', 'job', 'address', 'name', 'status', 'scope', 'crew', 'owner', 'client', 'foreman']
+  let bestIdx = -1, bestScore = -1
+  for (let i = 0; i < Math.min(rows.length, 5); i++) {
+    const row = rows[i] || []
+    const nonEmpty = row.filter((c) => typeof c === 'string' && c.trim()).length
+    if (nonEmpty < 3) continue
+    const lc = row.map((c) => (typeof c === 'string' ? c.toLowerCase() : ''))
+    const hits = probe.filter((p) => lc.some((c) => c.includes(p))).length
+    const shortish = row.filter((c) => typeof c === 'string' && c.length > 0 && c.length < 40).length
+    const score = hits * 10 + shortish
+    if (score > bestScore) { bestScore = score; bestIdx = i }
+  }
+  return bestIdx
+}
+
+function resolveCanonicalField(headerIndex, aliases) {
+  for (const a of aliases) {
+    const key = a.toLowerCase()
+    if (headerIndex.has(key)) return headerIndex.get(key)
+  }
+  return -1
+}
+
+const FIELD_ALIASES = {
+  jobId:   ['Job ID', 'JobID', 'Job#', 'Job Number', 'ID'],
+  address: ['Address', 'Street Address', 'Property Address', 'Site Address'],
+  owner:   ['Owner', 'Client', 'Customer', 'Owner Name', 'Client Name'],
+  status:  ['Status', 'Job Status', 'Stage'],
+  scope:   ['Scope', 'Trade', 'Service', 'Job Scope', 'Scopes'],
+  crew:    ['Crew', 'Crew Lead', 'Foreman', 'Lead Crew', 'Assigned Crew'],
+}
+
+function buildFieldMap(headerIndex) {
+  const out = {}
+  for (const [canonical, aliases] of Object.entries(FIELD_ALIASES)) {
+    out[canonical] = resolveCanonicalField(headerIndex, aliases)
+  }
+  return out
+}
+
+function buildJobOptions(rows, headerRowIdx, fieldMap) {
+  const cellOr = (row, idx, fallback = '') => (idx >= 0 && row[idx] != null) ? String(row[idx]).trim() : fallback
+  const out = []
+  for (let i = headerRowIdx + 1; i < rows.length; i++) {
+    const row = rows[i] || []
+    const jobId = cellOr(row, fieldMap.jobId)
+    const address = cellOr(row, fieldMap.address)
+    const owner = cellOr(row, fieldMap.owner)
+    const status = cellOr(row, fieldMap.status)
+    const scope = cellOr(row, fieldMap.scope)
+    const crew = cellOr(row, fieldMap.crew)
+    if (!jobId && !address) continue // skip blank rows
+    out.push({ jobId, address, owner, status, scope, crew, _rawRow: row })
+  }
+  return out
+}
+
+function filterJobs(jobs, query) {
+  const q = (query || '').trim().toLowerCase()
+  if (!q) return jobs
+  return jobs.filter((j) => {
+    const haystack = [j.jobId, j.address, j.owner].filter(Boolean).join(' ').toLowerCase()
+    return haystack.includes(q)
+  })
+}
+
+function splitMultiValue(value) {
+  if (!value) return []
+  return String(value)
+    .split(/[\/,+&]| and /i)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+// ---- Tests ----
+
+const tests = []
+const pass = (name, cond, extra) => tests.push({ name, ok: !!cond, extra })
+
+// 1. buildHeaderIndex — basic mapping
+const idx1 = buildHeaderIndex(['Job ID', 'Status', 'Address', 'Owner'])
+pass('buildHeaderIndex maps "job id" -> 0', idx1.get('job id') === 0)
+pass('buildHeaderIndex maps "status" -> 1', idx1.get('status') === 1)
+pass('buildHeaderIndex is case-insensitive', idx1.get('address') === 2)
+pass('buildHeaderIndex skips empty cells', !idx1.has(''))
+
+// 2. resolveCanonicalField — alias resolution
+pass('resolveCanonicalField finds Job ID via first alias', resolveCanonicalField(idx1, ['Job ID', 'ID']) === 0)
+pass('resolveCanonicalField falls through aliases', resolveCanonicalField(idx1, ['JobID', 'Job ID']) === 0)
+pass('resolveCanonicalField returns -1 when no alias matches', resolveCanonicalField(idx1, ['Trade', 'Scope']) === -1)
+
+// 3. findHeaderRow — picks the row that looks most like a header
+const sheet1 = [
+  ['KCC Master Job Registry', '', '', ''],                      // title row
+  ['', '', '', ''],                                              // blank
+  ['Job ID', 'Status', 'Address', 'Owner'],                     // header
+  ['J24-001', 'Active', '123 Maple St', 'Smith Family'],        // data
+  ['J24-002', 'Closed', '456 Oak Ave', 'Jones LLC'],            // data
+]
+pass('findHeaderRow picks row 2 (header row)', findHeaderRow(sheet1) === 2, { found: findHeaderRow(sheet1) })
+
+const sheet2 = [
+  ['Job ID', 'Address', 'Owner'],   // header at row 0
+  ['J25-001', '789 Pine St', 'Doe'],
+]
+pass('findHeaderRow picks row 0 when no leading title rows', findHeaderRow(sheet2) === 0)
+
+// 4. buildFieldMap — full canonical mapping
+const fm = buildFieldMap(idx1)
+pass('buildFieldMap.jobId === 0', fm.jobId === 0)
+pass('buildFieldMap.address === 2', fm.address === 2)
+pass('buildFieldMap.owner === 3', fm.owner === 3)
+pass('buildFieldMap.scope === -1 (not in headers)', fm.scope === -1)
+
+// 5. buildJobOptions — full row -> object conversion
+const sheet3 = [
+  ['KCC Master Job Registry', '', '', '', '', ''],
+  ['', '', '', '', '', ''],
+  ['Job ID', 'Status', 'Address', 'Owner', 'Scope', 'Crew'],
+  ['J24-001', 'Active', '123 Maple St', 'Smith Family', 'Shingle Roof', 'Crew A'],
+  ['J24-002', 'Closed', '456 Oak Ave', 'Jones LLC', 'Flat Roof / Gutters', 'Crew B'],
+  ['', '', '', '', '', ''],   // blank row -> filtered
+]
+const headerIdx = findHeaderRow(sheet3)
+const fmFull = buildFieldMap(buildHeaderIndex(sheet3[headerIdx]))
+const jobs = buildJobOptions(sheet3, headerIdx, fmFull)
+pass('buildJobOptions returns 2 jobs (skips trailing blank)', jobs.length === 2, { count: jobs.length })
+pass('buildJobOptions[0].jobId === J24-001', jobs[0].jobId === 'J24-001')
+pass('buildJobOptions[0].owner === Smith Family', jobs[0].owner === 'Smith Family')
+pass('buildJobOptions[1].scope === Flat Roof / Gutters', jobs[1].scope === 'Flat Roof / Gutters')
+
+// 6. filterJobs — search-as-you-type
+pass('filterJobs matches by Job ID', filterJobs(jobs, 'J24-001').length === 1)
+pass('filterJobs matches by address (partial)', filterJobs(jobs, 'Maple').length === 1)
+pass('filterJobs matches by owner', filterJobs(jobs, 'Jones').length === 1)
+pass('filterJobs is case-insensitive', filterJobs(jobs, 'jones').length === 1)
+pass('filterJobs returns all when query is empty', filterJobs(jobs, '').length === 2)
+pass('filterJobs returns all when query is whitespace', filterJobs(jobs, '   ').length === 2)
+pass('filterJobs returns empty for no-match', filterJobs(jobs, 'Zzz').length === 0)
+
+// 7. splitMultiValue — scope/crew option splitting
+pass('splitMultiValue splits on /', JSON.stringify(splitMultiValue('Shingle / Flat / Gutters')) === '["Shingle","Flat","Gutters"]')
+pass('splitMultiValue splits on ,', JSON.stringify(splitMultiValue('Shingle, Flat, Gutters')) === '["Shingle","Flat","Gutters"]')
+pass('splitMultiValue splits on +', JSON.stringify(splitMultiValue('Shingle+Flat+Gutters')) === '["Shingle","Flat","Gutters"]')
+pass('splitMultiValue splits on " and "', JSON.stringify(splitMultiValue('Shingle and Flat and Gutters')) === '["Shingle","Flat","Gutters"]')
+pass('splitMultiValue trims whitespace', JSON.stringify(splitMultiValue('  Shingle  /  Flat  ')) === '["Shingle","Flat"]')
+pass('splitMultiValue handles empty', JSON.stringify(splitMultiValue('')) === '[]')
+pass('splitMultiValue handles null', JSON.stringify(splitMultiValue(null)) === '[]')
+pass('splitMultiValue keeps single value', JSON.stringify(splitMultiValue('Shingle Roof')) === '["Shingle Roof"]')
+
+// ---- Render summary ----
+const root = document.getElementById('summary')
+const passCount = tests.filter(t => t.ok).length
+const total = tests.length
+root.innerHTML = `<div class="row ${passCount === total ? 'pass' : 'fail'}">${passCount}/${total} ${passCount === total ? 'PASS' : 'FAIL'}</div>` +
+  tests.map(t => `<div class="row ${t.ok ? 'pass' : 'fail'}">${t.ok ? '✓' : '✗'} ${t.name}${t.extra ? ' ' + JSON.stringify(t.extra) : ''}</div>`).join('')
+</script>
+</body>
+</html>

@@ -15,6 +15,15 @@
     <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
+    <!--
+      Step 15 — Google Identity Services. Loaded async so it doesn't
+      block first paint; the JobRegistryPicker checks `window.google`
+      readiness before triggering a sign-in and surfaces a "loading"
+      message if the script hasn't arrived yet. Same script + flow as
+      roof-inspector / flat-roof-inspector for cross-app SSO via
+      shared `kcc_token` localStorage keys.
+    -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <title>RoofMark</title>
   </head>
   <body>

@@ -7,6 +7,7 @@ import PropertiesPanel from './components/PropertiesPanel'
 import SequencePanel from './components/SequencePanel'
 import AnnotationPanel from './components/AnnotationPanel'
 import HeaderMenu from './components/HeaderMenu'
+import JobRegistryPicker from './components/JobRegistryPicker'
 import './App.css'
 
 export default function App() {
@@ -26,6 +27,11 @@ export default function App() {
   const layers = useAppStore((s) => s.layers)
   // Section 7.A — viewport zoom level for the status bar readout.
   const viewportZoom = useAppStore((s) => s.viewport?.zoom ?? 1)
+  // Step 15 — Job Registry picker: opens when operator clicks the
+  // header Job slot. The picker itself reads everything it needs from
+  // the store; this component only needs the open trigger.
+  const openJobPicker = useAppStore((s) => s.openJobPicker)
+  const pickerOpen = useAppStore((s) => s.registry?.pickerOpen ?? false)
   // Step 13 — Annotations tab is gated to SEQUENCE mode + active sequence.
   // The tab BUTTON only renders under that gate; if drawerTab persisted
   // as 'annotations' from a prior session but the gate is closed now, the
@@ -44,13 +50,37 @@ export default function App() {
       <header className="app-header" role="banner">
         <span className="hdr-app">RoofMark</span>
         <span className="hdr-divider" />
-        <span className="hdr-job" data-slot="job">
+        {/*
+          Step 15 — Job slot becomes a clickable button that opens the
+          Job Registry picker. Three cascading stages inside the picker:
+          Job search → Scope dropdown → Crew dropdown. The header slots
+          continue to show the read-only display values from `jobContext`
+          but the WHOLE Job slot is the click target (operator-tested
+          P5 lesson — make the affordance generous, not just the icon).
+        */}
+        <button
+          type="button"
+          className={pickerOpen ? 'hdr-job hdr-clickable open' : 'hdr-job hdr-clickable'}
+          data-slot="job"
+          onClick={openJobPicker}
+          title="Open Job Registry picker"
+          aria-haspopup="dialog"
+          aria-expanded={pickerOpen}
+          data-testid="hdr-job-trigger"
+        >
           <span className="hdr-label">Job:</span>
-          <span className="hdr-value">{jobContext?.address ?? '—'}</span>
-        </span>
+          <span className="hdr-value">{jobContext?.jobId ? `${jobContext.jobId} · ` : ''}{jobContext?.address ?? '—'}</span>
+        </button>
         <span className="hdr-scope" data-slot="scope">
           <span className="hdr-label">Scope:</span>
-          <span className="hdr-value">{jobContext?.scope ?? '—'}</span>
+          <span className="hdr-value">{jobContext?.scope || '—'}</span>
+        </span>
+        {/* Step 15 — Crew slot. New for Step 15; populated as the third
+            stage of the JobRegistryPicker. Empty string and null both
+            render "—" so an explicit clear shows the same as a never-set. */}
+        <span className="hdr-crew" data-slot="crew">
+          <span className="hdr-label">Crew:</span>
+          <span className="hdr-value">{jobContext?.crew || '—'}</span>
         </span>
         <span className="hdr-spacer" />
         <ModeToggle />
@@ -187,6 +217,12 @@ export default function App() {
           Build: {typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev'}
         </span>
       </footer>
+      {/*
+        Step 15 — Job Registry picker (popover). Mounted at the app root
+        so it overlays the canvas; positioned via CSS to anchor below
+        the persistent header just under the Job slot.
+      */}
+      <JobRegistryPicker />
     </div>
   )
 }
