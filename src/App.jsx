@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { useAppStore } from './store/useAppStore'
 import CanvasStage from './components/CanvasStage'
 import LayerPanel from './components/LayerPanel'
@@ -37,7 +38,66 @@ export default function App() {
   const effectiveDrawerTab =
     drawerTab === 'annotations' && !showAnnotationsTab ? 'properties' : drawerTab
 
+  // Step 17 — Save / Undo / Redo (P7 bundled). Header buttons + Cmd+S
+  // keyboard. Undo / Redo keyboard shortcuts already wired in
+  // CanvasStage (Step 2 partial-completion fix); the buttons here are
+  // the operator-facing affordance + disabled-state indicator.
+  const undoStack = useAppStore((s) => s.undoStack)
+  const redoStack = useAppStore((s) => s.redoStack)
+
   const shapeCount = layers.reduce((n, l) => n + (l.shapes?.length || 0), 0)
+
+  // Step 17 — manual save handler. Generates the JSON export payload,
+  // creates a Blob, and triggers a download with a sensible filename.
+  // Same handler is bound to the visible Save button + Cmd+S/Ctrl+S
+  // keyboard shortcut. Per Spec §15: "Saves immediately to localStorage
+  // [via the existing autosave subscription] + Updates save indicator
+  // to ● saved" — `saveNow()` does both atomically; the JSON export
+  // happens after, so a download interrupted mid-flow still leaves the
+  // localStorage save in place.
+  const handleSave = () => {
+    useAppStore.getState().saveNow()
+    const json = useAppStore.getState().exportJSON()
+    const blob = new Blob([json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const d = new Date()
+    const pad2 = (n) => String(n).padStart(2, '0')
+    const filename = `roofmark-project-${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}.json`
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  // Step 17 — Cmd+S / Ctrl+S keyboard handler. Document-level so it
+  // fires regardless of focus. Skips when focus is in an input/textarea
+  // so native browser save dialogs aren't preempted in unexpected
+  // contexts (matching the Step 2 keyboard handler conventions in
+  // CanvasStage).
+  useEffect(() => {
+    const onKey = (e) => {
+      const meta = e.ctrlKey || e.metaKey
+      if (!meta) return
+      const k = (e.key || '').toLowerCase()
+      if (k !== 's' || e.shiftKey) return
+      const tag = (e.target?.tagName || '').toUpperCase()
+      const editable = tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable
+      if (editable) return
+      e.preventDefault()
+      handleSave()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+    // handleSave reads store via getState() only; deps stay empty.
+  }, [])
+
+  const handleUndo = () => useAppStore.getState().undo()
+  const handleRedo = () => useAppStore.getState().redo()
+  const undoDisabled = undoStack.length === 0
+  const redoDisabled = redoStack.length === 0
 
   return (
     <div className="app">
@@ -65,14 +125,57 @@ export default function App() {
         >
           ⚙ Properties
         </button>
+        {/*
+          Step 17 / P7 — visible Undo + Redo header buttons. Disabled
+          when respective stack is empty. Keyboard shortcuts (Ctrl/Cmd
+          + Z, Ctrl/Cmd + Y, Ctrl/Cmd + Shift + Z) were wired in Step 2
+          partial-completion fix; these buttons are the operator-
+          facing affordance for iPad / no-keyboard contexts (P7).
+        */}
+        <button
+          type="button"
+          className="btn-hdr btn-undo"
+          onClick={handleUndo}
+          disabled={undoDisabled}
+          title="Undo (Ctrl+Z / Cmd+Z)"
+          aria-label="Undo"
+          data-testid="btn-undo"
+        >
+          ↩ Undo
+        </button>
+        <button
+          type="button"
+          className="btn-hdr btn-redo"
+          onClick={handleRedo}
+          disabled={redoDisabled}
+          title="Redo (Ctrl+Y / Cmd+Shift+Z)"
+          aria-label="Redo"
+          data-testid="btn-redo"
+        >
+          ↪ Redo
+        </button>
+        {/*
+          Step 17 — manual Save button (Spec §15). Triggers the JSON
+          export download + flips the autosave indicator to "saved".
+          Cmd+S / Ctrl+S also bound at the document level above.
+        */}
+        <button
+          type="button"
+          className="btn-hdr btn-save"
+          onClick={handleSave}
+          title="Save project (Ctrl+S / Cmd+S)"
+          aria-label="Save project"
+          data-testid="btn-save"
+        >
+          ⤓ Save
+        </button>
         <span className={`hdr-save state-${saveState}`} data-slot="save">
           ● {saveState}
         </span>
         {/*
           Step 14 — persistent-header project menu (Spec §3 / §14).
-          Hosts destructive / housekeeping actions; Step 14 ships only
-          New Project (which closes Punch List P15 — Clear All rename
-          + relocate from LayerPanel header).
+          Hosts destructive / housekeeping actions; Step 14 ships New
+          Project; Step 17 extends with Load Project… (file picker).
         */}
         <HeaderMenu />
       </header>

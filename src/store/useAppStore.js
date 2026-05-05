@@ -31,6 +31,11 @@ const STORAGE_KEY = 'roofmark_project_v1'
 const AUTOSAVE_DEBOUNCE_MS = 2000
 const UNDO_LIMIT = 50
 
+// Step 17 — JSON export/import schema version. Bump when exportJSON's
+// payload shape changes incompatibly. importJSON rejects mismatched
+// versions rather than corrupting state.
+const SCHEMA_VERSION = 1
+
 // ---- ID generators ---------------------------------------------------------
 let _layerSeq = 0
 let _shapeSeq = 0
@@ -698,33 +703,78 @@ export const useAppStore = create((set, get) => {
       set({ saveState: 'saved', lastSavedAt: Date.now() })
     },
 
-    // ============ Import / Export ===========================================
+    // ============ Import / Export (Step 17, Spec §15) =======================
+    // Step 17 — `exportJSON` returns a JSON string carrying the FULL
+    // PERSIST_KEYS set + a schemaVersion + exportedAt timestamp. Photo
+    // binary blobs (cropped + source) are NOT embedded — JSON stays
+    // text-only and portable. The operator re-uploads the photo on the
+    // importing device via the existing 📷 Photo button. (Future
+    // enhancement: optional "Export with Photo" path that base64-
+    // embeds the cropped blob — deferred per Step 17 brief.)
     exportJSON: () => {
       const s = get()
+      const slice = {}
+      for (const k of PERSIST_KEYS) slice[k] = s[k]
       return JSON.stringify(
         {
-          version: 1,
+          schemaVersion: SCHEMA_VERSION,
           exportedAt: new Date().toISOString(),
-          layers: s.layers,
-          sequences: s.sequences,
-          clines: s.clines,
-          jobContext: s.jobContext,
+          ...slice,
         },
         null,
         2
       )
     },
     importJSON: (data) => {
-      pushUndo()
       const obj = typeof data === 'string' ? JSON.parse(data) : data
+      if (!obj || typeof obj !== 'object') {
+        throw new Error('Imported file must be a JSON object.')
+      }
+      if (typeof obj.schemaVersion !== 'number') {
+        throw new Error('Missing schemaVersion field — file is not a RoofMark export.')
+      }
+      if (obj.schemaVersion !== SCHEMA_VERSION) {
+        throw new Error(`Schema version mismatch: file is v${obj.schemaVersion}, app expects v${SCHEMA_VERSION}.`)
+      }
+      pushUndo()
       reseedCounters(obj)
+      // Validate inbound fields the same way hydration does so a
+      // hand-edited or older-version JSON file doesn't corrupt state.
+      const layers = Array.isArray(obj.layers) ? obj.layers : []
+      const sequences = Array.isArray(obj.sequences) ? obj.sequences : []
+      const clines = Array.isArray(obj.clines) ? obj.clines : []
+      const mode = (obj.mode && VALID_MODES.has(obj.mode)) ? obj.mode : 'DRAW'
+      const drawerTab = (obj.drawerTab && VALID_DRAWER_TABS.has(obj.drawerTab))
+        ? obj.drawerTab : 'properties'
+      const activeLayerId = obj.activeLayerId
+        && layers.some((l) => l.id === obj.activeLayerId)
+        ? obj.activeLayerId : null
+      const activeSeqId = obj.activeSeqId
+        && sequences.some((s) => s.id === obj.activeSeqId)
+        ? obj.activeSeqId : null
       set({
-        layers: obj.layers || [],
-        sequences: obj.sequences || [],
-        clines: obj.clines || [],
+        layers,
+        sequences,
+        clines,
         jobContext: obj.jobContext || null,
-        activeLayerId: null,
-        activeSeqId: null,
+        gridSize: normalizeGridSize(obj.gridSize),
+        rightDrawerOpen: obj.rightDrawerOpen === true,
+        drawerTab,
+        mode,
+        activeLayerId,
+        activeSeqId,
+        viewport: normalizeViewport(obj.viewport),
+        photoMeta: normalizePhotoMeta(obj.photoMeta),
+        cropMeta: obj.cropMeta || null,
+        // Reset transient session state so the imported project starts
+        // clean. Photo binary stays in IndexedDB if present (operator
+        // can re-upload via 📷 Photo to load the matching photo into
+        // the canvas; or click 📷 with a different photo to replace).
+        backgroundImage: null,
+        hasSourcePhoto: false,
+        selected: null,
+        selectedAnnotation: null,
+        tool: null,
       })
     },
 

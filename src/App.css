@@ -107,10 +107,13 @@ body {
 }
 
 /* Right-side controls must NEVER be pushed off-screen — pin their flex
- * size so Job / Scope ellipsize first when horizontal space tightens. */
+ * size so Job / Scope ellipsize first when horizontal space tightens.
+ * Step 17 adds the ↩ / ↪ / ⤓ buttons next to the existing controls; they
+ * pin too so a long job address can't shove Save off the right edge. */
 .app-header > .mode-toggle,
 .app-header > .btn-drawer-toggle,
-.app-header > .hdr-save {
+.app-header > .hdr-save,
+.app-header > .btn-hdr {
   flex-shrink: 0;
 }
 
@@ -581,6 +584,74 @@ body {
 .header-menu-item.header-menu-destructive .menu-icon { color: var(--rm-amber); }
 .header-menu-item.header-menu-destructive:hover {
   background: rgba(210, 153, 34, 0.12);
+}
+
+/* ============================================================================
+ * Step 17 — Save / Load + Visible Undo/Redo header buttons (Spec §15 + P7)
+ * ============================================================================
+ * Three action buttons share a common .btn-hdr base so they read as a
+ * grouped control cluster. Save (⤓) is the high-frequency action — accent
+ * border so it draws the eye. Undo / Redo carry the standard subtle border
+ * because they're peripheral; their disabled state is the most-important
+ * visual: 0.35 opacity + cursor:not-allowed makes "stack empty" obvious
+ * (P7 acceptance criterion). */
+.btn-hdr {
+  height: 24px;
+  padding: 0 9px;
+  background: transparent;
+  color: var(--rm-fg);
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.btn-hdr:hover:not(:disabled) {
+  background: var(--rm-panel-2);
+  border-color: var(--rm-fg-dim);
+}
+
+.btn-hdr:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Save is the frequent / Cmd+S action — accent border keeps it
+ * discoverable next to the autosave indicator. */
+.btn-hdr.btn-save {
+  border-color: var(--rm-accent);
+  background: rgba(31, 111, 235, 0.08);
+}
+.btn-hdr.btn-save:hover:not(:disabled) {
+  background: rgba(31, 111, 235, 0.2);
+  border-color: var(--rm-accent);
+}
+
+/* Header-menu import error surface (Step 17 — Load Project).
+ * Hidden by default in markup (style="display:none") because importJSON
+ * surfaces failures via window.alert; this rule defines the look if a
+ * future iteration switches to inline messaging. */
+.header-menu-error {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 240px;
+  max-width: 320px;
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--rm-red);
+  border: 1px solid var(--rm-red);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 11px;
+  z-index: 50;
 }
 
 /* ---- Layer panel (Step 4) ---- */

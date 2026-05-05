@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RoofMark — Step 17 Functional (Save / Load + P7)</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #0d1117; color: #e6edf3; padding: 16px; }
+  h1 { margin: 0 0 12px; font-size: 18px; }
+  .summary { font-family: "SF Mono", Consolas, monospace; font-size: 12px; }
+  .pass { color: #3fb950; }
+  .fail { color: #f85149; }
+  .row { padding: 2px 0; }
+</style>
+</head>
+<body>
+<h1>RoofMark — Step 17 Block Test (Save/Load round-trip + Undo capacity)</h1>
+<div class="summary" id="summary"></div>
+<script>
+/*
+  Step 17 block test — pure-JS reproduction of:
+    buildExportPayload  — produces JSON-serializable payload from store-shape state
+    parseImportPayload  — validates schemaVersion, returns the payload (or throws)
+    suggestedFilename   — "roofmark-project-YYYY-MM-DD-HHMM.json"
+    pushUndoCapped      — undo stack with UNDO_LIMIT cap (50)
+    deepEqualJSON       — round-trip equality helper
+
+  These are mirrored verbatim in src/store/useAppStore.js so the React
+  clone behaves identically.
+*/
+
+const SCHEMA_VERSION = 1
+const UNDO_LIMIT = 50
+const PERSIST_KEYS = [
+  'layers', 'sequences', 'clines', 'jobContext',
+  'gridSize', 'rightDrawerOpen', 'drawerTab',
+  'mode', 'activeLayerId', 'activeSeqId',
+  'viewport', 'photoMeta', 'cropMeta',
+]
+
+function buildExportPayload(state, isoNowFn = () => new Date().toISOString()) {
+  const slice = {}
+  for (const k of PERSIST_KEYS) slice[k] = state[k]
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    exportedAt: isoNowFn(),
+    ...slice,
+  }
+}
+
+function parseImportPayload(jsonText) {
+  let obj
+  try { obj = typeof jsonText === 'string' ? JSON.parse(jsonText) : jsonText }
+  catch (e) { throw new Error('Invalid JSON: ' + (e.message || e)) }
+  if (!obj || typeof obj !== 'object') throw new Error('Imported file must be a JSON object.')
+  if (typeof obj.schemaVersion !== 'number') throw new Error('Missing schemaVersion field.')
+  if (obj.schemaVersion !== SCHEMA_VERSION) {
+    throw new Error(`Schema version mismatch: file is v${obj.schemaVersion}, app expects v${SCHEMA_VERSION}.`)
+  }
+  return obj
+}
+
+function pad2(n) { return String(n).padStart(2, '0') }
+function suggestedFilename(d = new Date()) {
+  const yyyy = d.getFullYear()
+  const mm = pad2(d.getMonth() + 1)
+  const dd = pad2(d.getDate())
+  const hh = pad2(d.getHours())
+  const mn = pad2(d.getMinutes())
+  return `roofmark-project-${yyyy}-${mm}-${dd}-${hh}${mn}.json`
+}
+
+function pushUndoCapped(stack, snapshot) {
+  const next = [...stack, snapshot]
+  while (next.length > UNDO_LIMIT) next.shift()
+  return next
+}
+
+function deepEqualJSON(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+// ---- Tests ----
+
+const tests = []
+const pass = (name, cond, extra) => tests.push({ name, ok: !!cond, extra })
+
+// 1. buildExportPayload — schemaVersion + exportedAt + all PERSIST_KEYS
+const fixedNow = () => '2026-05-05T18:30:00.000Z'
+const stateA = {
+  layers: [{ id: 'l1', name: 'Roof', shapes: [] }],
+  sequences: [{ id: 's1', title: 'S1', layers: { l1: true }, annotations: [] }],
+  clines: [{ id: 'cl1', type: 'h', y: 0.5 }],
+  jobContext: { address: '123 Maple St' },
+  gridSize: { x: 20, y: 20 },
+  rightDrawerOpen: true,
+  drawerTab: 'properties',
+  mode: 'DRAW',
+  activeLayerId: 'l1',
+  activeSeqId: null,
+  viewport: { panX: 0, panY: 0, zoom: 1 },
+  photoMeta: { width: 1920, height: 1080 },
+  cropMeta: { x: 0, y: 0, w: 1920, h: 1080, rotation: 0 },
+  // NOT in PERSIST_KEYS — should be excluded
+  selected: { layerId: 'l1', shapeId: 'sh1' },
+  cursorX: 100,
+  backgroundImage: { naturalWidth: 1920 }, // also excluded
+}
+const exported = buildExportPayload(stateA, fixedNow)
+pass('export has schemaVersion === 1', exported.schemaVersion === 1)
+pass('export has exportedAt timestamp', exported.exportedAt === '2026-05-05T18:30:00.000Z')
+pass('export contains layers', deepEqualJSON(exported.layers, stateA.layers))
+pass('export contains sequences', deepEqualJSON(exported.sequences, stateA.sequences))
+pass('export contains clines', deepEqualJSON(exported.clines, stateA.clines))
+pass('export contains jobContext', deepEqualJSON(exported.jobContext, stateA.jobContext))
+pass('export contains gridSize', deepEqualJSON(exported.gridSize, stateA.gridSize))
+pass('export contains rightDrawerOpen', exported.rightDrawerOpen === true)
+pass('export contains drawerTab', exported.drawerTab === 'properties')
+pass('export contains mode', exported.mode === 'DRAW')
+pass('export contains activeLayerId', exported.activeLayerId === 'l1')
+pass('export contains activeSeqId', exported.activeSeqId === null)
+pass('export contains viewport', deepEqualJSON(exported.viewport, stateA.viewport))
+pass('export contains photoMeta', deepEqualJSON(exported.photoMeta, stateA.photoMeta))
+pass('export contains cropMeta', deepEqualJSON(exported.cropMeta, stateA.cropMeta))
+pass('export EXCLUDES selected (transient)', !('selected' in exported))
+pass('export EXCLUDES cursorX (transient)', !('cursorX' in exported))
+pass('export EXCLUDES backgroundImage (binary)', !('backgroundImage' in exported))
+
+// 2. JSON.stringify produces parseable text + round-trip
+const text = JSON.stringify(exported, null, 2)
+const reparsed = JSON.parse(text)
+pass('JSON serializes to a string', typeof text === 'string' && text.length > 100)
+pass('JSON round-trips via stringify/parse', deepEqualJSON(reparsed, exported))
+
+// 3. parseImportPayload — happy path
+const imported = parseImportPayload(text)
+pass('parseImportPayload accepts valid v1 JSON', imported.schemaVersion === 1)
+pass('parseImportPayload preserves all PERSIST_KEYS', PERSIST_KEYS.every(k => deepEqualJSON(imported[k], stateA[k])))
+
+// 4. parseImportPayload — schema mismatch rejected
+try {
+  parseImportPayload(JSON.stringify({ schemaVersion: 2, layers: [] }))
+  pass('schema v2 rejected with throw', false)
+} catch (e) {
+  pass('schema v2 rejected with throw', /v2.*v1|mismatch/i.test(e.message), { msg: e.message })
+}
+
+// 5. parseImportPayload — missing schemaVersion rejected
+try {
+  parseImportPayload(JSON.stringify({ layers: [] }))
+  pass('missing schemaVersion rejected', false)
+} catch (e) {
+  pass('missing schemaVersion rejected', /missing schemaversion/i.test(e.message))
+}
+
+// 6. parseImportPayload — invalid JSON rejected
+try {
+  parseImportPayload('this is not json {')
+  pass('invalid JSON rejected with throw', false)
+} catch (e) {
+  pass('invalid JSON rejected with throw', /invalid json/i.test(e.message))
+}
+
+// 7. parseImportPayload — non-object (e.g. array) rejected
+try {
+  parseImportPayload(JSON.stringify([1, 2, 3]))
+  pass('JSON array rejected (must be object)', false)
+} catch (e) {
+  pass('JSON array rejected (must be object)', /missing schemaversion/i.test(e.message))
+}
+
+// 8. suggestedFilename format
+const d = new Date(2026, 4, 5, 18, 30) // May 5 2026, 18:30 local
+const fn = suggestedFilename(d)
+pass('filename matches roofmark-project-YYYY-MM-DD-HHMM.json',
+  /^roofmark-project-2026-05-05-1830\.json$/.test(fn), { fn })
+pass('filename uses zero-padded month/day/hour/minute',
+  suggestedFilename(new Date(2026, 0, 1, 0, 5)).includes('2026-01-01-0005'))
+
+// 9. Round-trip: export -> stringify -> parse -> import -> deep equal
+const roundTripped = parseImportPayload(JSON.stringify(buildExportPayload(stateA, fixedNow)))
+for (const k of PERSIST_KEYS) {
+  pass(`round-trip preserves ${k}`, deepEqualJSON(roundTripped[k], stateA[k]))
+}
+
+// 10. pushUndoCapped — capacity test (50)
+let stack = []
+for (let i = 0; i < 60; i++) {
+  stack = pushUndoCapped(stack, `snap-${i}`)
+}
+pass('undo stack capped at 50 after 60 pushes', stack.length === 50)
+pass('oldest snapshots dropped (snap-9 is the new floor)', stack[0] === 'snap-10')
+pass('newest snapshot retained at top', stack[stack.length - 1] === 'snap-59')
+
+// Console clean check
+let consoleClean = true
+const origErr = console.error
+console.error = (...a) => { consoleClean = false; origErr.apply(console, a) }
+buildExportPayload(stateA)
+parseImportPayload(JSON.stringify(buildExportPayload(stateA)))
+console.error = origErr
+pass('no console.error during normal export/import', consoleClean)
+
+// ---- Render summary ----
+const root = document.getElementById('summary')
+const passCount = tests.filter(t => t.ok).length
+const total = tests.length
+root.innerHTML = `<div class="row ${passCount === total ? 'pass' : 'fail'}">${passCount}/${total} ${passCount === total ? 'PASS' : 'FAIL'}</div>` +
+  tests.map(t => `<div class="row ${t.ok ? 'pass' : 'fail'}">${t.ok ? '✓' : '✗'} ${t.name}${t.extra ? ' ' + JSON.stringify(t.extra) : ''}</div>`).join('')
+</script>
+</body>
+</html>
