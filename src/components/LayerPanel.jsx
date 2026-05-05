@@ -54,13 +54,9 @@ export default function LayerPanel() {
     const id = useAppStore.getState().addLayer({ color: '#ffffff' })
     setPendingFocusId(id)
   }
-
-  const handleClearAll = () => {
-    const ok = window.confirm(
-      'This will remove ALL layers and shapes. This cannot be undone.'
-    )
-    if (ok) useAppStore.getState().clearAll()
-  }
+  // Step 14 / Punch List P15 RESOLVED — Clear All removed from the
+  // LayerPanel header. Project-wipe semantics now live as "New Project"
+  // in the persistent-header dropdown menu (HeaderMenu.jsx).
 
   // ---- Drag-and-drop reorder (HTML5 D&D, desktop only) -------------------
   const onDragStart = (e, index) => {
@@ -102,16 +98,6 @@ export default function LayerPanel() {
           data-testid="btn-add-layer"
         >
           + Add
-        </button>
-        <button
-          type="button"
-          className="btn-panel-action btn-clear"
-          onClick={handleClearAll}
-          title="Remove all layers and shapes"
-          disabled={layers.length === 0}
-          data-testid="btn-clear-all"
-        >
-          Clear All
         </button>
       </div>
 

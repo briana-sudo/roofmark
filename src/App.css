@@ -503,6 +503,86 @@ body {
   letter-spacing: 0.3px;
 }
 
+/* ============================================================================
+ * Step 14 — Persistent-header dropdown menu (Spec §3 / §14)
+ * ============================================================================ */
+.header-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+.btn-header-menu {
+  width: 28px;
+  height: 24px;
+  background: transparent;
+  color: var(--rm-fg);
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.btn-header-menu:hover { background: var(--rm-panel-2); border-color: var(--rm-fg-dim); }
+.btn-header-menu.open {
+  background: var(--rm-accent);
+  border-color: var(--rm-accent);
+  color: #fff;
+}
+
+.header-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 240px;
+  background: var(--rm-panel);
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  padding: 4px 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+}
+.header-menu-item {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  color: var(--rm-fg);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.header-menu-item .menu-icon {
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--rm-fg-dim);
+  font-size: 14px;
+  text-align: center;
+}
+.header-menu-item .menu-hint {
+  grid-column: 2;
+  font-size: 11px;
+  color: var(--rm-fg-dim);
+  font-weight: 400;
+  margin-top: 1px;
+}
+.header-menu-item:hover { background: var(--rm-panel-2); }
+
+.header-menu-item.header-menu-destructive { color: var(--rm-fg); }
+.header-menu-item.header-menu-destructive .menu-icon { color: var(--rm-amber); }
+.header-menu-item.header-menu-destructive:hover {
+  background: rgba(210, 153, 34, 0.12);
+}
+
 /* ---- Layer panel (Step 4) ---- */
 .layer-panel-header {
   gap: 8px;

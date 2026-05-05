@@ -6,6 +6,7 @@ import ModeToggle from './components/ModeToggle'
 import PropertiesPanel from './components/PropertiesPanel'
 import SequencePanel from './components/SequencePanel'
 import AnnotationPanel from './components/AnnotationPanel'
+import HeaderMenu from './components/HeaderMenu'
 import './App.css'
 
 export default function App() {
@@ -67,6 +68,13 @@ export default function App() {
         <span className={`hdr-save state-${saveState}`} data-slot="save">
           ● {saveState}
         </span>
+        {/*
+          Step 14 — persistent-header project menu (Spec §3 / §14).
+          Hosts destructive / housekeeping actions; Step 14 ships only
+          New Project (which closes Punch List P15 — Clear All rename
+          + relocate from LayerPanel header).
+        */}
+        <HeaderMenu />
       </header>
 
       <div className={`app-body ${rightDrawerOpen ? 'right-open' : 'right-collapsed'}`}>

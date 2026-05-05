@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { loadPhoto, savePhoto } from './photoIDB'
+import { loadPhoto, savePhoto, clearPhoto } from './photoIDB'
 
 // ============================================================================
 // RoofMark application store — Step 2 of Kickoff Spec Section 16
@@ -762,6 +762,13 @@ export const useAppStore = create((set, get) => {
     },
 
     // ============ Reset =====================================================
+    // Step 14 — "New Project" semantics. Clears all project data
+    // (layers / shapes / sequences / annotations / clines), the photo
+    // (working + source) from both the store and IndexedDB, and resets
+    // the viewport. Job context is intentionally preserved so the
+    // operator can spin up a new markup pass for the same job without
+    // re-selecting the address. Undo restores everything in one step
+    // (the snapshot pushed before the reset includes all data fields).
     clearAll: () => {
       pushUndo()
       set({
@@ -770,7 +777,22 @@ export const useAppStore = create((set, get) => {
         clines: [],
         activeLayerId: null,
         activeSeqId: null,
+        selected: null,
+        selectedAnnotation: null,
+        backgroundImage: null,
+        photoMeta: null,
+        cropMeta: null,
+        hasSourcePhoto: false,
+        viewport: { panX: 0, panY: 0, zoom: 1 },
       })
+      // Wipe persisted photos from IndexedDB so refresh doesn't bring
+      // them back. Fire-and-forget — the render pipeline already
+      // reflects the in-memory clear.
+      if (typeof window !== 'undefined') {
+        clearPhoto('cropped').catch(() => {})
+        clearPhoto('source').catch(() => {})
+        clearPhoto('background').catch(() => {})
+      }
     },
   }
 })
