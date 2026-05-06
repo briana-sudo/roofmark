@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
-import { loadPhoto, savePhoto, clearPhoto } from '../store/photoIDB'
+import { loadPhoto } from '../store/photoIDB'
 import PhotoCropModal from './PhotoCropModal'
 
 /**
@@ -58,22 +58,22 @@ export default function PhotoPanel() {
     }
     setRecropSrc(src)
   }
-  // Shared confirm path for both re-crop and replace — both write the
-  // cropped + source slots and flip setCroppedPhoto in the store.
-  const onCropConfirm = ({ croppedDataURL, sourceDataURL, width, height, cropMeta: nextCropMeta }) => {
-    const img = new Image()
-    img.onload = () => {
-      useAppStore.getState().setCroppedPhoto({
-        image: img, width, height, cropMeta: nextCropMeta, hasSourcePhoto: true,
-      })
-    }
-    img.src = croppedDataURL
-    Promise.all([
-      savePhoto(croppedDataURL, 'cropped'),
-      savePhoto(sourceDataURL, 'source'),
-    ]).catch((err) => console.warn('Failed to persist photos to IndexedDB:', err))
+  // Shared confirm path for both re-crop and replace. Step 17 partial #2
+  // (Gap 2): commitCroppedPhoto is the new awaitable store action that
+  // backs up the previous photo to _undo slots before writing the new
+  // one — that's what makes Cmd+Z reverse a re-crop / replace.
+  const onCropConfirm = async ({ croppedDataURL, sourceDataURL, width, height, cropMeta: nextCropMeta }) => {
     setRecropSrc(null)
     setPendingSource(null)
+    try {
+      await useAppStore.getState().commitCroppedPhoto({
+        croppedDataURL, sourceDataURL, width, height, cropMeta: nextCropMeta,
+      })
+    } catch (err) {
+      const msg = err?.message || String(err)
+      console.warn('Photo commit failed:', msg)
+      window.alert(`Could not apply photo: ${msg}`)
+    }
   }
 
   const onPickReplace = () => fileInputRef.current?.click()
@@ -94,15 +94,17 @@ export default function PhotoPanel() {
     reader.readAsDataURL(file)
   }
 
-  const onClear = () => {
+  // Step 17 partial #2 (Gap 2): clearBackgroundImage is now async and
+  // backs up the current photo to _undo slots before wiping live IDB —
+  // Cmd+Z restores the photo. Awaiting isn't strictly required (the
+  // store flips visible state on the way through) but we await to keep
+  // any chained UI consistent on completion.
+  const onClear = async () => {
     const ok = window.confirm(
-      'Clear the background photo? Your shapes, sequences, and annotations stay.'
+      'Clear the background photo? Your shapes, sequences, and annotations stay. Cmd+Z reverses this.'
     )
     if (!ok) return
-    clearBackgroundImage()
-    clearPhoto('cropped').catch((err) => console.warn('Failed to clear cropped photo:', err))
-    clearPhoto('source').catch((err) => console.warn('Failed to clear source photo:', err))
-    clearPhoto('background').catch(() => {}) // legacy slot, best-effort
+    await clearBackgroundImage()
   }
 
   return (

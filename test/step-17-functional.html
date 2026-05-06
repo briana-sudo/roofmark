@@ -245,6 +245,178 @@ pass('export with cropped-only omits source field', !('source' in (croppedOnly._
 const noPhotos = buildExportPayload(stateA, fixedNow, { cropped: null, source: null })
 pass('export with both null photos OMITS _photos entirely', !('_photos' in noPhotos))
 
+// 9e-pre. Phase B (Gap 2) — extended dataSnapshot scope.
+// Mirror of useAppStore.js dataSnapshot. Photo metadata (photoMeta +
+// cropMeta + hasSourcePhoto) included so undo can detect a photo
+// boundary crossing. backgroundImage NOT included (HTMLImageElement is
+// not JSON-serializable; the binary lives in IDB and is restored
+// separately via _undo slots).
+function buildExtendedSnapshot(state) {
+  return JSON.stringify({
+    layers: state.layers,
+    sequences: state.sequences,
+    clines: state.clines,
+    photoMeta: state.photoMeta || null,
+    cropMeta: state.cropMeta || null,
+    hasSourcePhoto: !!state.hasSourcePhoto,
+  })
+}
+const snapWithPhoto = JSON.parse(buildExtendedSnapshot(stateA))
+pass('extended snapshot includes photoMeta', snapWithPhoto.photoMeta !== undefined && deepEqualJSON(snapWithPhoto.photoMeta, stateA.photoMeta))
+pass('extended snapshot includes cropMeta',  snapWithPhoto.cropMeta  !== undefined && deepEqualJSON(snapWithPhoto.cropMeta,  stateA.cropMeta))
+pass('extended snapshot includes hasSourcePhoto field', 'hasSourcePhoto' in snapWithPhoto)
+pass('extended snapshot OMITS backgroundImage (not serializable)', !('backgroundImage' in snapWithPhoto))
+pass('extended snapshot preserves layers/sequences/clines',
+  deepEqualJSON(snapWithPhoto.layers, stateA.layers)
+  && deepEqualJSON(snapWithPhoto.sequences, stateA.sequences)
+  && deepEqualJSON(snapWithPhoto.clines, stateA.clines))
+
+// State without photo — snapshot should normalize to nulls/false.
+const stateNoPhoto = { layers: [], sequences: [], clines: [], photoMeta: null, cropMeta: null, hasSourcePhoto: false }
+const snapNoPhoto = JSON.parse(buildExtendedSnapshot(stateNoPhoto))
+pass('snapshot without photo: photoMeta is null', snapNoPhoto.photoMeta === null)
+pass('snapshot without photo: hasSourcePhoto is false', snapNoPhoto.hasSourcePhoto === false)
+
+// 9e-mid. Phase B (Gap 2) — preWipeCopy + restoreFromUndo IDB lifecycle.
+// Mirror of captureAndBackupPhoto + restorePhotoFromUndo logic from
+// useAppStore.js. Uses a synchronous fake-IDB Map (the test verifies
+// data flow, not the async machinery — Promise wrapping would only add
+// timing risk that delays assertions past the render summary).
+function makeFakeIDB(initial = {}) {
+  const store = new Map(Object.entries(initial))
+  return {
+    save: (val, key) => { store.set(key, val) },
+    load: (key) => store.get(key) ?? null,
+    clear: (key) => { store.delete(key) },
+    snapshot: () => Object.fromEntries(store),
+  }
+}
+function fakePreWipeCopy(idb) {
+  const oldCropped = idb.load('cropped')
+  const oldSource = idb.load('source')
+  if (oldCropped) idb.save(oldCropped, 'cropped_undo'); else idb.clear('cropped_undo')
+  if (oldSource)  idb.save(oldSource,  'source_undo');  else idb.clear('source_undo')
+}
+function fakeRestoreFromUndo(idb) {
+  const croppedBackup = idb.load('cropped_undo')
+  const sourceBackup  = idb.load('source_undo')
+  if (croppedBackup) idb.save(croppedBackup, 'cropped'); else idb.clear('cropped')
+  if (sourceBackup)  idb.save(sourceBackup,  'source');  else idb.clear('source')
+  idb.clear('cropped_undo')
+  idb.clear('source_undo')
+  return { cropped: croppedBackup, source: sourceBackup }
+}
+
+// 9e-1. preWipeCopy with photo present — copies live to _undo
+{
+  const idb = makeFakeIDB({ cropped: 'A_cropped', source: 'A_source' })
+  fakePreWipeCopy(idb)
+  const snap = idb.snapshot()
+  pass('preWipeCopy: cropped_undo populated from live cropped', snap.cropped_undo === 'A_cropped')
+  pass('preWipeCopy: source_undo populated from live source',  snap.source_undo === 'A_source')
+  pass('preWipeCopy: live cropped UNCHANGED', snap.cropped === 'A_cropped')
+  pass('preWipeCopy: live source UNCHANGED',  snap.source === 'A_source')
+}
+
+// 9e-2. preWipeCopy with no live photo — clears _undo (first-time upload)
+{
+  const idb = makeFakeIDB({})
+  fakePreWipeCopy(idb)
+  const snap = idb.snapshot()
+  pass('preWipeCopy with no live: cropped_undo absent', snap.cropped_undo === undefined)
+  pass('preWipeCopy with no live: source_undo absent',  snap.source_undo === undefined)
+}
+
+// 9e-3. Full clear cycle: preWipeCopy → wipe → restore from _undo
+{
+  const idb = makeFakeIDB({ cropped: 'A_cropped', source: 'A_source' })
+  fakePreWipeCopy(idb)
+  idb.clear('cropped')
+  idb.clear('source')
+  pass('post-wipe: live cropped gone', idb.snapshot().cropped === undefined)
+  pass('post-wipe: live source gone',  idb.snapshot().source === undefined)
+  const restored = fakeRestoreFromUndo(idb)
+  pass('restore: returned cropped matches pre-wipe', restored.cropped === 'A_cropped')
+  pass('restore: returned source matches pre-wipe',  restored.source === 'A_source')
+  const final = idb.snapshot()
+  pass('restore: live cropped re-populated', final.cropped === 'A_cropped')
+  pass('restore: live source re-populated',  final.source === 'A_source')
+  pass('restore: cropped_undo consumed',     final.cropped_undo === undefined)
+  pass('restore: source_undo consumed',      final.source_undo === undefined)
+}
+
+// 9e-4. Replace cycle: preWipeCopy → write new → restore old via _undo
+{
+  const idb = makeFakeIDB({ cropped: 'A_cropped', source: 'A_source' })
+  fakePreWipeCopy(idb)
+  idb.save('B_cropped', 'cropped')
+  idb.save('B_source', 'source')
+  pass('replace: live now has new B_cropped', idb.snapshot().cropped === 'B_cropped')
+  fakeRestoreFromUndo(idb)
+  pass('replace+undo: live restored to A_cropped', idb.snapshot().cropped === 'A_cropped')
+  pass('replace+undo: live restored to A_source',  idb.snapshot().source === 'A_source')
+}
+
+// 9e-5. Backup-of-backup limit: rapid wipe-twice — second wipe overwrites
+// first backup. Only B is recoverable, A is gone. (Documented limit.)
+{
+  const idb = makeFakeIDB({ cropped: 'A_cropped', source: 'A_source' })
+  fakePreWipeCopy(idb) // _undo = A
+  pass('backup-of-backup setup: _undo = A', idb.snapshot().cropped_undo === 'A_cropped')
+  // Simulate first wipe → replace with B
+  idb.save('B_cropped', 'cropped')
+  idb.save('B_source', 'source')
+  // Second wipe: preWipeCopy reads live (B) and overwrites _undo (A → B). A is GONE.
+  fakePreWipeCopy(idb)
+  pass('backup-of-backup: _undo overwritten with B (A gone)', idb.snapshot().cropped_undo === 'B_cropped')
+  // Replace with C
+  idb.save('C_cropped', 'cropped')
+  idb.save('C_source', 'source')
+  // First undo recovers B
+  const restored = fakeRestoreFromUndo(idb)
+  pass('backup-of-backup: first undo recovers B', restored.cropped === 'B_cropped')
+  pass('backup-of-backup: A is permanently gone (consumed slot empty)',
+    idb.snapshot().cropped_undo === undefined)
+  // Subsequent restore would return null/null — operator hits limit
+  const restored2 = fakeRestoreFromUndo(idb)
+  pass('backup-of-backup: second undo returns no backup', restored2.cropped == null && restored2.source == null)
+}
+
+// 9e-6. App-load clear: _undo slots wiped on app start regardless of contents.
+{
+  const idb = makeFakeIDB({
+    cropped: 'live_cropped', source: 'live_source',
+    cropped_undo: 'leftover_undo_cropped', source_undo: 'leftover_undo_source',
+  })
+  // Mirror of useAppStore.js app-load block: clear _undo slots.
+  idb.clear('cropped_undo')
+  idb.clear('source_undo')
+  const snap = idb.snapshot()
+  pass('app-load: cropped_undo cleared', snap.cropped_undo === undefined)
+  pass('app-load: source_undo cleared',  snap.source_undo === undefined)
+  pass('app-load: live cropped UNTOUCHED', snap.cropped === 'live_cropped')
+  pass('app-load: live source UNTOUCHED',  snap.source === 'live_source')
+}
+
+// 9e-7. Photo-boundary detection logic (mirror of undo handler).
+function photoChanged(cur, next) {
+  return JSON.stringify(cur.photoMeta || null) !== JSON.stringify(next.photoMeta || null)
+    || JSON.stringify(cur.cropMeta  || null) !== JSON.stringify(next.cropMeta  || null)
+    || (!!cur.hasSourcePhoto) !== (!!next.hasSourcePhoto)
+}
+pass('photoChanged: identical states → false',
+  photoChanged({ photoMeta: { width: 1, height: 1 }, cropMeta: null, hasSourcePhoto: true },
+               { photoMeta: { width: 1, height: 1 }, cropMeta: null, hasSourcePhoto: true }) === false)
+pass('photoChanged: different photoMeta → true',
+  photoChanged({ photoMeta: { width: 1, height: 1 }, cropMeta: null, hasSourcePhoto: true },
+               { photoMeta: { width: 2, height: 2 }, cropMeta: null, hasSourcePhoto: true }) === true)
+pass('photoChanged: photo cleared (null vs object) → true',
+  photoChanged({ photoMeta: null, cropMeta: null, hasSourcePhoto: false },
+               { photoMeta: { width: 1, height: 1 }, cropMeta: null, hasSourcePhoto: true }) === true)
+pass('photoChanged: hasSourcePhoto flipped → true',
+  photoChanged({ photoMeta: { width: 1, height: 1 }, cropMeta: null, hasSourcePhoto: false },
+               { photoMeta: { width: 1, height: 1 }, cropMeta: null, hasSourcePhoto: true }) === true)
+
 // 9e. Photo tab gate logic (Step 17 partial-completion #2, Gap 1).
 // Mirrors useAppStore.js VALID_DRAWER_TABS + App.jsx effectiveDrawerTab
 // fallback. Photo tab visible whenever photoMeta is truthy; if persisted

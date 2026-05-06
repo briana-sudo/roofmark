@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
-import { savePhoto, clearPhoto } from '../store/photoIDB'
+// Step 17 partial #2 (Gap 2) — photoIDB writes moved into the store
+// (commitCroppedPhoto + clearBackgroundImage). Components no longer
+// touch photoIDB directly so backup-to-_undo always runs.
 import {
   effectivePhotoSize, computeFitViewport, zoomAtCursor, clampPan, clampZoom,
 } from '../store/viewport'
@@ -135,37 +137,32 @@ export default function DrawingTools() {
     reader.readAsDataURL(file)
   }
 
-  const onCropConfirm = ({ croppedDataURL, sourceDataURL, width, height, cropMeta }) => {
-    // Decode cropped image, set on store, persist BOTH source + cropped
-    // to IDB. fit-to-viewport happens automatically in CanvasStage's
-    // photo-load subscription hook (Section 7.A.2 default).
-    const img = new Image()
-    img.onload = () => {
-      useAppStore.getState().setCroppedPhoto({
-        image: img,
-        width,
-        height,
-        cropMeta,
-        hasSourcePhoto: true,
-      })
-    }
-    img.src = croppedDataURL
-    Promise.all([
-      savePhoto(croppedDataURL, 'cropped'),
-      savePhoto(sourceDataURL, 'source'),
-    ]).catch((err) => console.warn('Failed to persist photos to IndexedDB:', err))
+  // Step 17 partial-completion #2 (Gap 2) — commitCroppedPhoto is the
+  // new awaitable store action that backs up the previous photo to
+  // _undo slots, decodes the new cropped data-URL, writes new IDB
+  // slots, and applies state — all in one place so Cmd+Z reverses
+  // both first-time uploads AND replaces. Mirror change in
+  // PhotoPanel.jsx — both Replace paths route through the same action.
+  const onCropConfirm = async ({ croppedDataURL, sourceDataURL, width, height, cropMeta }) => {
     setPendingSource(null)
+    try {
+      await useAppStore.getState().commitCroppedPhoto({
+        croppedDataURL, sourceDataURL, width, height, cropMeta,
+      })
+    } catch (err) {
+      const msg = err?.message || String(err)
+      console.warn('Photo commit failed:', msg)
+      window.alert(`Could not apply photo: ${msg}`)
+    }
   }
 
   const onCropCancel = () => setPendingSource(null)
 
-  const onClearPhoto = () => {
-    clearBackgroundImage()
-    // Wipe BOTH slots (cropped + source) so a refresh doesn't bring it back.
-    clearPhoto('cropped').catch((err) => console.warn('Failed to clear cropped photo:', err))
-    clearPhoto('source').catch((err) => console.warn('Failed to clear source photo:', err))
-    // Also clean up the legacy pre-§7.A key just in case.
-    clearPhoto('background').catch(() => {})
+  // Step 17 partial #2 (Gap 2) — clearBackgroundImage is now async and
+  // backs up to _undo slots before wiping live IDB. The component just
+  // awaits a single action; the IDB clearing happens inside the store.
+  const onClearPhoto = async () => {
+    await clearBackgroundImage()
   }
 
   return (
