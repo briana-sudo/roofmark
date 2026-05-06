@@ -1266,6 +1266,32 @@ body {
 }
 
 /* ============================================================================
+ * Step 17 partial-completion #2 (Gap 1) — Photo panel (4th drawer tab)
+ * ============================================================================
+ * Stack the action buttons vertically with breathing room. The Photo
+ * panel is shorter than Properties / Sequences / Annotations so we don't
+ * need props-body's tight 14px gap — 8px keeps the buttons grouped while
+ * the section title still reads as a heading. */
+.photo-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.photo-panel-body .props-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.photo-panel-body .btn-panel-action {
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+/* ============================================================================
  * Step 13 — Annotation panel cards (Spec §11/§13)
  * ============================================================================ */
 .anno-panel-body {

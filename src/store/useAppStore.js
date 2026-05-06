@@ -104,7 +104,10 @@ const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE', 'TECHNICAL'])
 // `drawerTab === 'annotations'` outside that gate falls back to 'properties'
 // for body rendering (the persisted tab choice is preserved for when the
 // gate re-opens).
-const VALID_DRAWER_TABS = new Set(['properties', 'sequences', 'annotations'])
+// Step 17 partial-completion #2 (Gap 1) — 'photo' tab promotes the
+// background photo to first-class drawer status. Conditionally rendered
+// in App.jsx when photoMeta is truthy (mirrors the Annotations gate).
+const VALID_DRAWER_TABS = new Set(['properties', 'sequences', 'annotations', 'photo'])
 
 // Default viewport when no photo (or before fit-to-viewport runs). Render
 // math degenerates cleanly: shapeNormX * canvasW * 1 + 0 = shapeNormX * canvasW

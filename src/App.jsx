@@ -7,6 +7,7 @@ import ModeToggle from './components/ModeToggle'
 import PropertiesPanel from './components/PropertiesPanel'
 import SequencePanel from './components/SequencePanel'
 import AnnotationPanel from './components/AnnotationPanel'
+import PhotoPanel from './components/PhotoPanel'
 import HeaderMenu from './components/HeaderMenu'
 import './App.css'
 
@@ -34,9 +35,17 @@ export default function App() {
   // is preserved so the operator returns to the Annotations tab when the
   // gate re-opens.
   const activeSeqId = useAppStore((s) => s.activeSeqId)
+  // Step 17 partial-completion #2 (Gap 1) — Photo tab visibility.
+  // Visible whenever a photo is loaded (any mode). When the photo is
+  // cleared while the operator is on the Photo tab, fall back to
+  // Properties (mirrors the Annotations tab gate fallback).
+  const photoMeta = useAppStore((s) => s.photoMeta)
   const showAnnotationsTab = mode === 'SEQUENCE' && !!activeSeqId
+  const showPhotoTab = !!photoMeta
   const effectiveDrawerTab =
-    drawerTab === 'annotations' && !showAnnotationsTab ? 'properties' : drawerTab
+    drawerTab === 'annotations' && !showAnnotationsTab ? 'properties'
+    : drawerTab === 'photo' && !showPhotoTab ? 'properties'
+    : drawerTab
 
   // Step 17 — Save / Undo / Redo (P7 bundled). Header buttons + Cmd+S
   // keyboard. Undo / Redo keyboard shortcuts already wired in
@@ -267,10 +276,24 @@ export default function App() {
                 Annotations
               </button>
             )}
+            {showPhotoTab && (
+              <button
+                type="button"
+                role="tab"
+                className={effectiveDrawerTab === 'photo' ? 'drawer-tab active' : 'drawer-tab'}
+                onClick={() => setDrawerTab('photo')}
+                aria-selected={effectiveDrawerTab === 'photo'}
+                data-testid="drawer-tab-photo"
+              >
+                Photo
+              </button>
+            )}
           </div>
           <div className="drawer-tab-body" role="tabpanel">
             {effectiveDrawerTab === 'annotations'
               ? <AnnotationPanel />
+              : effectiveDrawerTab === 'photo'
+              ? <PhotoPanel />
               : effectiveDrawerTab === 'sequences'
               ? <SequencePanel />
               : <PropertiesPanel />}

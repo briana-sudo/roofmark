@@ -245,6 +245,30 @@ pass('export with cropped-only omits source field', !('source' in (croppedOnly._
 const noPhotos = buildExportPayload(stateA, fixedNow, { cropped: null, source: null })
 pass('export with both null photos OMITS _photos entirely', !('_photos' in noPhotos))
 
+// 9e. Photo tab gate logic (Step 17 partial-completion #2, Gap 1).
+// Mirrors useAppStore.js VALID_DRAWER_TABS + App.jsx effectiveDrawerTab
+// fallback. Photo tab visible whenever photoMeta is truthy; if persisted
+// drawerTab is 'photo' but photoMeta is null, fall back to 'properties'.
+const VALID_DRAWER_TABS = new Set(['properties', 'sequences', 'annotations', 'photo'])
+function effectiveDrawerTabFor({ drawerTab, mode, activeSeqId, photoMeta }) {
+  const showAnnotationsTab = mode === 'SEQUENCE' && !!activeSeqId
+  const showPhotoTab = !!photoMeta
+  if (drawerTab === 'annotations' && !showAnnotationsTab) return 'properties'
+  if (drawerTab === 'photo' && !showPhotoTab) return 'properties'
+  return drawerTab
+}
+pass('VALID_DRAWER_TABS contains photo', VALID_DRAWER_TABS.has('photo'))
+pass('photo tab valid with photoMeta truthy',
+  effectiveDrawerTabFor({ drawerTab: 'photo', mode: 'DRAW', activeSeqId: null, photoMeta: { width: 100, height: 100 } }) === 'photo')
+pass('photo tab falls back to properties when photoMeta is null',
+  effectiveDrawerTabFor({ drawerTab: 'photo', mode: 'DRAW', activeSeqId: null, photoMeta: null }) === 'properties')
+pass('photo tab visible in EDIT mode with photo loaded',
+  effectiveDrawerTabFor({ drawerTab: 'photo', mode: 'EDIT', activeSeqId: null, photoMeta: { width: 1, height: 1 } }) === 'photo')
+pass('photo tab visible in SEQUENCE mode with photo loaded',
+  effectiveDrawerTabFor({ drawerTab: 'photo', mode: 'SEQUENCE', activeSeqId: 's1', photoMeta: { width: 1, height: 1 } }) === 'photo')
+pass('annotations tab still falls back without active sequence',
+  effectiveDrawerTabFor({ drawerTab: 'annotations', mode: 'SEQUENCE', activeSeqId: null, photoMeta: null }) === 'properties')
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {
