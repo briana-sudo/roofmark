@@ -665,6 +665,18 @@ export default function CanvasStage() {
     // that never had the default field.
     const ANNO_ACCENT_FALLBACK = '#f5a623'
     const ANNO_FONT_SIZE_FALLBACK_LOCAL = 11
+    // P35 root-cause fix (May 7 2026) — Canvas 2D `ctx.font` does NOT
+    // resolve CSS custom properties (`var(--rm-sans, ...)`). Browsers
+    // silently REJECT the assignment when var() appears in the font
+    // string, leaving ctx.font at its previous value (the canvas default
+    // `10px sans-serif`). This was a latent bug going back to Step 12 —
+    // pre-P35 the fontSize was hardcoded to 11 so the silent no-op was
+    // invisible. P35 made the size variable, exposing it: typing 18 in
+    // the stepper updated the store correctly, render fired correctly,
+    // but ctx.font assignment was a no-op so canvas text stayed at 10px.
+    // Inline the literal font stack (same as --rm-sans in App.css) so
+    // the canvas parser accepts the assignment.
+    const ANNO_FONT_STACK = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
     const drawAnnotationOnContext = (ctx, anno, viewport, photoSize, seq) => {
       const color = (typeof anno.color === 'string' && anno.color.length > 0)
         ? anno.color
@@ -680,7 +692,7 @@ export default function CanvasStage() {
       ctx.strokeStyle = color
       ctx.fillStyle = color
       ctx.lineWidth = 1.5
-      ctx.font = `bold ${fontSize}px var(--rm-sans, sans-serif)`
+      ctx.font = `bold ${fontSize}px ${ANNO_FONT_STACK}`
 
       if (anno.type === 'note') {
         const at = photoNormToCanvas(anno.at, viewport, photoSize)
