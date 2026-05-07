@@ -1,5 +1,11 @@
 import { create } from 'zustand'
 import { loadPhoto, savePhoto, clearPhoto } from './photoIDB'
+import {
+  reprojectShape,
+  reprojectCline,
+  reprojectAnnotation,
+  countOutOfBounds,
+} from '../utils/reprojectShapes'
 
 // ============================================================================
 // RoofMark application store — Step 2 of Kickoff Spec Section 16
@@ -782,25 +788,105 @@ export const useAppStore = create((set, get) => {
     // to _undo slots, decodes the new cropped data-URL, writes new
     // cropped + source to live IDB, and applies state — all in one
     // place so Cmd+Z recovery works regardless of which component
-    // initiates the photo commit (DrawingTools 📷, PhotoPanel Replace
-    // photo, PhotoPanel Re-crop).
+    // initiates the photo commit.
+    //
+    // Step 17 partial-completion #4 (Bug C) — re-cropping now also
+    // re-projects every existing shape / cline / annotation onto the
+    // new crop so they stay locked to physical roof features. The
+    // operator gets a confirm dialog if any coords would fall outside
+    // the new crop bounds (off-canvas after re-projection persists —
+    // re-cropping wider recovers).
+    //
+    // Returns Promise<boolean>:
+    //   true  — committed (decode succeeded, state applied)
+    //   false — operator cancelled the out-of-bounds confirm dialog;
+    //           no IDB writes, no state mutation, modal stays open.
+    //
+    // Inputs:
+    //   croppedDataURL, sourceDataURL — the new photo data-URLs
+    //   width, height — the new cropped photo's output dimensions
+    //   cropMeta — the new crop rect in source-px coords + rotation
+    //   sourceWidth, sourceHeight — source-photo dims (for re-projection
+    //                              fallback when oldCropMeta is null)
+    //   isRecrop — true when this commit is a re-crop on the SAME
+    //              source photo (PhotoPanel Re-crop button); false for
+    //              first-time uploads or Replace flows where the source
+    //              photo is brand new and re-projection has no
+    //              geometric meaning.
     //
     // Decode + IDB writes run in parallel so total latency ≈ max of the
-    // four async operations rather than the sum. For a 5MB iPhone photo
-    // on iPad LTE that's ~250-400ms total — slower than the current
-    // pre-Phase-B ~50ms canvas update by ~200-350ms. The cost buys
-    // photo-undo capability and prevents component-side IDB drift.
-    //
-    // Throws if the cropped data-URL fails to decode (caller surfaces
-    // the alert). Successful commit always sets hasSourcePhoto: true
-    // because the crop modal always provides a sourceDataURL.
-    commitCroppedPhoto: async ({ croppedDataURL, sourceDataURL, width, height, cropMeta }) => {
-      // 1. Capture pre-wipe state — pushUndo (extended snapshot) +
-      //    backup current live cropped/source to _undo slots.
+    // four async operations rather than the sum.
+    commitCroppedPhoto: async ({
+      croppedDataURL, sourceDataURL, width, height, cropMeta,
+      sourceWidth, sourceHeight, isRecrop,
+    }) => {
+      const cur = get()
+
+      // ---- Re-projection (re-crop only) -------------------------------
+      // Preserve a pure-function snapshot of the re-projected geometry
+      // so the confirm dialog can fire BEFORE captureAndBackupPhoto +
+      // IDB writes. If the operator cancels we return without any
+      // mutation — clean abort.
+      let reprojectedLayers = cur.layers
+      let reprojectedClines = cur.clines
+      let reprojectedSequences = cur.sequences
+
+      const hasAnyCoords =
+        cur.layers.some((l) => (l.shapes || []).length > 0)
+        || cur.clines.length > 0
+        || cur.sequences.some((s) => (s.annotations || []).length > 0)
+
+      if (isRecrop && hasAnyCoords) {
+        const sourceDims = {
+          w: Number(sourceWidth) || 0,
+          h: Number(sourceHeight) || 0,
+        }
+        // Bug C — re-project every coord through source-pixel
+        // intermediate. Old crop falls back to "full source" when
+        // cropMeta is null (pre-§7.A migration; in practice the
+        // hasSourcePhoto gate on the Re-crop button prevents this from
+        // firing, but the fallback hardens the path).
+        reprojectedLayers = cur.layers.map((l) => ({
+          ...l,
+          shapes: (l.shapes || []).map((sh) =>
+            reprojectShape(sh, cur.cropMeta, cropMeta, sourceDims),
+          ),
+        }))
+        reprojectedClines = cur.clines.map((cl) =>
+          reprojectCline(cl, cur.cropMeta, cropMeta, sourceDims),
+        )
+        reprojectedSequences = cur.sequences.map((s) => ({
+          ...s,
+          annotations: (s.annotations || []).map((a) =>
+            reprojectAnnotation(a, cur.cropMeta, cropMeta, sourceDims),
+          ),
+        }))
+
+        // Pre-validate: count off-canvas coords in the re-projected
+        // result. If non-zero, prompt the operator before proceeding.
+        const counts = countOutOfBounds(reprojectedLayers, reprojectedClines, reprojectedSequences)
+        const total = counts.shapes + counts.clines + counts.annotations
+        if (total > 0) {
+          const parts = []
+          if (counts.shapes > 0) parts.push(`${counts.shapes} shape${counts.shapes === 1 ? '' : 's'}`)
+          if (counts.clines > 0) parts.push(`${counts.clines} construction line${counts.clines === 1 ? '' : 's'}`)
+          if (counts.annotations > 0) parts.push(`${counts.annotations} annotation${counts.annotations === 1 ? '' : 's'}`)
+          const ok = window.confirm(
+            `This crop will hide ${parts.join(', ')} (off-canvas after re-crop). They'll persist — re-crop wider to recover. Continue?`
+          )
+          if (!ok) {
+            return false
+          }
+        }
+      }
+
+      // ---- Commit -----------------------------------------------------
+      // Order matters: captureAndBackupPhoto FIRST so the snapshot
+      // captures the OLD layers/sequences/clines + OLD photo state.
+      // Then apply the new re-projected coords + new photo state in a
+      // single atomic set() so render sees a consistent intermediate.
       await captureAndBackupPhoto()
 
-      // 2. Decode the new cropped data-URL + write new cropped/source
-      //    to live IDB in parallel.
       const [img] = await Promise.all([
         new Promise((resolve, reject) => {
           const i = new Image()
@@ -816,14 +902,19 @@ export const useAppStore = create((set, get) => {
         }),
       ])
 
-      // 3. Apply state via setCroppedPhoto (pure setter).
-      get().setCroppedPhoto({
-        image: img,
-        width,
-        height,
-        cropMeta,
+      // Single apply — re-projected coords (no-op if not re-crop) +
+      // new photo state. Atomic for undo: one snapshot, one set().
+      set({
+        layers: reprojectedLayers,
+        sequences: reprojectedSequences,
+        clines: reprojectedClines,
+        backgroundImage: img,
+        photoMeta: { width, height },
+        cropMeta: cropMeta || null,
         hasSourcePhoto: true,
       })
+
+      return true
     },
 
     // ============ Selection (Spec §9) =======================================

@@ -137,21 +137,27 @@ export default function DrawingTools() {
     reader.readAsDataURL(file)
   }
 
-  // Step 17 partial-completion #2 (Gap 2) — commitCroppedPhoto is the
-  // new awaitable store action that backs up the previous photo to
-  // _undo slots, decodes the new cropped data-URL, writes new IDB
-  // slots, and applies state — all in one place so Cmd+Z reverses
-  // both first-time uploads AND replaces. Mirror change in
-  // PhotoPanel.jsx — both Replace paths route through the same action.
-  const onCropConfirm = async ({ croppedDataURL, sourceDataURL, width, height, cropMeta }) => {
-    setPendingSource(null)
+  // Step 17 partial-completion #2 (Gap 2) — commitCroppedPhoto backs
+  // up the previous photo to _undo slots before writing the new one
+  // (Cmd+Z reverses both first-time uploads AND replaces). Mirror
+  // change in PhotoPanel.jsx Replace path.
+  // Step 17 partial #4 (Bug C) — 📷 toolbar is always Replace from
+  // this component (isRecrop: false). Re-crop lives in PhotoPanel.
+  // commitCroppedPhoto returns boolean; on false (operator cancelled
+  // an out-of-bounds confirm — won't fire here since isRecrop=false
+  // skips re-projection, but we honor the contract for safety) keep
+  // the modal open.
+  const onCropConfirm = async (payload) => {
     try {
-      await useAppStore.getState().commitCroppedPhoto({
-        croppedDataURL, sourceDataURL, width, height, cropMeta,
+      const committed = await useAppStore.getState().commitCroppedPhoto({
+        ...payload,
+        isRecrop: false,
       })
+      if (committed) setPendingSource(null)
     } catch (err) {
       const msg = err?.message || String(err)
       console.warn('Photo commit failed:', msg)
+      setPendingSource(null)
       window.alert(`Could not apply photo: ${msg}`)
     }
   }

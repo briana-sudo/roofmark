@@ -253,6 +253,14 @@ export default function PhotoCropModal({ sourceDataURL, initialCrop, onConfirm, 
       width: outW,
       height: outH,
       cropMeta: { x: cropPx.x, y: cropPx.y, w: cropPx.w, h: cropPx.h, rotation },
+      // Step 17 partial-completion #4 (Bug C) — source-photo dimensions
+      // threaded through so commitCroppedPhoto can re-project shape
+      // coords across a re-crop. imageDims comes from the source image
+      // load event (line ~52). Used by reprojectShapes for the
+      // pre-Section-7.A migration fallback (cropMeta === null on old
+      // side → treat as "old crop is full source, no rotation").
+      sourceWidth: imageDims.w,
+      sourceHeight: imageDims.h,
     })
   }
 

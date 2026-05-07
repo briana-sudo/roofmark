@@ -535,6 +535,174 @@ pass('Bug A — Load + 1st undo: undoStack EMPTY (button disables)', afterFirstU
 pass('Bug A — clearAll + attempted undo: stack stays empty', cleared.undoStack.length === 0)
 pass('Bug A — undo button disable condition (length===0) holds after clearAll', (cleared.undoStack.length === 0))
 
+// 9g. Bug C — re-projection math (mirror of src/utils/reprojectShapes.js).
+// Pure JS port of the same formulas so the test can verify rotation,
+// out-of-bounds, round-trip identity, and the first-crop short-circuit.
+function _outDims(crop) {
+  const isRotated = (crop.rotation === 90 || crop.rotation === 270)
+  return { w: isRotated ? crop.h : crop.w, h: isRotated ? crop.w : crop.h }
+}
+function _rotatePointDeg(p, deg) {
+  if (!deg) return { x: p.x, y: p.y }
+  const r = (deg * Math.PI) / 180
+  const c = Math.cos(r), s = Math.sin(r)
+  return { x: p.x * c - p.y * s, y: p.x * s + p.y * c }
+}
+function _fallback(srcDims) { return { x: 0, y: 0, w: srcDims.w, h: srcDims.h, rotation: 0 } }
+function _oldNormToSourcePx(p, oldCrop, srcDims) {
+  const meta = oldCrop || _fallback(srcDims)
+  const out = _outDims(meta)
+  const cropped = { x: p.x * out.w, y: p.y * out.h }
+  const centered = { x: cropped.x - out.w / 2, y: cropped.y - out.h / 2 }
+  const inv = _rotatePointDeg(centered, -(meta.rotation || 0))
+  const inCrop = { x: inv.x + meta.w / 2, y: inv.y + meta.h / 2 }
+  return { x: inCrop.x + meta.x, y: inCrop.y + meta.y }
+}
+function _sourcePxToNewNorm(sp, newCrop, srcDims) {
+  const meta = newCrop || _fallback(srcDims)
+  const out = _outDims(meta)
+  const inCrop = { x: sp.x - meta.x, y: sp.y - meta.y }
+  const centered = { x: inCrop.x - meta.w / 2, y: inCrop.y - meta.h / 2 }
+  const fwd = _rotatePointDeg(centered, meta.rotation || 0)
+  const cropped = { x: fwd.x + out.w / 2, y: fwd.y + out.h / 2 }
+  return { x: cropped.x / out.w, y: cropped.y / out.h }
+}
+function _reprojectPoint(p, oldCrop, newCrop, srcDims) {
+  return _sourcePxToNewNorm(_oldNormToSourcePx(p, oldCrop, srcDims), newCrop, srcDims)
+}
+function _approx(a, b, eps = 1e-6) {
+  return Math.abs(a - b) < eps
+}
+function _approxPt(p, q, eps = 1e-6) {
+  return _approx(p.x, q.x, eps) && _approx(p.y, q.y, eps)
+}
+
+// Fixture: 200x200 source, full-source old crop rotation 0.
+const SRC = { w: 200, h: 200 }
+const FULL = { x: 0, y: 0, w: 200, h: 200, rotation: 0 }
+
+// 9g-1. old norm → source px (rotation 0, full crop): identity scaling.
+const sp_TL = _oldNormToSourcePx({ x: 0, y: 0 }, FULL, SRC)
+pass('Bug C — oldNormToSourcePx (0,0) on full crop → (0,0)', _approxPt(sp_TL, { x: 0, y: 0 }))
+const sp_C = _oldNormToSourcePx({ x: 0.5, y: 0.5 }, FULL, SRC)
+pass('Bug C — oldNormToSourcePx (0.5,0.5) on full crop → (100,100)', _approxPt(sp_C, { x: 100, y: 100 }))
+const sp_BR = _oldNormToSourcePx({ x: 1, y: 1 }, FULL, SRC)
+pass('Bug C — oldNormToSourcePx (1,1) on full crop → (200,200)', _approxPt(sp_BR, { x: 200, y: 200 }))
+
+// 9g-2. Round-trip identity: norm → src → norm should equal original.
+const newCropA = { x: 50, y: 50, w: 100, h: 100, rotation: 0 } // tighter crop, centered
+const rt = _reprojectPoint({ x: 0.5, y: 0.5 }, FULL, newCropA, SRC)
+pass('Bug C — round-trip identity (FULL → tighter centered crop → still 0.5,0.5)',
+  _approxPt(rt, { x: 0.5, y: 0.5 }))
+
+// Reproject TL of full crop into tighter crop: should land out-of-bounds.
+const rtOOB = _reprojectPoint({ x: 0, y: 0 }, FULL, newCropA, SRC)
+pass('Bug C — TL reprojected into tighter crop is out-of-bounds (x<0)',
+  rtOOB.x < 0 && rtOOB.y < 0)
+
+// 9g-3. Reverse round-trip: A→B→A should preserve original within epsilon.
+const orig = { x: 0.3, y: 0.7 }
+const cropB = { x: 25, y: 25, w: 100, h: 100, rotation: 0 }
+const aToB = _reprojectPoint(orig, FULL, cropB, SRC)
+const bToA = _reprojectPoint(aToB, cropB, FULL, SRC)
+pass('Bug C — reverse round-trip A→B→A preserves point', _approxPt(bToA, orig, 1e-9))
+
+// 9g-4. Rotation 90: source TL → output TR.
+const cropRot90 = { x: 0, y: 0, w: 200, h: 200, rotation: 90 }
+const tlAfterRot = _sourcePxToNewNorm({ x: 0, y: 0 }, cropRot90, SRC)
+pass('Bug C — rotation 90: source TL → output norm (1,0) (TR)',
+  _approxPt(tlAfterRot, { x: 1, y: 0 }))
+const trAfterRot = _sourcePxToNewNorm({ x: 200, y: 0 }, cropRot90, SRC)
+pass('Bug C — rotation 90: source TR → output norm (1,1) (BR)',
+  _approxPt(trAfterRot, { x: 1, y: 1 }))
+
+// 9g-5. Rotation 180: source TL → output BR.
+const cropRot180 = { x: 0, y: 0, w: 200, h: 200, rotation: 180 }
+const tlAfter180 = _sourcePxToNewNorm({ x: 0, y: 0 }, cropRot180, SRC)
+pass('Bug C — rotation 180: source TL → output (1,1) (BR)',
+  _approxPt(tlAfter180, { x: 1, y: 1 }))
+
+// 9g-6. Rotation 270: source TL → output BL.
+const cropRot270 = { x: 0, y: 0, w: 200, h: 200, rotation: 270 }
+const tlAfter270 = _sourcePxToNewNorm({ x: 0, y: 0 }, cropRot270, SRC)
+pass('Bug C — rotation 270: source TL → output (0,1) (BL)',
+  _approxPt(tlAfter270, { x: 0, y: 1 }))
+
+// 9g-7. Combined re-crop with rotation: shape stays locked to source pixel.
+// Old crop = full source rot 0; new crop = full source rot 90. A shape at
+// old norm (0, 0) (= source TL = source pixel (0,0)) should re-project to
+// new norm (1, 0) (output TR per 9g-4).
+const reprojThruRot = _reprojectPoint({ x: 0, y: 0 }, FULL, cropRot90, SRC)
+pass('Bug C — reproject (0,0) thru rotation change 0→90 → (1,0)',
+  _approxPt(reprojThruRot, { x: 1, y: 0 }))
+
+// 9g-8. Out-of-bounds detection.
+function _isOut(p) { return !p || p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1 }
+pass('Bug C — out-of-bounds: (0.5, 0.5) is in', !_isOut({ x: 0.5, y: 0.5 }))
+pass('Bug C — out-of-bounds: (-0.1, 0.5) is out', _isOut({ x: -0.1, y: 0.5 }))
+pass('Bug C — out-of-bounds: (0.5, 1.2) is out', _isOut({ x: 0.5, y: 1.2 }))
+pass('Bug C — out-of-bounds: (0, 0) is in (boundary inclusive)', !_isOut({ x: 0, y: 0 }))
+
+// 9g-9. Pre-Section-7.A migration: cropMeta === null → fallback to full source.
+const fallbackCrop = _oldNormToSourcePx({ x: 0.5, y: 0.5 }, null, SRC)
+pass('Bug C — null oldCrop fallback: (0.5,0.5) in null crop → (100,100)',
+  _approxPt(fallbackCrop, { x: 100, y: 100 }))
+
+// 9g-10. First-crop short-circuit detection (no coords to project).
+function _hasAnyCoords(layers, clines, sequences) {
+  return (
+    (layers || []).some((l) => (l.shapes || []).length > 0)
+    || (clines || []).length > 0
+    || (sequences || []).some((s) => (s.annotations || []).length > 0)
+  )
+}
+pass('Bug C — first-crop short-circuit: empty project → no coords',
+  !_hasAnyCoords([{ shapes: [] }], [], [{ annotations: [] }]))
+pass('Bug C — first-crop short-circuit: project with shapes → has coords',
+  _hasAnyCoords([{ shapes: [{ id: 'sh1' }] }], [], []))
+pass('Bug C — first-crop short-circuit: project with clines → has coords',
+  _hasAnyCoords([], [{ id: 'cl1' }], []))
+pass('Bug C — first-crop short-circuit: project with annotations → has coords',
+  _hasAnyCoords([], [], [{ annotations: [{ id: 'a1' }] }]))
+
+// 9g-11. Cline type promotion across rotation: h-cline becomes v-cline
+// when re-projected through a 90° rotation.
+function _reprojCline(cl, oldCrop, newCrop, srcDims) {
+  let p1, p2
+  if (cl.type === 'h') { p1 = { x: 0, y: cl.y }; p2 = { x: 1, y: cl.y } }
+  else if (cl.type === 'v') { p1 = { x: cl.x, y: 0 }; p2 = { x: cl.x, y: 1 } }
+  else {
+    const eps = 0.01
+    p1 = { x: cl.px, y: cl.py }
+    p2 = { x: cl.px + Math.cos(cl.angle) * eps, y: cl.py + Math.sin(cl.angle) * eps }
+  }
+  const np1 = _reprojectPoint(p1, oldCrop, newCrop, srcDims)
+  const np2 = _reprojectPoint(p2, oldCrop, newCrop, srcDims)
+  const dx = np2.x - np1.x, dy = np2.y - np1.y
+  const TOL = 1e-6
+  if (Math.abs(dy) < TOL) return { ...cl, type: 'h', y: np1.y }
+  if (Math.abs(dx) < TOL) return { ...cl, type: 'v', x: np1.x }
+  return { ...cl, type: 'a', px: np1.x, py: np1.y, angle: Math.atan2(dy, dx) }
+}
+const hCline = { id: 'cl1', type: 'h', y: 0.5 }
+const promoted = _reprojCline(hCline, FULL, cropRot90, SRC)
+pass('Bug C — h-cline promotes to v-cline through rotation 90',
+  promoted.type === 'v')
+
+// 9g-12. Circle radius scales by output-width ratio.
+function _reprojCircle(sh, oldCrop, newCrop, srcDims) {
+  const center = _reprojectPoint({ x: sh.cx, y: sh.cy }, oldCrop, newCrop, srcDims)
+  const oldOut = _outDims(oldCrop || _fallback(srcDims))
+  const newOut = _outDims(newCrop || _fallback(srcDims))
+  return { ...sh, cx: center.x, cy: center.y, r: sh.r * (oldOut.w / newOut.w) }
+}
+const circle = { type: 'circ', cx: 0.5, cy: 0.5, r: 0.1 }
+// Halve the crop width: r should double.
+const cropHalfW = { x: 50, y: 0, w: 100, h: 200, rotation: 0 }
+const reprojCirc = _reprojCircle(circle, FULL, cropHalfW, SRC)
+pass('Bug C — circle r doubles when crop width halves',
+  _approx(reprojCirc.r, 0.2, 1e-9))
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {

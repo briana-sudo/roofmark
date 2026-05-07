@@ -59,22 +59,39 @@ export default function PhotoPanel() {
     setRecropSrc(src)
   }
   // Shared confirm path for both re-crop and replace. Step 17 partial #2
-  // (Gap 2): commitCroppedPhoto is the new awaitable store action that
-  // backs up the previous photo to _undo slots before writing the new
-  // one — that's what makes Cmd+Z reverse a re-crop / replace.
-  const onCropConfirm = async ({ croppedDataURL, sourceDataURL, width, height, cropMeta: nextCropMeta }) => {
-    setRecropSrc(null)
-    setPendingSource(null)
+  // (Gap 2): commitCroppedPhoto backs up the previous photo to _undo
+  // slots before writing the new one — Cmd+Z reverses re-crop / replace.
+  // Step 17 partial #4 (Bug C): commitCroppedPhoto returns boolean. On
+  // false (operator cancelled the out-of-bounds confirm dialog), keep
+  // the crop modal open so the operator can adjust the rect. On true,
+  // close the modal. The two flows pass different `isRecrop` values:
+  //   - Re-crop path (sourceDataURL came from IDB): isRecrop=true →
+  //     triggers shape re-projection in the store.
+  //   - Replace path (sourceDataURL is a fresh file pick): isRecrop=
+  //     false → no re-projection (the source photo is brand new; old
+  //     shape coords remain at their fractional positions in the new
+  //     photo's frame).
+  const commitCrop = async (payload, { isRecrop }) => {
     try {
-      await useAppStore.getState().commitCroppedPhoto({
-        croppedDataURL, sourceDataURL, width, height, cropMeta: nextCropMeta,
+      const committed = await useAppStore.getState().commitCroppedPhoto({
+        ...payload,
+        isRecrop,
       })
+      if (committed) {
+        setRecropSrc(null)
+        setPendingSource(null)
+      }
+      // committed === false → operator cancelled; modal stays open.
     } catch (err) {
       const msg = err?.message || String(err)
       console.warn('Photo commit failed:', msg)
+      setRecropSrc(null)
+      setPendingSource(null)
       window.alert(`Could not apply photo: ${msg}`)
     }
   }
+  const onRecropConfirm = (payload) => commitCrop(payload, { isRecrop: true })
+  const onReplaceConfirm = (payload) => commitCrop(payload, { isRecrop: false })
 
   const onPickReplace = () => fileInputRef.current?.click()
   const onReplaceFile = (e) => {
@@ -179,14 +196,14 @@ export default function PhotoPanel() {
         <PhotoCropModal
           sourceDataURL={recropSrc}
           initialCrop={cropMeta}
-          onConfirm={onCropConfirm}
+          onConfirm={onRecropConfirm}
           onCancel={() => setRecropSrc(null)}
         />
       )}
       {pendingSource && (
         <PhotoCropModal
           sourceDataURL={pendingSource.dataURL}
-          onConfirm={onCropConfirm}
+          onConfirm={onReplaceConfirm}
           onCancel={() => setPendingSource(null)}
         />
       )}
