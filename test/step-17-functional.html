@@ -277,11 +277,14 @@ const snapNoPhoto = JSON.parse(buildExtendedSnapshot(stateNoPhoto))
 pass('snapshot without photo: photoMeta is null', snapNoPhoto.photoMeta === null)
 pass('snapshot without photo: hasSourcePhoto is false', snapNoPhoto.hasSourcePhoto === false)
 
-// 9e-mid. Phase B (Gap 2) — preWipeCopy + restoreFromUndo IDB lifecycle.
-// Mirror of captureAndBackupPhoto + restorePhotoFromUndo logic from
-// useAppStore.js. Uses a synchronous fake-IDB Map (the test verifies
-// data flow, not the async machinery — Promise wrapping would only add
-// timing risk that delays assertions past the render summary).
+// 9e-mid. Step 17 partial #5 — embedded-binary photo undo snapshots.
+// Mirror of captureSnapWithLivePhoto + the undo handler's three
+// branches (no-photo / embedded backup / no-backup). Each photo-wipe
+// snapshot embeds the live cropped + source binaries directly under
+// _croppedBin / _sourceBin; the undo handler reads those keys to
+// restore. Unlike Phase B's single-slot IDB approach, this scales to
+// arbitrary depth — multi-step undo (re-crop A→B→C, undo twice)
+// recovers each prior photo correctly.
 function makeFakeIDB(initial = {}) {
   const store = new Map(Object.entries(initial))
   return {
@@ -291,111 +294,161 @@ function makeFakeIDB(initial = {}) {
     snapshot: () => Object.fromEntries(store),
   }
 }
-function fakePreWipeCopy(idb) {
-  const oldCropped = idb.load('cropped')
-  const oldSource = idb.load('source')
-  if (oldCropped) idb.save(oldCropped, 'cropped_undo'); else idb.clear('cropped_undo')
-  if (oldSource)  idb.save(oldSource,  'source_undo');  else idb.clear('source_undo')
+// Mirror of captureSnapWithLivePhoto: build a snapshot object including
+// embedded photo binaries from current live IDB.
+function captureSnapWithEmbedded(state, idb) {
+  const obj = {
+    layers: state.layers,
+    sequences: state.sequences,
+    clines: state.clines,
+    photoMeta: state.photoMeta || null,
+    cropMeta: state.cropMeta || null,
+    hasSourcePhoto: !!state.hasSourcePhoto,
+  }
+  const cropped = idb.load('cropped')
+  const source = idb.load('source')
+  if (typeof cropped === 'string' && cropped.length > 0) obj._croppedBin = cropped
+  if (typeof source === 'string' && source.length > 0) obj._sourceBin = source
+  return JSON.stringify(obj)
 }
-function fakeRestoreFromUndo(idb) {
-  const croppedBackup = idb.load('cropped_undo')
-  const sourceBackup  = idb.load('source_undo')
-  if (croppedBackup) idb.save(croppedBackup, 'cropped'); else idb.clear('cropped')
-  if (sourceBackup)  idb.save(sourceBackup,  'source');  else idb.clear('source')
-  idb.clear('cropped_undo')
-  idb.clear('source_undo')
-  return { cropped: croppedBackup, source: sourceBackup }
+// Mirror of undo handler's photo-restore branch.
+function applyEmbeddedRestore(snapStr, idb) {
+  const next = JSON.parse(snapStr)
+  if (next.photoMeta == null) {
+    idb.clear('cropped')
+    idb.clear('source')
+    return { branch: 'no-photo', cropped: null, source: null }
+  }
+  if (typeof next._croppedBin === 'string' && next._croppedBin.length > 0) {
+    idb.save(next._croppedBin, 'cropped')
+    if (typeof next._sourceBin === 'string' && next._sourceBin.length > 0) {
+      idb.save(next._sourceBin, 'source')
+    } else {
+      idb.clear('source')
+    }
+    return { branch: 'embedded', cropped: next._croppedBin, source: next._sourceBin || null }
+  }
+  return { branch: 'no-backup', cropped: null, source: null }
 }
 
-// 9e-1. preWipeCopy with photo present — copies live to _undo
+// 9e-1. captureSnap embeds the live photo binaries into the snapshot
 {
   const idb = makeFakeIDB({ cropped: 'A_cropped', source: 'A_source' })
-  fakePreWipeCopy(idb)
-  const snap = idb.snapshot()
-  pass('preWipeCopy: cropped_undo populated from live cropped', snap.cropped_undo === 'A_cropped')
-  pass('preWipeCopy: source_undo populated from live source',  snap.source_undo === 'A_source')
-  pass('preWipeCopy: live cropped UNCHANGED', snap.cropped === 'A_cropped')
-  pass('preWipeCopy: live source UNCHANGED',  snap.source === 'A_source')
+  const state = { layers: [], sequences: [], clines: [], photoMeta: { width: 1, height: 1 }, cropMeta: null, hasSourcePhoto: true }
+  const snap = JSON.parse(captureSnapWithEmbedded(state, idb))
+  pass('embedded snap: _croppedBin from live', snap._croppedBin === 'A_cropped')
+  pass('embedded snap: _sourceBin from live',  snap._sourceBin === 'A_source')
+  pass('embedded snap: live IDB UNTOUCHED by capture', idb.snapshot().cropped === 'A_cropped')
 }
 
-// 9e-2. preWipeCopy with no live photo — clears _undo (first-time upload)
+// 9e-2. captureSnap with no live photo — no _croppedBin / _sourceBin keys
 {
   const idb = makeFakeIDB({})
-  fakePreWipeCopy(idb)
-  const snap = idb.snapshot()
-  pass('preWipeCopy with no live: cropped_undo absent', snap.cropped_undo === undefined)
-  pass('preWipeCopy with no live: source_undo absent',  snap.source_undo === undefined)
+  const state = { layers: [], sequences: [], clines: [], photoMeta: null, cropMeta: null, hasSourcePhoto: false }
+  const snap = JSON.parse(captureSnapWithEmbedded(state, idb))
+  pass('captureSnap with no live: _croppedBin absent', !('_croppedBin' in snap))
+  pass('captureSnap with no live: _sourceBin absent', !('_sourceBin' in snap))
+  pass('captureSnap with no live: photoMeta is null', snap.photoMeta === null)
 }
 
-// 9e-3. Full clear cycle: preWipeCopy → wipe → restore from _undo
+// 9e-3. Full clear cycle: capture snap with live A → wipe live → undo
+// restores live from embedded snap.
 {
   const idb = makeFakeIDB({ cropped: 'A_cropped', source: 'A_source' })
-  fakePreWipeCopy(idb)
+  const state = { layers: [], sequences: [], clines: [], photoMeta: { width: 1, height: 1 }, cropMeta: null, hasSourcePhoto: true }
+  const snap = captureSnapWithEmbedded(state, idb)
   idb.clear('cropped')
   idb.clear('source')
   pass('post-wipe: live cropped gone', idb.snapshot().cropped === undefined)
-  pass('post-wipe: live source gone',  idb.snapshot().source === undefined)
-  const restored = fakeRestoreFromUndo(idb)
-  pass('restore: returned cropped matches pre-wipe', restored.cropped === 'A_cropped')
-  pass('restore: returned source matches pre-wipe',  restored.source === 'A_source')
-  const final = idb.snapshot()
-  pass('restore: live cropped re-populated', final.cropped === 'A_cropped')
-  pass('restore: live source re-populated',  final.source === 'A_source')
-  pass('restore: cropped_undo consumed',     final.cropped_undo === undefined)
-  pass('restore: source_undo consumed',      final.source_undo === undefined)
+  const result = applyEmbeddedRestore(snap, idb)
+  pass('restore branch: embedded', result.branch === 'embedded')
+  pass('restore: live cropped re-populated', idb.snapshot().cropped === 'A_cropped')
+  pass('restore: live source re-populated',  idb.snapshot().source === 'A_source')
 }
 
-// 9e-4. Replace cycle: preWipeCopy → write new → restore old via _undo
+// 9e-4. Multi-step recovery — re-crop A→B→C, undo twice recovers each.
+// Phase B's single-slot backup-of-backup limit is GONE: each photo-
+// wipe snapshot carries its own embedded binary, and undo restores
+// from each snapshot's binary independently.
 {
   const idb = makeFakeIDB({ cropped: 'A_cropped', source: 'A_source' })
-  fakePreWipeCopy(idb)
-  idb.save('B_cropped', 'cropped')
-  idb.save('B_source', 'source')
-  pass('replace: live now has new B_cropped', idb.snapshot().cropped === 'B_cropped')
-  fakeRestoreFromUndo(idb)
-  pass('replace+undo: live restored to A_cropped', idb.snapshot().cropped === 'A_cropped')
-  pass('replace+undo: live restored to A_source',  idb.snapshot().source === 'A_source')
-}
+  const stateBeforeRecrop1 = { layers: [], sequences: [], clines: [], photoMeta: { width: 100, height: 100 }, cropMeta: { x: 0, y: 0, w: 100, h: 100, rotation: 0 }, hasSourcePhoto: true }
 
-// 9e-5. Backup-of-backup limit: rapid wipe-twice — second wipe overwrites
-// first backup. Only B is recoverable, A is gone. (Documented limit.)
-{
-  const idb = makeFakeIDB({ cropped: 'A_cropped', source: 'A_source' })
-  fakePreWipeCopy(idb) // _undo = A
-  pass('backup-of-backup setup: _undo = A', idb.snapshot().cropped_undo === 'A_cropped')
-  // Simulate first wipe → replace with B
+  // Re-crop 1: capture snap (embeds A), wipe live, write B
+  const snap1 = captureSnapWithEmbedded(stateBeforeRecrop1, idb)
   idb.save('B_cropped', 'cropped')
   idb.save('B_source', 'source')
-  // Second wipe: preWipeCopy reads live (B) and overwrites _undo (A → B). A is GONE.
-  fakePreWipeCopy(idb)
-  pass('backup-of-backup: _undo overwritten with B (A gone)', idb.snapshot().cropped_undo === 'B_cropped')
-  // Replace with C
+
+  // After re-crop 1: state is B (live IDB), snap1 holds A embedded.
+  pass('multi-step setup: snap1 embeds A_cropped',
+    JSON.parse(snap1)._croppedBin === 'A_cropped')
+
+  // Re-crop 2: capture snap (embeds B), wipe live, write C
+  const stateBeforeRecrop2 = { layers: [], sequences: [], clines: [], photoMeta: { width: 80, height: 80 }, cropMeta: { x: 10, y: 10, w: 80, h: 80, rotation: 0 }, hasSourcePhoto: true }
+  const snap2 = captureSnapWithEmbedded(stateBeforeRecrop2, idb)
   idb.save('C_cropped', 'cropped')
   idb.save('C_source', 'source')
-  // First undo recovers B
-  const restored = fakeRestoreFromUndo(idb)
-  pass('backup-of-backup: first undo recovers B', restored.cropped === 'B_cropped')
-  pass('backup-of-backup: A is permanently gone (consumed slot empty)',
-    idb.snapshot().cropped_undo === undefined)
-  // Subsequent restore would return null/null — operator hits limit
-  const restored2 = fakeRestoreFromUndo(idb)
-  pass('backup-of-backup: second undo returns no backup', restored2.cropped == null && restored2.source == null)
+
+  pass('multi-step setup: snap2 embeds B_cropped',
+    JSON.parse(snap2)._croppedBin === 'B_cropped')
+
+  // First undo: pop snap2, restore B from embedded.
+  const r1 = applyEmbeddedRestore(snap2, idb)
+  pass('first undo: restored B_cropped', r1.cropped === 'B_cropped' && idb.snapshot().cropped === 'B_cropped')
+  pass('first undo: restored B_source',  r1.source === 'B_source' && idb.snapshot().source === 'B_source')
+
+  // Second undo: pop snap1, restore A from embedded. CRITICAL — Phase B
+  // hit a limit here; the embedded approach has no such limit.
+  const r2 = applyEmbeddedRestore(snap1, idb)
+  pass('second undo: restored A_cropped', r2.cropped === 'A_cropped' && idb.snapshot().cropped === 'A_cropped')
+  pass('second undo: restored A_source',  r2.source === 'A_source' && idb.snapshot().source === 'A_source')
+  pass('multi-step recovery: both prior photos restored independently',
+    r1.cropped === 'B_cropped' && r2.cropped === 'A_cropped')
 }
 
-// 9e-6. App-load clear: _undo slots wiped on app start regardless of contents.
+// 9e-5. Three-step deep recovery (extends 9e-4 to verify the limit-free
+// pattern at deeper depth).
 {
-  const idb = makeFakeIDB({
-    cropped: 'live_cropped', source: 'live_source',
-    cropped_undo: 'leftover_undo_cropped', source_undo: 'leftover_undo_source',
+  const idb = makeFakeIDB({ cropped: 'A_cropped', source: 'A_source' })
+  const baseState = { layers: [], sequences: [], clines: [], photoMeta: { width: 100, height: 100 }, cropMeta: null, hasSourcePhoto: true }
+  // 3 successive re-crops:
+  const snapA = captureSnapWithEmbedded(baseState, idb); idb.save('B_cropped', 'cropped'); idb.save('B_source', 'source')
+  const snapB = captureSnapWithEmbedded(baseState, idb); idb.save('C_cropped', 'cropped'); idb.save('C_source', 'source')
+  const snapC = captureSnapWithEmbedded(baseState, idb); idb.save('D_cropped', 'cropped'); idb.save('D_source', 'source')
+  // 3 undos in reverse:
+  const u1 = applyEmbeddedRestore(snapC, idb)
+  pass('3-step undo: 1st undo recovers C', u1.cropped === 'C_cropped')
+  const u2 = applyEmbeddedRestore(snapB, idb)
+  pass('3-step undo: 2nd undo recovers B', u2.cropped === 'B_cropped')
+  const u3 = applyEmbeddedRestore(snapA, idb)
+  pass('3-step undo: 3rd undo recovers A', u3.cropped === 'A_cropped')
+}
+
+// 9e-6. No-backup branch: snapshot has photoMeta but no embedded binary
+// (e.g. plain pushUndo from addShape while a photo was loaded).
+{
+  const idb = makeFakeIDB({ cropped: 'live_cropped', source: 'live_source' })
+  const noBackupSnap = JSON.stringify({
+    layers: [], sequences: [], clines: [],
+    photoMeta: { width: 1, height: 1 }, cropMeta: null, hasSourcePhoto: true,
+    // No _croppedBin / _sourceBin (vanilla pushUndo from a shape edit)
   })
-  // Mirror of useAppStore.js app-load block: clear _undo slots.
-  idb.clear('cropped_undo')
-  idb.clear('source_undo')
-  const snap = idb.snapshot()
-  pass('app-load: cropped_undo cleared', snap.cropped_undo === undefined)
-  pass('app-load: source_undo cleared',  snap.source_undo === undefined)
-  pass('app-load: live cropped UNTOUCHED', snap.cropped === 'live_cropped')
-  pass('app-load: live source UNTOUCHED',  snap.source === 'live_source')
+  const result = applyEmbeddedRestore(noBackupSnap, idb)
+  pass('no-backup branch returns no-backup', result.branch === 'no-backup')
+  pass('no-backup branch: live IDB UNTOUCHED', idb.snapshot().cropped === 'live_cropped')
+}
+
+// 9e-7. No-photo branch: snapshot says photoMeta=null → wipe live.
+{
+  const idb = makeFakeIDB({ cropped: 'live_cropped', source: 'live_source' })
+  const noPhotoSnap = JSON.stringify({
+    layers: [], sequences: [], clines: [],
+    photoMeta: null, cropMeta: null, hasSourcePhoto: false,
+  })
+  const result = applyEmbeddedRestore(noPhotoSnap, idb)
+  pass('no-photo branch returns no-photo', result.branch === 'no-photo')
+  pass('no-photo branch: live cropped wiped', idb.snapshot().cropped === undefined)
+  pass('no-photo branch: live source wiped',  idb.snapshot().source === undefined)
 }
 
 // 9e-7. Photo-boundary detection logic (mirror of undo handler).

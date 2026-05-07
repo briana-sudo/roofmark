@@ -275,17 +275,9 @@ const initialState = {
   // working photo. `hasSourcePhoto` stays false for those projects until
   // the operator re-uploads via the crop modal.
   hasSourcePhoto: false,
-  // Step 17 partial-completion #2 (Gap 2) — session-scoped flag tracking
-  // whether the cropped_undo + source_undo IDB slots hold a valid backup
-  // of the previous photo. Set by captureAndBackupPhoto (called from
-  // every photo wipe site). Cleared by restorePhotoFromUndo on undo
-  // consume. Always false on app load (refresh = no recovery — see the
-  // app-load clear at the bottom of this file).
-  // Invariant: when true, _undo slots reflect what was live BEFORE the
-  // most recent destructive action. When false, _undo slots are empty
-  // or stale and undo of a photo state change should be skipped (the
-  // documented backup-of-backup limit).
-  photoUndoSlotInitialized: false,
+  // (Phase B field `photoUndoSlotInitialized` retired — replaced by
+  // embedded photo binaries inside undo snapshots; see
+  // captureSnapWithLivePhoto + the undo handler.)
   rightDrawerOpen: hydrated?.rightDrawerOpen ?? false,
   // Step 11 — which view fills the right-drawer body. Two values:
   // 'properties' (per-layer color/fill/stroke) or 'sequences' (sequence
@@ -343,111 +335,59 @@ export const useAppStore = create((set, get) => {
     })
   }
 
-  // ============ Photo undo backup helpers (Step 17 partial #2 — Gap 2) ====
-  // The geometry undo stack is JSON snapshots only — photo binary lives
-  // in IDB and never enters the stack (50 × ~5MB = 250MB worst case is
-  // DOA). Recovery from a photo wipe / replace / re-crop instead works
-  // through two session-scoped IDB backup slots: 'cropped_undo' +
-  // 'source_undo'. Lifecycle:
+  // ============ Photo undo helpers (Step 17 partial #5 — embedded) =======
+  // The geometry undo stack is JSON snapshots. For photo-wipe actions
+  // (commitCroppedPhoto / clearBackgroundImage) the snapshot of the
+  // pre-wipe state EMBEDS the about-to-be-replaced photo binaries
+  // directly as data-URL strings under `_croppedBin` + `_sourceBin`
+  // keys. Each wipe gets its own embedded backup, so multi-step undo
+  // (re-crop A→B then re-crop B→C, then undo twice) recovers each
+  // prior photo correctly.
   //
-  //   1. captureAndBackupPhoto runs at the top of every wipe site:
-  //      - reads current live cropped + source IDB
-  //      - writes them to _undo slots
-  //      - pushUndo (extended snapshot includes photoMeta + cropMeta +
-  //        hasSourcePhoto; geometry stack remains the source of truth
-  //        for what to restore on undo)
-  //      - sets photoUndoSlotInitialized = true
-  //   2. The wipe site mutates live IDB + state.
-  //   3. On undo, if the popped snapshot's photo state differs from
-  //      current AND photoUndoSlotInitialized is true,
-  //      restorePhotoFromUndo runs:
-  //      - copies _undo → live (or clears live if backup empty)
-  //      - clears _undo slots
-  //      - sets photoUndoSlotInitialized = false
-  //      - returns decoded backgroundImage (or null) for the caller to
-  //        plumb into set()
-  //   4. Subsequent photo undos within the same wipe chain see
-  //      photoUndoSlotInitialized=false and skip — geometry restores
-  //      but photo state stays as-is (the documented backup-of-backup
-  //      limit: only the most recent destruction is recoverable, not
-  //      arbitrarily many).
-  //   5. App reload (see bottom of this file) wipes _undo slots — the
-  //      session boundary is "refresh = no recovery."
+  // This replaces the Phase B single-slot IDB backup approach
+  // (`cropped_undo` / `source_undo`) which had a hard "backup-of-
+  // backup" limit: only the MOST RECENT destruction was recoverable.
+  // Operator verification on stacked re-crops surfaced that limit as
+  // a real bug — second undo half-restored.
   //
-  // Failure modes:
-  //   - IDB read errors → treat as "no backup," skip restore.
-  //   - Image decode failure → backgroundImage left null, photoMeta
-  //     still applied from snapshot (state stays internally consistent).
-  //   - Race condition: rapid wipe-then-undo before captureAndBackupPhoto's
-  //     IDB writes finish → operator sees stale state. Acceptable; wipes
-  //     are gated on a confirm dialog or a crop modal (~human-time delay).
-  // Step 17 partial #4 fix — split into two independent helpers so
-  // commitCroppedPhoto can capture the geometry snapshot UPFRONT (before
-  // re-projection happens in local variables) and push it manually,
-  // separately from the IDB backup. The original captureAndBackupPhoto
-  // bundled pushUndo + IDB backup; that worked for clearBackgroundImage
-  // (where state isn't being computed in local variables) but proved
-  // fragile in commitCroppedPhoto, where the snapshot timing relative
-  // to re-projection MUST be guaranteed.
-  const backupLivePhotoToUndoSlots = async () => {
+  // Memory cost: each photo-wipe snapshot is ~5–10MB. Plain shape-
+  // edit snapshots (pushed by addShape / addCline / addAnnotation /
+  // etc. via vanilla pushUndo()) remain small (kB). Realistic
+  // session: 1–5 photo wipes → 5–50MB. Worst-case 50 wipes:
+  // 250–500MB. JS GC reclaims as snapshots evict past UNDO_LIMIT.
+  // Snapshots are NOT persisted to localStorage (PERSIST_KEYS doesn't
+  // include undoStack/redoStack) so the heap cost stays session-
+  // scoped — Save/Load JSON also stays clean.
+  //
+  // captureSnapWithLivePhoto:
+  //   reads current live cropped + source from IDB
+  //   builds the dataSnapshot of current state
+  //   embeds the binaries under _croppedBin / _sourceBin
+  //   returns the JSON string ready to push onto undoStack
+  //
+  // Callers (commitCroppedPhoto, clearBackgroundImage) push the
+  // returned snapshot manually with eviction-aware logic. Plain
+  // pushUndo() (used by addShape / addLayer / etc.) does NOT embed
+  // binaries — those snapshots stay small.
+  const captureSnapWithLivePhoto = async () => {
+    const baseObj = JSON.parse(dataSnapshot(get()))
     const [oldCropped, oldSource] = await Promise.all([
       loadPhoto('cropped').catch(() => null),
       loadPhoto('source').catch(() => null),
     ])
-    await Promise.all([
-      oldCropped
-        ? savePhoto(oldCropped, 'cropped_undo').catch(() => {})
-        : clearPhoto('cropped_undo').catch(() => {}),
-      oldSource
-        ? savePhoto(oldSource, 'source_undo').catch(() => {})
-        : clearPhoto('source_undo').catch(() => {}),
-    ])
-    set({ photoUndoSlotInitialized: true })
-  }
-  // Convenience wrapper for callers that don't need separate control
-  // (clearBackgroundImage). Equivalent to the prior captureAndBackupPhoto.
-  const captureAndBackupPhoto = async () => {
-    pushUndo()
-    await backupLivePhotoToUndoSlots()
+    if (typeof oldCropped === 'string' && oldCropped.length > 0) {
+      baseObj._croppedBin = oldCropped
+    }
+    if (typeof oldSource === 'string' && oldSource.length > 0) {
+      baseObj._sourceBin = oldSource
+    }
+    return JSON.stringify(baseObj)
   }
 
-  // Returns:
-  //   { applied: true, image: HTMLImageElement | null }  — backup consumed,
-  //     caller should set photoMeta/cropMeta/hasSourcePhoto from the snapshot
-  //   { applied: false }  — no backup available; caller should leave photo
-  //     state as-is (photoMeta etc. should NOT be overwritten — keeps the
-  //     store consistent with live IDB)
-  const restorePhotoFromUndo = async () => {
-    if (!get().photoUndoSlotInitialized) return { applied: false }
-    const [croppedBackup, sourceBackup] = await Promise.all([
-      loadPhoto('cropped_undo').catch(() => null),
-      loadPhoto('source_undo').catch(() => null),
-    ])
-    await Promise.all([
-      croppedBackup
-        ? savePhoto(croppedBackup, 'cropped').catch(() => {})
-        : clearPhoto('cropped').catch(() => {}),
-      sourceBackup
-        ? savePhoto(sourceBackup, 'source').catch(() => {})
-        : clearPhoto('source').catch(() => {}),
-      clearPhoto('cropped_undo').catch(() => {}),
-      clearPhoto('source_undo').catch(() => {}),
-    ])
-    set({ photoUndoSlotInitialized: false })
-    let img = null
-    if (croppedBackup) {
-      img = await new Promise((resolve) => {
-        const i = new Image()
-        i.onload = () => resolve(i)
-        i.onerror = () => {
-          console.warn('Failed to decode photo undo backup')
-          resolve(null)
-        }
-        i.src = croppedBackup
-      })
-    }
-    return { applied: true, image: img }
-  }
+  // (Phase B's separate IDB-slot backup helpers — captureAndBackupPhoto,
+  // backupLivePhotoToUndoSlots, restorePhotoFromUndo — were retired
+  // when stacked re-crops surfaced the single-slot backup-of-backup
+  // limit. Embedded snapshots above replace them.)
 
   return {
     ...initialState,
@@ -744,25 +684,31 @@ export const useAppStore = create((set, get) => {
         photoMeta: dims || s.photoMeta,
       }
     }),
-    // Step 17 partial-completion #2 (Gap 2) — clearBackgroundImage is now
-    // async. Backs up the current photo to _undo slots BEFORE clearing
-    // live IDB so Cmd+Z can restore. Callers must await; previously the
-    // function was sync and a few callers fire-and-forgot, which is
-    // safe-but-slower under the new async path (the wipe completes in
-    // background; rapid undo before completion may see stale state).
+    // Step 17 partial #5 — clearBackgroundImage embeds the about-to-be-
+    // wiped photo binaries directly into the snapshot pushed onto
+    // undoStack. Multi-step undo (clear → upload → clear → undo twice)
+    // recovers each prior photo correctly, regardless of how many
+    // wipes happened in between. Callers must await.
     //
     // NOTE: clearAll (New Project) intentionally does NOT route through
-    // here — it's out of scope for Phase B (Bug A — cross-project undo
-    // bleed — pending separate fix).
+    // here — it's a hard project boundary that wipes the entire undo
+    // stack (Bug A fix).
     clearBackgroundImage: async () => {
-      await captureAndBackupPhoto()
-      // Wipe live IDB. Legacy 'background' key cleared too in case any
-      // pre-§7.A residue is still around.
+      // 1. Capture pre-wipe snapshot WITH the live photo binaries
+      //    embedded. This is what Cmd+Z reads to restore.
+      const enrichedSnap = await captureSnapWithLivePhoto()
+      set((s) => {
+        const next = [...s.undoStack, enrichedSnap]
+        while (next.length > UNDO_LIMIT) next.shift()
+        return { undoStack: next, redoStack: [] }
+      })
+      // 2. Wipe live IDB. Legacy 'background' key cleared too.
       await Promise.all([
         clearPhoto('cropped').catch((err) => console.warn('Failed to clear cropped photo:', err)),
         clearPhoto('source').catch((err) => console.warn('Failed to clear source photo:', err)),
         clearPhoto('background').catch(() => {}),
       ])
+      // 3. Apply state.
       set({
         backgroundImage: null,
         photoMeta: null,
@@ -833,18 +779,7 @@ export const useAppStore = create((set, get) => {
       croppedDataURL, sourceDataURL, width, height, cropMeta,
       sourceWidth, sourceHeight, isRecrop,
     }) => {
-      // ---- Phase 0: capture pre-commit snapshot UPFRONT ----------------
-      // Step 17 partial #4 fix (defensive). Snapshot the live state
-      // BEFORE any code that could possibly mutate it. We push this
-      // snapshot manually after the confirm dialog (if any) so undo
-      // restores the EXACT state shown to the operator at the moment
-      // they hit the modal Confirm button. The captureAndBackupPhoto
-      // helper can't be used here because its internal pushUndo would
-      // run AFTER the re-projection block in the original ordering;
-      // even though re-projection only touches local variables, the
-      // explicit upfront capture eliminates any timing ambiguity.
       const cur = get()
-      const preCommitSnapshot = dataSnapshot(cur)
 
       // ---- Re-projection (re-crop only) -------------------------------
       // Pure-function compute of the re-projected geometry so the
@@ -896,23 +831,24 @@ export const useAppStore = create((set, get) => {
         }
       }
 
-      // ---- Phase 1: push the upfront snapshot manually ----------------
-      // Use the snapshot we captured at Phase 0. This snapshot has the
-      // OLD layers / sequences / clines / photoMeta / cropMeta /
-      // hasSourcePhoto, which is exactly what undo needs to restore.
+      // ---- Capture snapshot WITH embedded live photo binaries ---------
+      // Step 17 partial #5 — the snapshot pushed onto undoStack here
+      // embeds the about-to-be-replaced photo's data-URL binaries
+      // directly under _croppedBin / _sourceBin. Each commitCroppedPhoto
+      // call gets its OWN embedded backup, so multi-step undo
+      // (re-crop A→B→C, undo twice) recovers each prior photo
+      // independently — no single-slot collision like Phase B had.
+      // captureSnapWithLivePhoto reads live IDB internally, so it
+      // captures the OLD live binaries at the moment of capture
+      // (before this action's new IDB writes fire).
+      const enrichedSnap = await captureSnapWithLivePhoto()
       set((s) => {
-        const next = [...s.undoStack, preCommitSnapshot]
+        const next = [...s.undoStack, enrichedSnap]
         while (next.length > UNDO_LIMIT) next.shift()
         return { undoStack: next, redoStack: [] }
       })
 
-      // ---- Phase 2: back up live photo to _undo IDB slots --------------
-      // Decoupled from the pushUndo above so the snapshot timing is
-      // unambiguous. The IDB read sees the still-OLD live slots
-      // (commitCroppedPhoto hasn't called savePhoto for new yet).
-      await backupLivePhotoToUndoSlots()
-
-      // ---- Phase 3: decode new image + write live IDB in parallel -----
+      // ---- Decode new image + write live IDB in parallel --------------
       const [img] = await Promise.all([
         new Promise((resolve, reject) => {
           const i = new Image()
@@ -928,7 +864,7 @@ export const useAppStore = create((set, get) => {
         }),
       ])
 
-      // ---- Phase 4: single atomic apply --------------------------------
+      // ---- Single atomic apply ----------------------------------------
       // Re-projected coords (no-op if not re-crop) + new photo state.
       set({
         layers: reprojectedLayers,
@@ -1164,12 +1100,11 @@ export const useAppStore = create((set, get) => {
         // Bug A — single-entry undoStack with the pre-import snapshot.
         // Cmd+Z restores pre-import state; second Cmd+Z is a no-op
         // (button disables). Prior history is intentionally dropped to
-        // prevent cross-project bleed.
+        // prevent cross-project bleed. Photo undo data lives embedded
+        // in snapshots (Step 17 partial #5) so no separate flag reset
+        // is needed here.
         undoStack: [preImportSnapshot],
         redoStack: [],
-        // Photo undo backup is session-scoped + tied to the prior
-        // project's wipes. Reset alongside the stack reset.
-        photoUndoSlotInitialized: false,
       })
     },
 
@@ -1238,27 +1173,60 @@ export const useAppStore = create((set, get) => {
       }
 
       if (photoChanged) {
-        const result = await restorePhotoFromUndo()
-        if (result.applied) {
-          // _undo slot was valid — apply photo state from snapshot +
-          // the restored backgroundImage (decoded inside the helper).
+        // Step 17 partial #5 — read embedded photo binaries from the
+        // snapshot. Three branches:
+        //   1. Snapshot says "no photo" (photoMeta === null): clear
+        //      live IDB + apply null photo state.
+        //   2. Snapshot has photoMeta + embedded _croppedBin: write
+        //      binaries to live IDB + decode + apply photo state.
+        //   3. Snapshot has photoMeta but no _croppedBin: this happens
+        //      when the snapshot was pushed by a non-photo-wipe action
+        //      (vanilla pushUndo from addShape/etc.) AND a photo state
+        //      change has occurred since. In that case the geometry
+        //      undo "doesn't cross a photo boundary" from the operator
+        //      mental-model perspective — leave photo state as-is.
+        if (nextPhotoMeta == null) {
+          // Branch 1: snapshot says no photo.
+          await Promise.all([
+            clearPhoto('cropped').catch(() => {}),
+            clearPhoto('source').catch(() => {}),
+          ])
+          patch.photoMeta = null
+          patch.cropMeta = null
+          patch.hasSourcePhoto = false
+          patch.backgroundImage = null
+          patch.viewport = { panX: 0, panY: 0, zoom: 0 }
+        } else if (typeof next._croppedBin === 'string' && next._croppedBin.length > 0) {
+          // Branch 2: snapshot has embedded photo binary.
+          const croppedURL = next._croppedBin
+          const sourceURL = (typeof next._sourceBin === 'string' && next._sourceBin.length > 0)
+            ? next._sourceBin : null
+          await Promise.all([
+            savePhoto(croppedURL, 'cropped').catch(() => {}),
+            sourceURL
+              ? savePhoto(sourceURL, 'source').catch(() => {})
+              : clearPhoto('source').catch(() => {}),
+          ])
+          const img = await new Promise((resolve) => {
+            const i = new Image()
+            i.onload = () => resolve(i)
+            i.onerror = () => {
+              console.warn('Failed to decode embedded photo backup')
+              resolve(null)
+            }
+            i.src = croppedURL
+          })
+          patch.backgroundImage = img
           patch.photoMeta = nextPhotoMeta
           patch.cropMeta = nextCropMeta
-          patch.hasSourcePhoto = nextHasSourcePhoto
-          patch.backgroundImage = result.image
+          patch.hasSourcePhoto = !!sourceURL
           // Reset viewport so CanvasStage's backgroundImage subscription
-          // (line ~1641) re-fits the restored photo. The microtask
-          // fires `setViewport(computeFitViewport(...))` when zoom <= 0,
-          // which sizes the OLD photo correctly in the canvas (otherwise
-          // the post-recrop zoom would render the old photo at the
-          // wrong scale). Step 17 partial #4 fix.
+          // re-fits the restored photo (zoom <= 0 triggers
+          // computeFitViewport in the microtask).
           patch.viewport = { panX: 0, panY: 0, zoom: 0 }
         } else {
-          // Backup-of-backup limit hit (already consumed for an earlier
-          // photo undo this session) OR no destructive action since
-          // session start. Geometry restores; photo state stays as-is
-          // to keep store internally consistent with live IDB.
-          // photoMeta etc. are intentionally omitted from the patch.
+          // Branch 3: snapshot has photoMeta but no binary backup.
+          // Geometry-only restore; photo state stays as-is.
           console.info('Photo undo backup unavailable — geometry restored, photo unchanged.')
         }
       }
@@ -1325,12 +1293,10 @@ export const useAppStore = create((set, get) => {
         hasSourcePhoto: false,
         viewport: { panX: 0, panY: 0, zoom: 1 },
         // HARD boundary — wipe undo/redo history so the prior project's
-        // snapshots can't bleed into the cleared project via Cmd+Z.
+        // snapshots (and their embedded photo binaries) can't bleed
+        // into the cleared project via Cmd+Z.
         undoStack: [],
         redoStack: [],
-        // Photo undo backup is also session-scoped; clearing it keeps
-        // _undo slots from holding a stale photo from the prior project.
-        photoUndoSlotInitialized: false,
       })
       // Wipe persisted photos from IndexedDB so refresh doesn't bring
       // them back. Fire-and-forget — the render pipeline already
