@@ -381,8 +381,15 @@ export const useAppStore = create((set, get) => {
   //   - Race condition: rapid wipe-then-undo before captureAndBackupPhoto's
   //     IDB writes finish → operator sees stale state. Acceptable; wipes
   //     are gated on a confirm dialog or a crop modal (~human-time delay).
-  const captureAndBackupPhoto = async () => {
-    pushUndo()
+  // Step 17 partial #4 fix — split into two independent helpers so
+  // commitCroppedPhoto can capture the geometry snapshot UPFRONT (before
+  // re-projection happens in local variables) and push it manually,
+  // separately from the IDB backup. The original captureAndBackupPhoto
+  // bundled pushUndo + IDB backup; that worked for clearBackgroundImage
+  // (where state isn't being computed in local variables) but proved
+  // fragile in commitCroppedPhoto, where the snapshot timing relative
+  // to re-projection MUST be guaranteed.
+  const backupLivePhotoToUndoSlots = async () => {
     const [oldCropped, oldSource] = await Promise.all([
       loadPhoto('cropped').catch(() => null),
       loadPhoto('source').catch(() => null),
@@ -396,6 +403,12 @@ export const useAppStore = create((set, get) => {
         : clearPhoto('source_undo').catch(() => {}),
     ])
     set({ photoUndoSlotInitialized: true })
+  }
+  // Convenience wrapper for callers that don't need separate control
+  // (clearBackgroundImage). Equivalent to the prior captureAndBackupPhoto.
+  const captureAndBackupPhoto = async () => {
+    pushUndo()
+    await backupLivePhotoToUndoSlots()
   }
 
   // Returns:
@@ -820,13 +833,23 @@ export const useAppStore = create((set, get) => {
       croppedDataURL, sourceDataURL, width, height, cropMeta,
       sourceWidth, sourceHeight, isRecrop,
     }) => {
+      // ---- Phase 0: capture pre-commit snapshot UPFRONT ----------------
+      // Step 17 partial #4 fix (defensive). Snapshot the live state
+      // BEFORE any code that could possibly mutate it. We push this
+      // snapshot manually after the confirm dialog (if any) so undo
+      // restores the EXACT state shown to the operator at the moment
+      // they hit the modal Confirm button. The captureAndBackupPhoto
+      // helper can't be used here because its internal pushUndo would
+      // run AFTER the re-projection block in the original ordering;
+      // even though re-projection only touches local variables, the
+      // explicit upfront capture eliminates any timing ambiguity.
       const cur = get()
+      const preCommitSnapshot = dataSnapshot(cur)
 
       // ---- Re-projection (re-crop only) -------------------------------
-      // Preserve a pure-function snapshot of the re-projected geometry
-      // so the confirm dialog can fire BEFORE captureAndBackupPhoto +
-      // IDB writes. If the operator cancels we return without any
-      // mutation — clean abort.
+      // Pure-function compute of the re-projected geometry so the
+      // confirm dialog can fire BEFORE any state mutation or IDB
+      // backup. Cancellation here returns without any side effect.
       let reprojectedLayers = cur.layers
       let reprojectedClines = cur.clines
       let reprojectedSequences = cur.sequences
@@ -841,11 +864,6 @@ export const useAppStore = create((set, get) => {
           w: Number(sourceWidth) || 0,
           h: Number(sourceHeight) || 0,
         }
-        // Bug C — re-project every coord through source-pixel
-        // intermediate. Old crop falls back to "full source" when
-        // cropMeta is null (pre-§7.A migration; in practice the
-        // hasSourcePhoto gate on the Re-crop button prevents this from
-        // firing, but the fallback hardens the path).
         reprojectedLayers = cur.layers.map((l) => ({
           ...l,
           shapes: (l.shapes || []).map((sh) =>
@@ -862,8 +880,6 @@ export const useAppStore = create((set, get) => {
           ),
         }))
 
-        // Pre-validate: count off-canvas coords in the re-projected
-        // result. If non-zero, prompt the operator before proceeding.
         const counts = countOutOfBounds(reprojectedLayers, reprojectedClines, reprojectedSequences)
         const total = counts.shapes + counts.clines + counts.annotations
         if (total > 0) {
@@ -880,13 +896,23 @@ export const useAppStore = create((set, get) => {
         }
       }
 
-      // ---- Commit -----------------------------------------------------
-      // Order matters: captureAndBackupPhoto FIRST so the snapshot
-      // captures the OLD layers/sequences/clines + OLD photo state.
-      // Then apply the new re-projected coords + new photo state in a
-      // single atomic set() so render sees a consistent intermediate.
-      await captureAndBackupPhoto()
+      // ---- Phase 1: push the upfront snapshot manually ----------------
+      // Use the snapshot we captured at Phase 0. This snapshot has the
+      // OLD layers / sequences / clines / photoMeta / cropMeta /
+      // hasSourcePhoto, which is exactly what undo needs to restore.
+      set((s) => {
+        const next = [...s.undoStack, preCommitSnapshot]
+        while (next.length > UNDO_LIMIT) next.shift()
+        return { undoStack: next, redoStack: [] }
+      })
 
+      // ---- Phase 2: back up live photo to _undo IDB slots --------------
+      // Decoupled from the pushUndo above so the snapshot timing is
+      // unambiguous. The IDB read sees the still-OLD live slots
+      // (commitCroppedPhoto hasn't called savePhoto for new yet).
+      await backupLivePhotoToUndoSlots()
+
+      // ---- Phase 3: decode new image + write live IDB in parallel -----
       const [img] = await Promise.all([
         new Promise((resolve, reject) => {
           const i = new Image()
@@ -902,8 +928,8 @@ export const useAppStore = create((set, get) => {
         }),
       ])
 
-      // Single apply — re-projected coords (no-op if not re-crop) +
-      // new photo state. Atomic for undo: one snapshot, one set().
+      // ---- Phase 4: single atomic apply --------------------------------
+      // Re-projected coords (no-op if not re-crop) + new photo state.
       set({
         layers: reprojectedLayers,
         sequences: reprojectedSequences,
@@ -1220,6 +1246,13 @@ export const useAppStore = create((set, get) => {
           patch.cropMeta = nextCropMeta
           patch.hasSourcePhoto = nextHasSourcePhoto
           patch.backgroundImage = result.image
+          // Reset viewport so CanvasStage's backgroundImage subscription
+          // (line ~1641) re-fits the restored photo. The microtask
+          // fires `setViewport(computeFitViewport(...))` when zoom <= 0,
+          // which sizes the OLD photo correctly in the canvas (otherwise
+          // the post-recrop zoom would render the old photo at the
+          // wrong scale). Step 17 partial #4 fix.
+          patch.viewport = { panX: 0, panY: 0, zoom: 0 }
         } else {
           // Backup-of-backup limit hit (already consumed for an earlier
           // photo undo this session) OR no destructive action since
