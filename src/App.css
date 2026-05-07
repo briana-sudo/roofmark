@@ -232,10 +232,16 @@ body {
 }
 
 .canvas-toolbar {
-  height: var(--rm-toolbar-h);
+  /* Punch list P4 + P8 (May 7 2026) — toolbar wraps to multiple rows on
+   * narrow viewports instead of overflowing horizontally. `min-height`
+   * (not fixed `height`) lets the toolbar grow when `.drawing-tools`
+   * wraps; `padding: 4px 10px` gives wrapped rows breathing room.
+   * Logical groups stay together via `.tool-group` wrappers in
+   * DrawingTools.jsx + the `.tool-group` flex-wrap:nowrap rule below. */
+  min-height: var(--rm-toolbar-h);
   display: flex;
   align-items: center;
-  padding: 0 10px;
+  padding: 4px 10px;
   gap: 6px;
   background: var(--rm-panel-2);
   border-bottom: 1px solid var(--rm-border);
@@ -253,6 +259,29 @@ body {
   gap: 4px;
   align-items: center;
   flex: 1;
+  /* P4 + P8 (May 7 2026) — wrap to additional rows on narrow viewports.
+   * `row-gap: 4px` matches the inter-button gap so wrapped rows are
+   * visually balanced. `align-content` stretches wrapped rows over the
+   * available vertical space. Logical groups stay together because
+   * each `.tool-group` is `flex-wrap: nowrap` (rule below). */
+  flex-wrap: wrap;
+  row-gap: 4px;
+  align-content: center;
+}
+
+/* ---- Tool group wrapper (P4 + P8 — May 7 2026) ---- */
+/* Each contiguous segment of buttons (shape tools / cline / annotation
+ * tools / snap+grid / viewport / photo) is wrapped in `.tool-group` so
+ * the wrap boundary on `.drawing-tools` falls BETWEEN groups, not within
+ * them. Operators never see "Poly / Rect / Tri" split across two rows
+ * with "Circ / Line" alone on the next. Each group is its own flex
+ * container with nowrap so its children stay together. */
+.tool-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
 }
 
 .tool-btn {

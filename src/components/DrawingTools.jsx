@@ -173,198 +173,216 @@ export default function DrawingTools() {
 
   return (
     <div className="drawing-tools" role="toolbar" aria-label="Drawing tools">
-      {SHAPE_TOOLS.map((t) => (
-        <button
-          key={t.id}
-          type="button"
-          className={tool === t.id ? 'tool-btn active' : 'tool-btn'}
-          onClick={() => onSelect(t.id, shapeDisabled)}
-          disabled={shapeDisabled}
-          title={shapeDisabled ? 'Select a layer first' : t.label}
-          aria-pressed={tool === t.id}
-          data-tool={t.id}
-        >
-          <span className="tool-icon" aria-hidden="true">{t.icon}</span>
-          <span className="tool-name">{t.name}</span>
-        </button>
-      ))}
-
-      <span className="tool-divider" aria-hidden="true" />
-
-      <button
-        key={CLINE_TOOL.id}
-        type="button"
-        className={tool === CLINE_TOOL.id ? 'tool-btn active' : 'tool-btn'}
-        onClick={() => onSelect(CLINE_TOOL.id, clineDisabled)}
-        disabled={clineDisabled}
-        title={CLINE_TOOL.label}
-        aria-pressed={tool === CLINE_TOOL.id}
-        data-tool={CLINE_TOOL.id}
-      >
-        <span className="tool-icon" aria-hidden="true">{CLINE_TOOL.icon}</span>
-        <span className="tool-name">{CLINE_TOOL.name}</span>
-      </button>
-
-      <span className="tool-divider" aria-hidden="true" />
-
       {/*
-        Step 12 — annotation tools. Visible always (Rule 28 — discoverable
-        affordance) but disabled outside SEQUENCE mode + active sequence.
-        Hover title surfaces the gating reason on desktop; the inline hint
-        at the right of the toolbar surfaces the same reason on iPad/touch
-        where hover is unavailable.
+        Punch list P4 + P8 (May 7 2026) — `.tool-group` wrappers preserve
+        logical groupings under flex-wrap. Each group is `flex-wrap: nowrap`
+        so its contents stay together; the parent `.drawing-tools` is
+        `flex-wrap: wrap` so groups wrap as units when the canvas-area
+        narrows. Dividers sit between groups as bare children of
+        `.drawing-tools` so they collapse cleanly at wrap boundaries.
       */}
-      {ANNOTATION_TOOLS.map((t) => (
-        <button
-          key={t.id}
-          type="button"
-          className={tool === t.id ? 'tool-btn anno-btn active' : 'tool-btn anno-btn'}
-          onClick={() => onSelect(t.id, annoDisabled)}
-          disabled={annoDisabled}
-          title={annoDisabled ? annoHint : t.label}
-          aria-pressed={tool === t.id}
-          data-tool={t.id}
-        >
-          <span className="tool-icon" aria-hidden="true">{t.icon}</span>
-          <span className="tool-name">{t.name}</span>
-        </button>
-      ))}
-
-      <button
-        type="button"
-        className={clinesVisible ? 'tool-btn cline-vis active' : 'tool-btn cline-vis'}
-        onClick={toggleClinesVisibility}
-        title={clinesVisible ? 'Hide construction lines' : 'Show construction lines'}
-        aria-pressed={clinesVisible}
-        data-testid="btn-clines-vis"
-      >
-        <span className="tool-icon" aria-hidden="true">👁</span>
-        <span className="tool-name">CLines</span>
-      </button>
+      {/* Group 1: Shape tools (Poly / Rect / Tri / Circ / Line) */}
+      <div className="tool-group" data-tool-group="shape">
+        {SHAPE_TOOLS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={tool === t.id ? 'tool-btn active' : 'tool-btn'}
+            onClick={() => onSelect(t.id, shapeDisabled)}
+            disabled={shapeDisabled}
+            title={shapeDisabled ? 'Select a layer first' : t.label}
+            aria-pressed={tool === t.id}
+            data-tool={t.id}
+          >
+            <span className="tool-icon" aria-hidden="true">{t.icon}</span>
+            <span className="tool-name">{t.name}</span>
+          </button>
+        ))}
+      </div>
 
       <span className="tool-divider" aria-hidden="true" />
 
-      <button
-        type="button"
-        className={snapEnabled ? 'tool-btn snap-toggle active' : 'tool-btn snap-toggle'}
-        onClick={toggleSnap}
-        title={snapEnabled ? 'Disable snap' : 'Enable snap'}
-        aria-pressed={snapEnabled}
-        data-testid="btn-snap"
-      >
-        <span className="tool-icon" aria-hidden="true">⊞</span>
-        <span className="tool-name">Snap</span>
-      </button>
+      {/* Group 2: Construction line tool */}
+      <div className="tool-group" data-tool-group="cline">
+        <button
+          key={CLINE_TOOL.id}
+          type="button"
+          className={tool === CLINE_TOOL.id ? 'tool-btn active' : 'tool-btn'}
+          onClick={() => onSelect(CLINE_TOOL.id, clineDisabled)}
+          disabled={clineDisabled}
+          title={CLINE_TOOL.label}
+          aria-pressed={tool === CLINE_TOOL.id}
+          data-tool={CLINE_TOOL.id}
+        >
+          <span className="tool-icon" aria-hidden="true">{CLINE_TOOL.icon}</span>
+          <span className="tool-name">{CLINE_TOOL.name}</span>
+        </button>
+      </div>
 
-      <button
-        type="button"
-        className={gridEnabled ? 'tool-btn grid-toggle active' : 'tool-btn grid-toggle'}
-        onClick={toggleGrid}
-        title={gridEnabled ? 'Disable grid snap' : 'Enable grid snap'}
-        aria-pressed={gridEnabled}
-        data-testid="btn-grid"
-      >
-        <span className="tool-icon" aria-hidden="true">▦</span>
-        <span className="tool-name">Grid</span>
-      </button>
+      <span className="tool-divider" aria-hidden="true" />
 
-      {/*
-        Grid X / Grid Y inputs — Step 10 / P12 + P14.
-        Independent X and Y spacing for rectangular grids (e.g. standing-seam
-        panel layouts: X = 24 px = 1", Y = 384 px = 16" panel width). Default
-        20×20 keeps Step 7 square-grid behavior. Clamped to positive integers
-        in `setGridSizeAxis`.
-      */}
-      <label className="grid-axis-input" title="Grid X spacing in pixels">
-        <span className="grid-axis-label">X</span>
+      {/* Group 3: Annotation tools + CLines visibility toggle.
+          Step 12 — annotation tools. Visible always (Rule 28 — discoverable
+          affordance) but disabled outside SEQUENCE mode + active sequence.
+          Hover title surfaces the gating reason on desktop; the inline hint
+          at the right of the toolbar surfaces the same reason on iPad/touch
+          where hover is unavailable. */}
+      <div className="tool-group" data-tool-group="annotation">
+        {ANNOTATION_TOOLS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={tool === t.id ? 'tool-btn anno-btn active' : 'tool-btn anno-btn'}
+            onClick={() => onSelect(t.id, annoDisabled)}
+            disabled={annoDisabled}
+            title={annoDisabled ? annoHint : t.label}
+            aria-pressed={tool === t.id}
+            data-tool={t.id}
+          >
+            <span className="tool-icon" aria-hidden="true">{t.icon}</span>
+            <span className="tool-name">{t.name}</span>
+          </button>
+        ))}
+        <button
+          type="button"
+          className={clinesVisible ? 'tool-btn cline-vis active' : 'tool-btn cline-vis'}
+          onClick={toggleClinesVisibility}
+          title={clinesVisible ? 'Hide construction lines' : 'Show construction lines'}
+          aria-pressed={clinesVisible}
+          data-testid="btn-clines-vis"
+        >
+          <span className="tool-icon" aria-hidden="true">👁</span>
+          <span className="tool-name">CLines</span>
+        </button>
+      </div>
+
+      <span className="tool-divider" aria-hidden="true" />
+
+      {/* Group 4: Snap + Grid + Grid X/Y inputs.
+          Grid X / Grid Y inputs — Step 10 / P12 + P14.
+          Independent X and Y spacing for rectangular grids (e.g. standing-
+          seam panel layouts: X = 24 px = 1", Y = 384 px = 16" panel width).
+          Default 20×20 keeps Step 7 square-grid behavior. Clamped to
+          positive integers in `setGridSizeAxis`. */}
+      <div className="tool-group" data-tool-group="snap-grid">
+        <button
+          type="button"
+          className={snapEnabled ? 'tool-btn snap-toggle active' : 'tool-btn snap-toggle'}
+          onClick={toggleSnap}
+          title={snapEnabled ? 'Disable snap' : 'Enable snap'}
+          aria-pressed={snapEnabled}
+          data-testid="btn-snap"
+        >
+          <span className="tool-icon" aria-hidden="true">⊞</span>
+          <span className="tool-name">Snap</span>
+        </button>
+        <button
+          type="button"
+          className={gridEnabled ? 'tool-btn grid-toggle active' : 'tool-btn grid-toggle'}
+          onClick={toggleGrid}
+          title={gridEnabled ? 'Disable grid snap' : 'Enable grid snap'}
+          aria-pressed={gridEnabled}
+          data-testid="btn-grid"
+        >
+          <span className="tool-icon" aria-hidden="true">▦</span>
+          <span className="tool-name">Grid</span>
+        </button>
+        <label className="grid-axis-input" title="Grid X spacing in pixels">
+          <span className="grid-axis-label">X</span>
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value={gridSize?.x ?? 20}
+            onChange={(e) => setGridSizeAxis('x', e.target.value)}
+            data-testid="input-grid-x"
+          />
+        </label>
+        <label className="grid-axis-input" title="Grid Y spacing in pixels">
+          <span className="grid-axis-label">Y</span>
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value={gridSize?.y ?? 20}
+            onChange={(e) => setGridSizeAxis('y', e.target.value)}
+            data-testid="input-grid-y"
+          />
+        </label>
+      </div>
+
+      <span className="tool-divider" aria-hidden="true" />
+
+      {/* Group 5: Viewport controls.
+          Section 7.A.5 — viewport controls. Visible always (Rule 28); cyan
+          tint differentiates them from drawing / annotation tools. Status
+          bar carries the live zoom readout for verification. */}
+      <div className="tool-group" data-tool-group="viewport">
+        <button
+          type="button"
+          className="tool-btn viewport-btn"
+          onClick={onZoomOut}
+          title="Zoom out (- key)"
+          data-testid="btn-zoom-out"
+        >
+          <span className="tool-icon" aria-hidden="true">🔍−</span>
+        </button>
+        <button
+          type="button"
+          className="tool-btn viewport-btn"
+          onClick={onZoomIn}
+          title="Zoom in (+ key)"
+          data-testid="btn-zoom-in"
+        >
+          <span className="tool-icon" aria-hidden="true">🔍+</span>
+        </button>
+        <button
+          type="button"
+          className="tool-btn viewport-btn"
+          onClick={onFit}
+          title="Fit photo to viewport (0 key)"
+          data-testid="btn-fit"
+        >
+          <span className="tool-icon" aria-hidden="true">⊡</span>
+          <span className="tool-name">Fit</span>
+        </button>
+      </div>
+
+      <span className="tool-divider" aria-hidden="true" />
+
+      {/* Group 6: Photo (load + clear). The hidden file input lives inside
+          the group so it stays mounted alongside the photo button. */}
+      <div className="tool-group" data-tool-group="photo">
+        <button
+          type="button"
+          className={backgroundImage ? 'tool-btn photo-btn active' : 'tool-btn photo-btn'}
+          onClick={onPickPhoto}
+          title={backgroundImage ? 'Replace background photo' : 'Load background photo'}
+          data-testid="btn-photo"
+        >
+          <span className="tool-icon" aria-hidden="true">📷</span>
+          <span className="tool-name">Photo</span>
+        </button>
+        {backgroundImage && (
+          <button
+            type="button"
+            className="tool-btn photo-clear"
+            onClick={onClearPhoto}
+            title="Clear background photo"
+            data-testid="btn-photo-clear"
+          >
+            <span className="tool-icon" aria-hidden="true">✕</span>
+          </button>
+        )}
         <input
-          type="number"
-          min="1"
-          step="1"
-          value={gridSize?.x ?? 20}
-          onChange={(e) => setGridSizeAxis('x', e.target.value)}
-          data-testid="input-grid-x"
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          onChange={onPhotoFile}
+          style={{ display: 'none' }}
+          data-testid="photo-file-input"
         />
-      </label>
-      <label className="grid-axis-input" title="Grid Y spacing in pixels">
-        <span className="grid-axis-label">Y</span>
-        <input
-          type="number"
-          min="1"
-          step="1"
-          value={gridSize?.y ?? 20}
-          onChange={(e) => setGridSizeAxis('y', e.target.value)}
-          data-testid="input-grid-y"
-        />
-      </label>
-
-      <span className="tool-divider" aria-hidden="true" />
-
-      {/*
-        Section 7.A.5 — viewport controls. Visible always (Rule 28); cyan
-        tint differentiates them from drawing / annotation tools. Status
-        bar carries the live zoom readout for verification.
-      */}
-      <button
-        type="button"
-        className="tool-btn viewport-btn"
-        onClick={onZoomOut}
-        title="Zoom out (- key)"
-        data-testid="btn-zoom-out"
-      >
-        <span className="tool-icon" aria-hidden="true">🔍−</span>
-      </button>
-      <button
-        type="button"
-        className="tool-btn viewport-btn"
-        onClick={onZoomIn}
-        title="Zoom in (+ key)"
-        data-testid="btn-zoom-in"
-      >
-        <span className="tool-icon" aria-hidden="true">🔍+</span>
-      </button>
-      <button
-        type="button"
-        className="tool-btn viewport-btn"
-        onClick={onFit}
-        title="Fit photo to viewport (0 key)"
-        data-testid="btn-fit"
-      >
-        <span className="tool-icon" aria-hidden="true">⊡</span>
-        <span className="tool-name">Fit</span>
-      </button>
-
-      <span className="tool-divider" aria-hidden="true" />
-
-      <button
-        type="button"
-        className={backgroundImage ? 'tool-btn photo-btn active' : 'tool-btn photo-btn'}
-        onClick={onPickPhoto}
-        title={backgroundImage ? 'Replace background photo' : 'Load background photo'}
-        data-testid="btn-photo"
-      >
-        <span className="tool-icon" aria-hidden="true">📷</span>
-        <span className="tool-name">Photo</span>
-      </button>
-      {backgroundImage && (
-        <button
-          type="button"
-          className="tool-btn photo-clear"
-          onClick={onClearPhoto}
-          title="Clear background photo"
-          data-testid="btn-photo-clear"
-        >
-          <span className="tool-icon" aria-hidden="true">✕</span>
-        </button>
-      )}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        onChange={onPhotoFile}
-        style={{ display: 'none' }}
-        data-testid="photo-file-input"
-      />
+      </div>
 
       {shapeDisabled && <span className="tool-hint">Select a layer to draw shapes</span>}
       {pendingSource && (
