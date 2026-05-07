@@ -880,7 +880,25 @@ export const useAppStore = create((set, get) => {
     },
 
     // ============ Selection (Spec §9) =======================================
-    setSelected: (sel) => set({ selected: sel }),
+    // P17 (May 5 2026) — selecting a shape in EDIT mode also activates its
+    // parent layer so a subsequent mode-switch to DRAW picks up where the
+    // operator's attention left off. Skipped when sel is null (deselect)
+    // or sel.shapeId is null/missing, and when mode isn't EDIT — those
+    // cases were never the bug. Only EDIT-mode shape selection auto-
+    // activates; explicit setActiveLayer calls remain authoritative if
+    // the operator wants to keep their drawing layer separate.
+    setSelected: (sel) =>
+      set((s) => {
+        const shouldActivate =
+          sel
+          && sel.shapeId != null
+          && sel.layerId != null
+          && s.mode === 'EDIT'
+        if (shouldActivate) {
+          return { selected: sel, activeLayerId: sel.layerId }
+        }
+        return { selected: sel }
+      }),
     clearSelection: () => set({ selected: null }),
 
     // Step 13 — annotation panel selection. setSelectedAnnotation accepts

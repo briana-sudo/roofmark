@@ -8,6 +8,7 @@ import PropertiesPanel from './components/PropertiesPanel'
 import SequencePanel from './components/SequencePanel'
 import AnnotationPanel from './components/AnnotationPanel'
 import PhotoPanel from './components/PhotoPanel'
+import HelpPopover from './components/HelpPopover'
 import HeaderMenu from './components/HeaderMenu'
 import './App.css'
 
@@ -191,6 +192,14 @@ export default function App() {
         <span className={`hdr-save state-${saveState}`} data-slot="save">
           ● {saveState}
         </span>
+        {/*
+          Punch list P11.b (May 5 2026) — in-app quick reference popover
+          for keyboard shortcuts + UI tour. Sits between the autosave
+          indicator and the ⋮ Project menu so the right-side cluster
+          reads "feedback (autosave) / help / project actions" left to
+          right.
+        */}
+        <HelpPopover />
         {/*
           Step 14 — persistent-header project menu (Spec §3 / §14).
           Hosts destructive / housekeeping actions; Step 14 ships New

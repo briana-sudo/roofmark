@@ -756,6 +756,113 @@ const reprojCirc = _reprojCircle(circle, FULL, cropHalfW, SRC)
 pass('Bug C — circle r doubles when crop width halves',
   _approx(reprojCirc.r, 0.2, 1e-9))
 
+// 9h. Punch list batch — P10 / P11.b / P17 / P18 (May 5 2026).
+// Pure-JS mirrors of the new behaviors so the assertions can run in
+// the existing block-test harness without DOM. Component-level UI
+// rendering is verified at operator-pass time on the live URL.
+
+// 9h-P17. setSelected auto-activates parent layer in EDIT mode.
+function applySetSelected(state, sel) {
+  const shouldActivate = sel && sel.shapeId != null && sel.layerId != null && state.mode === 'EDIT'
+  if (shouldActivate) {
+    return { ...state, selected: sel, activeLayerId: sel.layerId }
+  }
+  return { ...state, selected: sel }
+}
+{
+  // EDIT mode + valid shape selection → activeLayerId switches to selected.layerId
+  const before = { mode: 'EDIT', selected: null, activeLayerId: 'l1' }
+  const after = applySetSelected(before, { layerId: 'l2', shapeId: 'sh3' })
+  pass('P17 — EDIT + select shape on l2 sets activeLayerId to l2',
+    after.activeLayerId === 'l2' && after.selected.layerId === 'l2' && after.selected.shapeId === 'sh3')
+}
+{
+  // EDIT mode + null deselection → activeLayerId UNCHANGED
+  const before = { mode: 'EDIT', selected: { layerId: 'l1', shapeId: 'sh1' }, activeLayerId: 'l1' }
+  const after = applySetSelected(before, null)
+  pass('P17 — EDIT + deselect (null) does NOT change activeLayerId',
+    after.activeLayerId === 'l1' && after.selected === null)
+}
+{
+  // EDIT mode + selection with shapeId === null → no auto-activate
+  const before = { mode: 'EDIT', selected: null, activeLayerId: 'l1' }
+  const after = applySetSelected(before, { layerId: 'l2', shapeId: null })
+  pass('P17 — EDIT + selection with shapeId=null does NOT activate',
+    after.activeLayerId === 'l1')
+}
+{
+  // DRAW mode + valid shape selection → activeLayerId UNCHANGED
+  const before = { mode: 'DRAW', selected: null, activeLayerId: 'l1' }
+  const after = applySetSelected(before, { layerId: 'l2', shapeId: 'sh3' })
+  pass('P17 — DRAW mode does NOT auto-activate parent on selection',
+    after.activeLayerId === 'l1' && after.selected.layerId === 'l2')
+}
+{
+  // SEQUENCE mode + valid shape selection → activeLayerId UNCHANGED
+  const before = { mode: 'SEQUENCE', selected: null, activeLayerId: 'l1' }
+  const after = applySetSelected(before, { layerId: 'l2', shapeId: 'sh3' })
+  pass('P17 — SEQUENCE mode does NOT auto-activate parent on selection',
+    after.activeLayerId === 'l1')
+}
+
+// 9h-P18. Move-to-layer dropdown gate logic + option exclusion.
+function showMoveToLayerGate(state) {
+  return Boolean(
+    state.mode === 'EDIT'
+    && state.selected
+    && state.selected.shapeId != null
+    && state.selected.layerId != null
+    && state.layers.length > 1
+  )
+}
+function moveTargetsFor(state) {
+  if (!showMoveToLayerGate(state)) return []
+  return state.layers.filter((l) => l.id !== state.selected.layerId)
+}
+{
+  const state = {
+    mode: 'EDIT',
+    selected: { layerId: 'l1', shapeId: 'sh1' },
+    layers: [{ id: 'l1', name: 'Roof' }, { id: 'l2', name: 'Gutter' }, { id: 'l3', name: 'Flashing' }],
+  }
+  pass('P18 — gate fires in EDIT with selection + 2+ layers', showMoveToLayerGate(state) === true)
+  const targets = moveTargetsFor(state)
+  pass('P18 — targets exclude shape\'s parent layer', targets.length === 2 && !targets.some((l) => l.id === 'l1'))
+  pass('P18 — targets include other layers', targets.some((l) => l.id === 'l2') && targets.some((l) => l.id === 'l3'))
+}
+{
+  // Single layer → no dropdown (no targets to move to)
+  const state = {
+    mode: 'EDIT',
+    selected: { layerId: 'l1', shapeId: 'sh1' },
+    layers: [{ id: 'l1', name: 'Roof' }],
+  }
+  pass('P18 — gate does NOT fire when only one layer exists', showMoveToLayerGate(state) === false)
+}
+{
+  // No selection → no dropdown
+  const state = { mode: 'EDIT', selected: null, layers: [{ id: 'l1' }, { id: 'l2' }] }
+  pass('P18 — gate does NOT fire when no shape selected', showMoveToLayerGate(state) === false)
+}
+{
+  // Wrong mode → no dropdown
+  const state = {
+    mode: 'DRAW',
+    selected: { layerId: 'l1', shapeId: 'sh1' },
+    layers: [{ id: 'l1' }, { id: 'l2' }],
+  }
+  pass('P18 — gate does NOT fire in DRAW mode', showMoveToLayerGate(state) === false)
+}
+{
+  // P17 + P18 composition: in EDIT mode, after selection, activeLayerId
+  // and selected.layerId should match. The dropdown excludes the right
+  // layer either way (since selected.layerId is the source of truth).
+  const initialState = { mode: 'EDIT', selected: null, activeLayerId: 'l1' }
+  const afterSelect = applySetSelected(initialState, { layerId: 'l2', shapeId: 'sh3' })
+  pass('P17+P18 — after EDIT-mode selection, activeLayerId tracks selected.layerId',
+    afterSelect.activeLayerId === afterSelect.selected.layerId)
+}
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {

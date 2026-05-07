@@ -44,6 +44,13 @@ export default function PropertiesPanel() {
   const layer = useAppStore((s) =>
     s.layers.find((l) => l.id === activeLayerId) || null
   )
+  // P18 (May 5 2026) — when a shape is selected in EDIT mode, expose a
+  // "Move to layer…" dropdown so the operator can reassign it without
+  // hunting for the right-click context menu. Subscribe to mode +
+  // selected + layers so the dropdown reflects current state.
+  const mode = useAppStore((s) => s.mode)
+  const selected = useAppStore((s) => s.selected)
+  const layers = useAppStore((s) => s.layers)
 
   if (!layer) {
     return (
@@ -59,6 +66,28 @@ export default function PropertiesPanel() {
   const setColor = (color) => useAppStore.getState().setLayerColor(layer.id, color)
   const setProps = (partial) => useAppStore.getState().updateLayerProps(layer.id, partial)
 
+  // P18 — dropdown options exclude the shape's CURRENT parent layer
+  // (selected.layerId). Note that after P17 selected.layerId ===
+  // activeLayerId in EDIT mode, but using selected.layerId here is the
+  // robust choice if the operator changes activeLayerId via LayerPanel
+  // while a shape is still selected.
+  const showMoveToLayer =
+    mode === 'EDIT'
+    && selected
+    && selected.shapeId != null
+    && selected.layerId != null
+    && layers.length > 1
+  const moveTargets = showMoveToLayer
+    ? layers.filter((l) => l.id !== selected.layerId)
+    : []
+  const onMoveToLayer = (e) => {
+    const targetId = e.target.value
+    if (!targetId) return
+    useAppStore.getState().moveShapeToLayer(selected.layerId, selected.shapeId, targetId)
+    // Native <select> resets to "" after the controlled value="" prop
+    // re-renders — no manual reset needed.
+  }
+
   // Match LayerPanel's defaults so a freshly-added layer renders predictably
   // even before the operator touches any slider.
   const fillOn = layer.fillOn !== false
@@ -73,6 +102,33 @@ export default function PropertiesPanel() {
         <span className="panel-title">{layer.name || 'Layer'}</span>
       </div>
       <div className="panel-body props-body">
+        {/* P18 — Selected Shape section. Only renders in EDIT mode with
+            a shape selected AND at least one OTHER layer to move to.
+            Sits above the per-layer Color/Fill/Stroke sections so the
+            shape-scoped action is visually distinct from the layer-
+            scoped editing controls. */}
+        {showMoveToLayer && (
+          <section className="props-section selected-shape-section" aria-label="Selected shape">
+            <div className="props-section-title">Selected Shape</div>
+            <label className="prop-row prop-move-to">
+              <span className="prop-label">Move to:</span>
+              <select
+                className="prop-move-select"
+                value=""
+                onChange={onMoveToLayer}
+                onMouseDown={(e) => e.stopPropagation()}
+                title="Reassign this shape to a different layer"
+                aria-label="Move shape to layer"
+                data-testid="prop-move-to-layer"
+              >
+                <option value="">Choose layer…</option>
+                {moveTargets.map((l) => (
+                  <option key={l.id} value={l.id}>{l.name || 'Layer'}</option>
+                ))}
+              </select>
+            </label>
+          </section>
+        )}
         <section className="props-section" aria-label="Color">
           <div className="props-section-title">Color</div>
           <div className="color-palette" role="radiogroup" aria-label="Layer color palette">
