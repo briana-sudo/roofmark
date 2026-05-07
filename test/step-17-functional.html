@@ -441,6 +441,100 @@ pass('photo tab visible in SEQUENCE mode with photo loaded',
 pass('annotations tab still falls back without active sequence',
   effectiveDrawerTabFor({ drawerTab: 'annotations', mode: 'SEQUENCE', activeSeqId: null, photoMeta: null }) === 'properties')
 
+// 9f. Bug A — clearAll + importJSON stack hygiene (cross-project undo
+// bleed prevention). Mirror of useAppStore.js clearAll + importJSON
+// post-fix. clearAll wipes both stacks; importJSON keeps a single
+// pre-import snapshot so "Cmd+Z to undo my Load" works but second
+// Cmd+Z is a no-op.
+function applyClearAll(state) {
+  // Mirror of clearAll in useAppStore.js — Bug A version (no pushUndo,
+  // stacks wiped).
+  return {
+    ...state,
+    layers: [],
+    sequences: [],
+    clines: [],
+    activeLayerId: null,
+    activeSeqId: null,
+    backgroundImage: null,
+    photoMeta: null,
+    cropMeta: null,
+    hasSourcePhoto: false,
+    undoStack: [],
+    redoStack: [],
+    photoUndoSlotInitialized: false,
+  }
+}
+function applyImportJSON(state, importedSlice) {
+  // Mirror of importJSON Bug A version: capture pre-import snapshot,
+  // apply imported state, replace undoStack with [snapshot] + clear
+  // redoStack.
+  const preImportSnapshot = JSON.stringify({
+    layers: state.layers, sequences: state.sequences, clines: state.clines,
+    photoMeta: state.photoMeta || null, cropMeta: state.cropMeta || null,
+    hasSourcePhoto: !!state.hasSourcePhoto,
+  })
+  return {
+    ...state,
+    ...importedSlice,
+    undoStack: [preImportSnapshot],
+    redoStack: [],
+  }
+}
+
+// Setup: a state with populated stacks + content
+const populatedState = {
+  layers: [{ id: 'l1', name: 'Roof', shapes: [{ id: 'sh1', type: 'rect', pts: [{x:0.1,y:0.1},{x:0.9,y:0.1},{x:0.9,y:0.9},{x:0.1,y:0.9}] }] }],
+  sequences: [{ id: 's1', annotations: [] }],
+  clines: [{ id: 'cl1', type: 'h', y: 0.5 }],
+  activeLayerId: 'l1',
+  photoMeta: { width: 1920, height: 1080 },
+  cropMeta: { x: 0, y: 0, w: 1920, h: 1080, rotation: 0 },
+  hasSourcePhoto: true,
+  undoStack: ['snap-A', 'snap-B', 'snap-C'], // 3 prior snapshots
+  redoStack: ['redo-X'],
+  photoUndoSlotInitialized: true,
+}
+
+// 9f-1. clearAll wipes both stacks
+const cleared = applyClearAll(populatedState)
+pass('Bug A — clearAll: layers wiped', cleared.layers.length === 0)
+pass('Bug A — clearAll: sequences wiped', cleared.sequences.length === 0)
+pass('Bug A — clearAll: clines wiped', cleared.clines.length === 0)
+pass('Bug A — clearAll: photoMeta wiped', cleared.photoMeta === null)
+pass('Bug A — clearAll: undoStack EMPTY (no cross-project bleed)', cleared.undoStack.length === 0)
+pass('Bug A — clearAll: redoStack EMPTY', cleared.redoStack.length === 0)
+pass('Bug A — clearAll: photoUndoSlotInitialized = false', cleared.photoUndoSlotInitialized === false)
+
+// 9f-2. importJSON keeps single pre-import snapshot, clears redoStack
+const afterImport = applyImportJSON(populatedState, {
+  layers: [{ id: 'l99', name: 'Loaded', shapes: [] }],
+  sequences: [],
+  clines: [],
+  photoMeta: { width: 800, height: 600 },
+  cropMeta: { x: 0, y: 0, w: 800, h: 600, rotation: 0 },
+  hasSourcePhoto: false,
+})
+pass('Bug A — importJSON: imported layers applied', afterImport.layers[0].id === 'l99')
+pass('Bug A — importJSON: undoStack length === 1 (only pre-import snapshot)', afterImport.undoStack.length === 1)
+pass('Bug A — importJSON: redoStack EMPTY', afterImport.redoStack.length === 0)
+
+// 9f-3. The single undoStack entry contains the pre-import state
+const reparsedSnap = JSON.parse(afterImport.undoStack[0])
+pass('Bug A — importJSON: pre-import snapshot has populated layers', reparsedSnap.layers.length === 1)
+pass('Bug A — importJSON: pre-import snapshot preserves shape', deepEqualJSON(reparsedSnap.layers, populatedState.layers))
+pass('Bug A — importJSON: pre-import snapshot preserves clines', deepEqualJSON(reparsedSnap.clines, populatedState.clines))
+pass('Bug A — importJSON: pre-import snapshot preserves photoMeta', deepEqualJSON(reparsedSnap.photoMeta, populatedState.photoMeta))
+
+// 9f-4. Simulating "second Cmd+Z after Load" — pop the only entry,
+// stack becomes empty, button auto-disables.
+const afterFirstUndo = { ...afterImport, undoStack: afterImport.undoStack.slice(0, -1) }
+pass('Bug A — Load + 1st undo: undoStack EMPTY (button disables)', afterFirstUndo.undoStack.length === 0)
+
+// 9f-5. clearAll + Cmd+Z attempted — undoStack remains empty, button stays disabled
+pass('Bug A — clearAll + attempted undo: stack stays empty', cleared.undoStack.length === 0)
+pass('Bug A — undo button disable condition (length===0) holds after clearAll', (cleared.undoStack.length === 0))
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {

@@ -962,7 +962,16 @@ export const useAppStore = create((set, get) => {
       if (!SUPPORTED_IMPORT_VERSIONS.has(obj.schemaVersion)) {
         throw new Error(`Schema version mismatch: file is v${obj.schemaVersion}, app supports v1, v2.`)
       }
-      pushUndo()
+      // Step 17 partial-completion #3 (Bug A) — capture pre-import
+      // snapshot so Cmd+Z can undo the Load (operator-friendly: "I
+      // didn't mean to overwrite my project"). The snapshot is the ONLY
+      // entry on the post-import undoStack — prior history is dropped
+      // so Cmd+Z chains can't walk back into the previous project's
+      // shape/photo state. Inverse of clearAll which drops the stack
+      // entirely; here one entry stays so the import itself is
+      // reversible. Inserted into the set() below alongside imported
+      // state.
+      const preImportSnapshot = dataSnapshot(get())
       reseedCounters(obj)
       // Validate inbound fields the same way hydration does so a
       // hand-edited or older-version JSON file doesn't corrupt state.
@@ -1035,6 +1044,15 @@ export const useAppStore = create((set, get) => {
         selected: null,
         selectedAnnotation: null,
         tool: null,
+        // Bug A — single-entry undoStack with the pre-import snapshot.
+        // Cmd+Z restores pre-import state; second Cmd+Z is a no-op
+        // (button disables). Prior history is intentionally dropped to
+        // prevent cross-project bleed.
+        undoStack: [preImportSnapshot],
+        redoStack: [],
+        // Photo undo backup is session-scoped + tied to the prior
+        // project's wipes. Reset alongside the stack reset.
+        photoUndoSlotInitialized: false,
       })
     },
 
@@ -1153,10 +1171,22 @@ export const useAppStore = create((set, get) => {
     // (working + source) from both the store and IndexedDB, and resets
     // the viewport. Job context is intentionally preserved so the
     // operator can spin up a new markup pass for the same job without
-    // re-selecting the address. Undo restores everything in one step
-    // (the snapshot pushed before the reset includes all data fields).
+    // re-selecting the address.
+    //
+    // Step 17 partial-completion #3 (Bug A) — clearAll is now a HARD
+    // boundary. The undo + redo stacks are wiped along with the rest
+    // of project state, so Cmd+Z after New Project does nothing (the
+    // ↩ Undo button auto-disables via the existing length===0 logic
+    // in App.jsx:118-119). The previous behavior pushed a pre-clear
+    // snapshot onto the stack so Cmd+Z could "undo the New Project
+    // action," but in practice that bled the prior project's history
+    // into the supposedly-fresh project — a Cmd+Z chain after New
+    // Project would walk back through layers/shapes from the previous
+    // job. The confirm dialog already warns operators that New Project
+    // is destructive; making the boundary irrevocable matches that
+    // contract. Operators who want to recover prior work use Save +
+    // Load JSON instead.
     clearAll: () => {
-      pushUndo()
       set({
         layers: [],
         sequences: [],
@@ -1170,14 +1200,24 @@ export const useAppStore = create((set, get) => {
         cropMeta: null,
         hasSourcePhoto: false,
         viewport: { panX: 0, panY: 0, zoom: 1 },
+        // HARD boundary — wipe undo/redo history so the prior project's
+        // snapshots can't bleed into the cleared project via Cmd+Z.
+        undoStack: [],
+        redoStack: [],
+        // Photo undo backup is also session-scoped; clearing it keeps
+        // _undo slots from holding a stale photo from the prior project.
+        photoUndoSlotInitialized: false,
       })
       // Wipe persisted photos from IndexedDB so refresh doesn't bring
       // them back. Fire-and-forget — the render pipeline already
-      // reflects the in-memory clear.
+      // reflects the in-memory clear. Also wipe _undo slots so a
+      // stale backup from the prior project doesn't survive the boundary.
       if (typeof window !== 'undefined') {
         clearPhoto('cropped').catch(() => {})
         clearPhoto('source').catch(() => {})
         clearPhoto('background').catch(() => {})
+        clearPhoto('cropped_undo').catch(() => {})
+        clearPhoto('source_undo').catch(() => {})
       }
     },
   }
