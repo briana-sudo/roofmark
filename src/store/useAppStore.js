@@ -104,6 +104,9 @@ const PERSIST_KEYS = [
   'gridSize', 'rightDrawerOpen', 'drawerTab',
   'mode', 'activeLayerId', 'activeSeqId',
   'viewport', 'photoMeta', 'cropMeta',
+  // P2 + P19 (May 7 2026) — per-snap-type gates + grid opacity persist
+  // alongside other UI flags so operator settings survive reload.
+  'snapTypes', 'gridOpacity',
 ]
 const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE', 'TECHNICAL'])
 // Step 13 — third tab for the per-annotation editing panel. The tab button
@@ -150,6 +153,31 @@ const normalizeGridSize = (g) => {
     return { x: g.x, y: g.y }
   }
   return { x: 20, y: 20 }
+}
+
+// P2 (May 7 2026) — per-snap-type gates. All five default true so
+// existing snapEnabled-only behavior is preserved on first load.
+// Hydration accepts a partial object and fills in missing keys with
+// the default true (forward-compatible if new snap types are added).
+const SNAP_TYPE_KEYS = ['close', 'grid', 'corner', 'midpoint', 'cline']
+const normalizeSnapTypes = (st) => {
+  const out = {}
+  for (const k of SNAP_TYPE_KEYS) {
+    out[k] = st && typeof st === 'object' && st[k] === false ? false : true
+  }
+  return out
+}
+
+// P19 (May 7 2026) — grid line opacity. Clamp to [0.05, 0.6] so
+// operator can go subtler than the default or bolder, but can't
+// vanish the grid entirely or drown the photo.
+const GRID_OPACITY_MIN = 0.05
+const GRID_OPACITY_MAX = 0.6
+const GRID_OPACITY_DEFAULT = 0.16
+const normalizeGridOpacity = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return GRID_OPACITY_DEFAULT
+  return Math.min(GRID_OPACITY_MAX, Math.max(GRID_OPACITY_MIN, n))
 }
 
 const loadFromStorage = () => {
@@ -229,11 +257,21 @@ const initialState = {
   ) ? hydrated.activeSeqId : null,
 
   snapEnabled: true,
+  // P2 (May 7 2026) — per-snap-type gates. All five default true so
+  // operators who don't open the Snap chevron see existing behavior.
+  // Master snapEnabled stays as the global on/off; per-type gates are
+  // independent (no master cascade — toggling Snap off then on doesn't
+  // reset per-type state).
+  snapTypes: normalizeSnapTypes(hydrated?.snapTypes),
   gridEnabled: false,
   // Step 10 / P12+P14 — grid spacing is operator-adjustable AND independently
   // sized on X and Y axes (rectangular grid for standing-seam panel layouts).
   // Default 20×20 px keeps the Step 7 square-grid behavior unchanged.
   gridSize: normalizeGridSize(hydrated?.gridSize),
+  // P19 (May 7 2026) — operator-adjustable grid line opacity (0.05–0.6).
+  // Default 0.16 matches the prior hardcoded value, so first-load
+  // appearance is unchanged.
+  gridOpacity: normalizeGridOpacity(hydrated?.gridOpacity),
   snapTolerance: 12,      // 12 mouse / 22 touch (Spec §8 amendment)
   pointerType: 'mouse',
 
@@ -982,7 +1020,10 @@ export const useAppStore = create((set, get) => {
       })),
     setTool: (tool) => set({ tool }),
     setCursor: (x, y) => set({ cursorX: x, cursorY: y }),
-    setSnapType: (snapType) => set({ snapType }),
+    // (Old setSnapType: (snapType) => set({ snapType }) was vestigial dead
+    // code with no callers — setSnap below writes both snapPt + snapType
+    // atomically. Removed May 7 2026 to free the name for P2's per-type
+    // gate setter below.)
     // Spec §8 — full snap point setter (writes both snapPt and snapType in
     // one mutation so subscribers see a coherent snap result). Pass null to
     // clear the snap.
@@ -991,7 +1032,20 @@ export const useAppStore = create((set, get) => {
       snapType: snapPt?.type ?? null,
     }),
     toggleSnap: () => set((s) => ({ snapEnabled: !s.snapEnabled })),
+    // P2 (May 7 2026) — per-snap-type toggle. Validates name against
+    // SNAP_TYPE_KEYS so unknown types are silently rejected. Operator
+    // calls this from the SnapMenu chip; computeSnap reads
+    // s.snapTypes[name] before each branch. Master snapEnabled stays
+    // independent — flipping it off bypasses all per-type gates.
+    setSnapType: (name, enabled) => {
+      if (!SNAP_TYPE_KEYS.includes(name)) return
+      set((s) => ({ snapTypes: { ...s.snapTypes, [name]: !!enabled } }))
+    },
     toggleGrid: () => set((s) => ({ gridEnabled: !s.gridEnabled })),
+    // P19 (May 7 2026) — grid opacity slider (0.05–0.6). Clamped via
+    // normalizeGridOpacity. Render path reads `gridOpacity` directly
+    // from store (CanvasStage drawStatic).
+    setGridOpacity: (v) => set({ gridOpacity: normalizeGridOpacity(v) }),
     // Step 10 / P12+P14 — accept number (square) or {x, y} (rectangular).
     // Internal state always lives as {x, y}.
     setGridSize: (gridSize) => set({ gridSize: normalizeGridSize(gridSize) }),
@@ -1420,7 +1474,11 @@ useAppStore.subscribe((state, prev) => {
     // operator's working context.
     state.viewport !== prev.viewport ||
     state.photoMeta !== prev.photoMeta ||
-    state.cropMeta !== prev.cropMeta
+    state.cropMeta !== prev.cropMeta ||
+    // P2 + P19 (May 7 2026) — per-snap-type gates + grid opacity persist
+    // alongside the existing UI flags so operator settings survive reload.
+    state.snapTypes !== prev.snapTypes ||
+    state.gridOpacity !== prev.gridOpacity
   )
   if (!dataChanged && !uiFlagChanged) return
 

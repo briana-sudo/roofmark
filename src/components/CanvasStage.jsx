@@ -52,6 +52,9 @@ function getShapeCorners(shape, viewport, photoSize) {
 
 function getShapeEdges(shape, viewport, photoSize) {
   if (shape.type === 'circ') return []
+  // P6 — arc + ellipse aren't piecewise-linear, so they don't have
+  // straight-edge midpoints. Skip both for midpoint-snap purposes.
+  if (shape.type === 'arc' || shape.type === 'ellipse') return []
   if (!shape.pts || shape.pts.length < 2) return []
   const tx = (p) => photoNormToCanvas(p, viewport, photoSize)
   const pts = shape.pts.map(tx)
@@ -109,6 +112,108 @@ function distToSegment(px, py, ax, ay, bx, by) {
   return Math.sqrt(ex * ex + ey * ey)
 }
 
+// ============================================================================
+// P6 (May 7 2026) — Arc (3-point) + Ellipse (bounding-box) geometry helpers.
+// Both new shape types use pts-array data models so reprojectShapes' existing
+// pts-dispatch handles them automatically (no new branches in
+// src/utils/reprojectShapes.js needed).
+//
+//   Arc:     { type: 'arc', pts: [start, mid, end] }
+//   Ellipse: { type: 'ellipse', pts: [tlOrAny, brOrAny] } (any 2 opposite corners)
+//
+// These functions operate in canvas-px space (after viewport translation).
+// Callers (shapeHit / draw) pass already-transformed points.
+// ============================================================================
+
+// Compute the unique circle through 3 points. Returns { cx, cy, r } or null
+// if the 3 points are collinear (no circumcircle exists).
+function arcCircumcircle(p1, p2, p3) {
+  const A = p2.x - p1.x
+  const B = p2.y - p1.y
+  const C = p3.x - p1.x
+  const D = p3.y - p1.y
+  const E = A * (p1.x + p2.x) + B * (p1.y + p2.y)
+  const F = C * (p1.x + p3.x) + D * (p1.y + p3.y)
+  const G = 2 * (A * (p3.y - p2.y) - B * (p3.x - p2.x))
+  if (Math.abs(G) < 1e-9) return null
+  const cx = (D * E - B * F) / G
+  const cy = (A * F - C * E) / G
+  const r = Math.hypot(cx - p1.x, cy - p1.y)
+  return { cx, cy, r }
+}
+
+// For the 3-point arc, determine sweep direction so the canvas arc()
+// call passes through P2. Default direction is "anticlockwise=false"
+// (math-CCW which renders visually CW on screen due to y-down). We
+// pick the direction whose angular sweep from a1 to a3 contains a2.
+function arcAnglesFor(p1, p2, p3, cx, cy) {
+  const TWOPI = 2 * Math.PI
+  const a1 = Math.atan2(p1.y - cy, p1.x - cx)
+  const a2 = Math.atan2(p2.y - cy, p2.x - cx)
+  const a3 = Math.atan2(p3.y - cy, p3.x - cx)
+  // Default-direction (anticlockwise=false) sweep length:
+  const ccwSweep = ((a3 - a1 + TWOPI) % TWOPI)
+  // Where a2 falls within that default sweep:
+  const a2Pos = ((a2 - a1 + TWOPI) % TWOPI)
+  const useDefault = a2Pos <= ccwSweep
+  return { startAngle: a1, endAngle: a3, anticlockwise: !useDefault }
+}
+
+// Hit-test for a 3-point arc. Returns true if the cursor is within
+// `tolerance` canvas-px of the arc curve AND between the start/end
+// angles in the sweep direction.
+function arcHit(p1, p2, p3, cursorX, cursorY, tolerance) {
+  const cc = arcCircumcircle(p1, p2, p3)
+  if (!cc) {
+    // Collinear — fall back to two segments p1→p2, p2→p3.
+    const d1 = distToSegment(cursorX, cursorY, p1.x, p1.y, p2.x, p2.y)
+    const d2 = distToSegment(cursorX, cursorY, p2.x, p2.y, p3.x, p3.y)
+    return Math.min(d1, d2) <= tolerance
+  }
+  const { cx, cy, r } = cc
+  const dCircle = Math.abs(Math.hypot(cursorX - cx, cursorY - cy) - r)
+  if (dCircle > tolerance) return false
+  // Cursor is on the circumcircle within tolerance — check arc segment.
+  const TWOPI = 2 * Math.PI
+  const a1 = Math.atan2(p1.y - cy, p1.x - cx)
+  const a2 = Math.atan2(p2.y - cy, p2.x - cx)
+  const a3 = Math.atan2(p3.y - cy, p3.x - cx)
+  const aT = Math.atan2(cursorY - cy, cursorX - cx)
+  const ccwSweep = ((a3 - a1 + TWOPI) % TWOPI)
+  const a2Pos = ((a2 - a1 + TWOPI) % TWOPI)
+  if (a2Pos <= ccwSweep) {
+    // Default direction sweep — check cursor in [a1, a1+ccwSweep].
+    const tPos = ((aT - a1 + TWOPI) % TWOPI)
+    return tPos <= ccwSweep + 1e-3
+  } else {
+    // Reverse direction sweep — check cursor in [a1, a1-cwSweep].
+    const cwSweep = TWOPI - ccwSweep
+    const tPos = ((a1 - aT + TWOPI) % TWOPI)
+    return tPos <= cwSweep + 1e-3
+  }
+}
+
+// Decompose an ellipse's 2-pt bounding box into render parameters.
+// Accepts any two opposite corners; doesn't matter which is TL.
+function ellipseParams(p1, p2) {
+  const cx = (p1.x + p2.x) / 2
+  const cy = (p1.y + p2.y) / 2
+  const rx = Math.abs(p1.x - p2.x) / 2
+  const ry = Math.abs(p1.y - p2.y) / 2
+  return { cx, cy, rx, ry }
+}
+
+// Hit-test for an ellipse — point-in-ellipse via the standard
+// (x-cx)²/rx² + (y-cy)²/ry² ≤ 1 inequality. Degenerate (rx or ry < 1)
+// → no hit.
+function ellipseHit(p1, p2, cursorX, cursorY) {
+  const { cx, cy, rx, ry } = ellipseParams(p1, p2)
+  if (rx < 1 || ry < 1) return false
+  const dx = (cursorX - cx) / rx
+  const dy = (cursorY - cy) / ry
+  return dx * dx + dy * dy <= 1
+}
+
 function shapeHit(shape, cursorCanvas, viewport, photoSize) {
   // Section 7.A — hit-test in canvas-px space after translating shape
   // coords through the viewport. Tolerance for line-proximity stays at
@@ -126,6 +231,22 @@ function shapeHit(shape, cursorCanvas, viewport, photoSize) {
     const a = tx(shape.pts[0])
     const b = tx(shape.pts[1])
     return distToSegment(cursorCanvas.x, cursorCanvas.y, a.x, a.y, b.x, b.y) <= 6
+  }
+  // P6 — arc: project cursor onto the circumcircle and check if it's
+  // within tolerance + within the arc's swept angle range.
+  if (shape.type === 'arc') {
+    if (!shape.pts || shape.pts.length < 3) return false
+    const a = tx(shape.pts[0])
+    const b = tx(shape.pts[1])
+    const c = tx(shape.pts[2])
+    return arcHit(a, b, c, cursorCanvas.x, cursorCanvas.y, 6)
+  }
+  // P6 — ellipse: standard point-in-ellipse inequality.
+  if (shape.type === 'ellipse') {
+    if (!shape.pts || shape.pts.length < 2) return false
+    const a = tx(shape.pts[0])
+    const b = tx(shape.pts[1])
+    return ellipseHit(a, b, cursorCanvas.x, cursorCanvas.y)
   }
   if (!shape.pts || shape.pts.length < 3) return false
   const polyCanvas = shape.pts.map(tx)
@@ -197,16 +318,26 @@ function moveBody(shape, deltaCanvas, viewport, photoSize) {
 function computeSnap(args) {
   const {
     cursorX, cursorY, layers, clines,
-    snapEnabled, gridEnabled, gridSize, snapTolerance,
+    snapEnabled, snapTypes,
+    gridEnabled, gridSize, snapTolerance,
     draft, tool, clinesVisible, viewport, photoSize,
   } = args
   if (!snapEnabled) return null
+  // P2 (May 7 2026) — per-snap-type gates. Each branch checks its own
+  // snapTypes[name] flag; default-true if missing for forward-compat.
+  // Master snapEnabled stays the global override above.
+  const st = snapTypes || {}
+  const allowClose = st.close !== false
+  const allowGrid = st.grid !== false
+  const allowCorner = st.corner !== false
+  const allowMidpoint = st.midpoint !== false
+  const allowCline = st.cline !== false
   const tolSq = snapTolerance * snapTolerance
 
   // 1. CLOSE — draft polygon points are stored in canvas px (since draft
   // is built incrementally as the operator clicks), so this comparison
   // stays in canvas px.
-  if ((tool === 'poly' || tool === 'tri') && draft && draft.pts && draft.pts.length >= 3) {
+  if (allowClose && (tool === 'poly' || tool === 'tri') && draft && draft.pts && draft.pts.length >= 3) {
     const first = draft.pts[0]
     const dx = cursorX - first.x, dy = cursorY - first.y
     if (dx * dx + dy * dy < tolSq) return { x: first.x, y: first.y, type: 'close' }
@@ -216,7 +347,7 @@ function computeSnap(args) {
   // are at integer multiples of (gridSize.x, gridSize.y) in photo space;
   // translate to canvas px before the distance test so the on-screen
   // tolerance remains pixel-true regardless of zoom.
-  if (gridEnabled) {
+  if (allowGrid && gridEnabled) {
     const gxStep = (typeof gridSize === 'object' ? gridSize.x : gridSize) || 20
     const gyStep = (typeof gridSize === 'object' ? gridSize.y : gridSize) || 20
     // Convert cursor to photo-px to find the nearest grid intersection.
@@ -234,37 +365,41 @@ function computeSnap(args) {
   // 3. CORNER
   let bestDistSq = tolSq
   let bestPt = null
-  for (const layer of layers) {
-    if (!layer.visible) continue
-    for (const shape of layer.shapes || []) {
-      const corners = getShapeCorners(shape, viewport, photoSize)
-      for (const p of corners) {
-        const dx = cursorX - p.x, dy = cursorY - p.y
-        const d2 = dx * dx + dy * dy
-        if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: p.x, y: p.y, type: 'corner' } }
+  if (allowCorner) {
+    for (const layer of layers) {
+      if (!layer.visible) continue
+      for (const shape of layer.shapes || []) {
+        const corners = getShapeCorners(shape, viewport, photoSize)
+        for (const p of corners) {
+          const dx = cursorX - p.x, dy = cursorY - p.y
+          const d2 = dx * dx + dy * dy
+          if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: p.x, y: p.y, type: 'corner' } }
+        }
       }
     }
+    if (bestPt) return bestPt
   }
-  if (bestPt) return bestPt
 
   // 4. MIDPOINT
-  bestDistSq = tolSq
-  for (const layer of layers) {
-    if (!layer.visible) continue
-    for (const shape of layer.shapes || []) {
-      const edges = getShapeEdges(shape, viewport, photoSize)
-      for (const [a, b] of edges) {
-        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
-        const dx = cursorX - mx, dy = cursorY - my
-        const d2 = dx * dx + dy * dy
-        if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: mx, y: my, type: 'midpoint' } }
+  if (allowMidpoint) {
+    bestDistSq = tolSq
+    for (const layer of layers) {
+      if (!layer.visible) continue
+      for (const shape of layer.shapes || []) {
+        const edges = getShapeEdges(shape, viewport, photoSize)
+        for (const [a, b] of edges) {
+          const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
+          const dx = cursorX - mx, dy = cursorY - my
+          const d2 = dx * dx + dy * dy
+          if (d2 < bestDistSq) { bestDistSq = d2; bestPt = { x: mx, y: my, type: 'midpoint' } }
+        }
       }
     }
+    if (bestPt) return bestPt
   }
-  if (bestPt) return bestPt
 
   // 5. CLINE
-  if (clinesVisible !== false) {
+  if (allowCline && clinesVisible !== false) {
     bestDistSq = tolSq
     for (const cl of clines) {
       if (cl.visible === false) continue
@@ -508,6 +643,44 @@ export default function CanvasStage() {
           ctx.lineTo(b.x, b.y)
           if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
         }
+      } else if (shape.type === 'arc') {
+        // P6 — 3-point arc. Compute circumcircle, derive sweep direction
+        // so the arc passes through pts[1] (the mid-point operator
+        // clicked between start + end). Stroke-only — no fill (arc is a
+        // curve, not a closed region).
+        if (shape.pts && shape.pts.length >= 3) {
+          const a = tx(shape.pts[0])
+          const b = tx(shape.pts[1])
+          const c = tx(shape.pts[2])
+          const cc = arcCircumcircle(a, b, c)
+          if (cc) {
+            const { startAngle, endAngle, anticlockwise } = arcAnglesFor(a, b, c, cc.cx, cc.cy)
+            ctx.beginPath()
+            ctx.arc(cc.cx, cc.cy, cc.r, startAngle, endAngle, anticlockwise)
+            if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
+          } else {
+            // Collinear fallback — render as polyline through the 3 pts.
+            ctx.beginPath()
+            ctx.moveTo(a.x, a.y)
+            ctx.lineTo(b.x, b.y)
+            ctx.lineTo(c.x, c.y)
+            if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
+          }
+        }
+      } else if (shape.type === 'ellipse') {
+        // P6 — bounding-box ellipse. cx/cy/rx/ry computed at render
+        // time from the 2-point bounding box.
+        if (shape.pts && shape.pts.length >= 2) {
+          const a = tx(shape.pts[0])
+          const b = tx(shape.pts[1])
+          const { cx, cy, rx, ry } = ellipseParams(a, b)
+          if (rx > 0 && ry > 0) {
+            ctx.beginPath()
+            ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2)
+            if (fillOn) { ctx.globalAlpha = fillOpacity; ctx.fill() }
+            if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
+          }
+        }
       } else {
         // poly / tri / rect — closed path
         if (shape.pts && shape.pts.length >= 2) {
@@ -589,7 +762,11 @@ export default function CanvasStage() {
         const photoX1 = Math.min(photoSize.width,  (cw - viewport.panX) / z)
         const photoY0 = Math.max(0, (-viewport.panY) / z)
         const photoY1 = Math.min(photoSize.height, (ch - viewport.panY) / z)
-        ctxStatic.strokeStyle = 'rgba(0, 255, 204, 0.16)'
+        // P19 (May 7 2026) — operator-adjustable grid line opacity.
+        // Default 0.16 matches the prior hardcoded value; clamped to
+        // [0.05, 0.6] in the store action for sane bounds.
+        const gridOpacity = typeof storeState.gridOpacity === 'number' ? storeState.gridOpacity : 0.16
+        ctxStatic.strokeStyle = `rgba(0, 255, 204, ${gridOpacity})`
         ctxStatic.lineWidth = 1
         const startX = Math.ceil(photoX0 / gxStep) * gxStep
         for (let xPhoto = startX; xPhoto <= photoX1; xPhoto += gxStep) {
@@ -715,6 +892,32 @@ export default function CanvasStage() {
             ctxStatic.moveTo(a.x, a.y)
             ctxStatic.lineTo(b.x, b.y)
             ctxStatic.stroke()
+          } else if (shape.type === 'arc' && shape.pts && shape.pts.length >= 3) {
+            // P6 — selected-arc outline mirrors render path.
+            const a = tx(shape.pts[0])
+            const b = tx(shape.pts[1])
+            const c = tx(shape.pts[2])
+            const cc = arcCircumcircle(a, b, c)
+            ctxStatic.beginPath()
+            if (cc) {
+              const { startAngle, endAngle, anticlockwise } = arcAnglesFor(a, b, c, cc.cx, cc.cy)
+              ctxStatic.arc(cc.cx, cc.cy, cc.r, startAngle, endAngle, anticlockwise)
+            } else {
+              ctxStatic.moveTo(a.x, a.y)
+              ctxStatic.lineTo(b.x, b.y)
+              ctxStatic.lineTo(c.x, c.y)
+            }
+            ctxStatic.stroke()
+          } else if (shape.type === 'ellipse' && shape.pts && shape.pts.length >= 2) {
+            // P6 — selected-ellipse outline.
+            const a = tx(shape.pts[0])
+            const b = tx(shape.pts[1])
+            const { cx, cy, rx, ry } = ellipseParams(a, b)
+            if (rx > 0 && ry > 0) {
+              ctxStatic.beginPath()
+              ctxStatic.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2)
+              ctxStatic.stroke()
+            }
           } else if (shape.pts && shape.pts.length >= 2) {
             ctxStatic.beginPath()
             shape.pts.forEach((p, i) => {
@@ -762,6 +965,38 @@ export default function CanvasStage() {
               ctxDynamic.fill()
             }
           }
+        } else if (draft.type === 'arc') {
+          // P6 — 3-click arc draft. After click 1: rubber-band line to
+          // cursor. After click 2: live circumcircle through pts[0],
+          // pts[1], cursor. Third click commits via commitDraft.
+          const pts = draft.pts
+          if (pts.length === 1) {
+            ctxDynamic.beginPath()
+            ctxDynamic.moveTo(pts[0].x, pts[0].y)
+            ctxDynamic.lineTo(state.cursorX, state.cursorY)
+            ctxDynamic.stroke()
+          } else if (pts.length === 2) {
+            const cursor = { x: state.cursorX, y: state.cursorY }
+            const cc = arcCircumcircle(pts[0], pts[1], cursor)
+            if (cc) {
+              const { startAngle, endAngle, anticlockwise } = arcAnglesFor(pts[0], pts[1], cursor, cc.cx, cc.cy)
+              ctxDynamic.beginPath()
+              ctxDynamic.arc(cc.cx, cc.cy, cc.r, startAngle, endAngle, anticlockwise)
+              ctxDynamic.stroke()
+            } else {
+              ctxDynamic.beginPath()
+              ctxDynamic.moveTo(pts[0].x, pts[0].y)
+              ctxDynamic.lineTo(pts[1].x, pts[1].y)
+              ctxDynamic.lineTo(cursor.x, cursor.y)
+              ctxDynamic.stroke()
+            }
+          }
+          ctxDynamic.setLineDash([])
+          for (const p of pts) {
+            ctxDynamic.beginPath()
+            ctxDynamic.arc(p.x, p.y, 3, 0, Math.PI * 2)
+            ctxDynamic.fill()
+          }
         } else if (draft.type === 'rect' && isDragging) {
           ctxDynamic.strokeRect(
             draft.startX,
@@ -769,6 +1004,18 @@ export default function CanvasStage() {
             draft.x - draft.startX,
             draft.y - draft.startY
           )
+        } else if (draft.type === 'ellipse' && isDragging) {
+          // P6 — bounding-box ellipse draft. Drag from start to cursor;
+          // ellipse is inscribed in the rectangle.
+          const cx = (draft.startX + draft.x) / 2
+          const cy = (draft.startY + draft.y) / 2
+          const rx = Math.abs(draft.x - draft.startX) / 2
+          const ry = Math.abs(draft.y - draft.startY) / 2
+          if (rx > 0 && ry > 0) {
+            ctxDynamic.beginPath()
+            ctxDynamic.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2)
+            ctxDynamic.stroke()
+          }
         } else if (draft.type === 'circ' && isDragging) {
           ctxDynamic.beginPath()
           ctxDynamic.arc(draft.cx, draft.cy, draft.r, 0, Math.PI * 2)
@@ -954,6 +1201,12 @@ export default function CanvasStage() {
           type: draft.type,
           pts: draft.pts.map(toNorm),
         }
+      } else if (draft.type === 'arc') {
+        // P6 — 3-point arc commits with all 3 pts normalized.
+        shape = {
+          type: 'arc',
+          pts: draft.pts.map(toNorm),
+        }
       } else if (draft.type === 'rect') {
         const x1c = Math.min(draft.startX, draft.x), x2c = Math.max(draft.startX, draft.x)
         const y1c = Math.min(draft.startY, draft.y), y2c = Math.max(draft.startY, draft.y)
@@ -962,6 +1215,15 @@ export default function CanvasStage() {
         const br = toNorm({ x: x2c, y: y2c })
         const bl = toNorm({ x: x1c, y: y2c })
         shape = { type: 'rect', pts: [tl, tr, br, bl] }
+      } else if (draft.type === 'ellipse') {
+        // P6 — bounding-box ellipse commits with the 2 opposite corners.
+        // Normalize "any two opposite corners" to TL + BR for stable
+        // ordering across operator's drag direction.
+        const x1c = Math.min(draft.startX, draft.x), x2c = Math.max(draft.startX, draft.x)
+        const y1c = Math.min(draft.startY, draft.y), y2c = Math.max(draft.startY, draft.y)
+        const tl = toNorm({ x: x1c, y: y1c })
+        const br = toNorm({ x: x2c, y: y2c })
+        shape = { type: 'ellipse', pts: [tl, br] }
       } else if (draft.type === 'circ') {
         // Section 7.A — circle radius is normalized to PHOTO width (was
         // canvas width pre-amendment). r in photo-px = r-canvas / zoom.
@@ -1092,6 +1354,7 @@ export default function CanvasStage() {
       }
       if (draft) {
         if (draft.type === 'rect' && isDragging) { draft.x = x; draft.y = y }
+        else if (draft.type === 'ellipse' && isDragging) { draft.x = x; draft.y = y }
         else if (draft.type === 'circ' && isDragging) {
           draft.r = Math.hypot(x - draft.cx, y - draft.cy)
         }
@@ -1109,6 +1372,9 @@ export default function CanvasStage() {
         layers: store.layers,
         clines: store.clines,
         snapEnabled: store.snapEnabled,
+        // P2 (May 7 2026) — per-snap-type gates threaded into computeSnap
+        // so each of the 5 type branches can independently skip.
+        snapTypes: store.snapTypes,
         gridEnabled: store.gridEnabled,
         gridSize: store.gridSize,
         snapTolerance: store.snapTolerance,
@@ -1281,6 +1547,20 @@ export default function CanvasStage() {
       } else if (t === 'circ') {
         draft = { type: 'circ', cx: x, cy: y, r: 0 }
         isDragging = true
+      } else if (t === 'arc') {
+        // P6 — 3-click arc. Click 1 = start. Click 2 = mid. Click 3 =
+        // end + auto-commit. Mirrors triangle's 3-click pattern.
+        if (!draft) {
+          draft = { type: 'arc', pts: [{ x, y }] }
+        } else {
+          draft.pts.push({ x, y })
+          if (draft.pts.length >= 3) commitDraft()
+        }
+      } else if (t === 'ellipse') {
+        // P6 — drag-to-commit ellipse (mirrors rect). Bounding-box
+        // form: 2 corners. Min size threshold checked in onMouseUp.
+        draft = { type: 'ellipse', startX: x, startY: y, x, y }
+        isDragging = true
       } else if (t === 'line') {
         if (!draft) {
           draft = { type: 'line', pts: [{ x, y }] }
@@ -1327,6 +1607,13 @@ export default function CanvasStage() {
       }
       if (!draft) return
       if (draft.type === 'rect') {
+        const w = Math.abs(draft.x - draft.startX)
+        const h = Math.abs(draft.y - draft.startY)
+        if (w >= MIN_RECT_SIZE && h >= MIN_RECT_SIZE) commitDraft()
+        else { draft = null; isDragging = false }
+        dynamicDirty = true
+      } else if (draft.type === 'ellipse') {
+        // P6 — same min-size threshold as rect. Below threshold → discard.
         const w = Math.abs(draft.x - draft.startX)
         const h = Math.abs(draft.y - draft.startY)
         if (w >= MIN_RECT_SIZE && h >= MIN_RECT_SIZE) commitDraft()
@@ -1658,7 +1945,13 @@ export default function CanvasStage() {
         staticDirty = true
       }
       // Spec §7 step 3 — grid overlay visibility flips redraw static.
-      if (state.gridEnabled !== prev.gridEnabled || state.gridSize !== prev.gridSize) {
+      // P19 (May 7 2026) — gridOpacity change also redraws static so
+      // the slider gives live feedback as the operator drags.
+      if (
+        state.gridEnabled !== prev.gridEnabled
+        || state.gridSize !== prev.gridSize
+        || state.gridOpacity !== prev.gridOpacity
+      ) {
         staticDirty = true
       }
       // Spec §7 step 2 — photo background load/clear redraws static.

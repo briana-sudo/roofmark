@@ -284,6 +284,153 @@ body {
   flex-wrap: nowrap;
 }
 
+/* ============================================================================
+ * P2 (May 7 2026) — SnapMenu chevron dropdown for per-snap-type chips.
+ * Sits next to the master Snap button in the snap-grid group; popover
+ * mirrors HelpPopover / HeaderMenu pattern.
+ * ============================================================================ */
+.snap-menu {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.btn-snap-chevron {
+  width: 22px;
+  height: 24px;
+  background: transparent;
+  color: var(--rm-fg-dim);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.btn-snap-chevron:hover { background: var(--rm-panel); color: var(--rm-fg); border-color: var(--rm-fg-dim); }
+.btn-snap-chevron.open { background: var(--rm-accent); border-color: var(--rm-accent); color: #fff; }
+
+.snap-menu-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  width: min(260px, calc(100vw - 32px));
+  background: var(--rm-panel);
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.snap-menu-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--rm-panel-2);
+  border-bottom: 1px solid var(--rm-border);
+}
+.snap-menu-title {
+  flex: 1;
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--rm-fg);
+}
+.btn-snap-close {
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  color: var(--rm-fg-dim);
+  border: none;
+  border-radius: 3px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.btn-snap-close:hover { background: var(--rm-panel); color: var(--rm-fg); }
+
+.snap-menu-body {
+  padding: 8px 10px 10px;
+}
+.snap-menu-help {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--rm-fg-dim);
+  line-height: 1.4;
+}
+.snap-menu-help strong { color: var(--rm-fg); font-weight: 600; }
+
+.snap-chip-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.snap-chip {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 8px;
+  padding: 5px 8px;
+  background: var(--rm-panel-2);
+  color: var(--rm-fg-dim);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.snap-chip:hover { background: var(--rm-panel); border-color: var(--rm-fg-dim); }
+.snap-chip.active {
+  background: rgba(31, 111, 235, 0.15);
+  border-color: var(--rm-accent);
+  color: var(--rm-fg);
+}
+.snap-chip-mark {
+  font-size: 11px;
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.snap-chip.active .snap-chip-mark { color: var(--rm-accent); }
+.snap-chip-label { flex: 1; font-weight: 600; letter-spacing: 0.2px; }
+
+/* ============================================================================
+ * P19 (May 7 2026) — Grid opacity slider in canvas toolbar snap-grid group.
+ * Compact inline slider next to Grid X / Grid Y inputs.
+ * ============================================================================ */
+.grid-opacity-slider {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px;
+  background: var(--rm-panel);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  height: 24px;
+}
+.grid-opacity-slider .grid-opacity-label {
+  color: var(--rm-fg-dim);
+  font-size: 11px;
+  width: 12px;
+  text-align: center;
+}
+.grid-opacity-slider input[type="range"] {
+  width: 70px;
+  cursor: pointer;
+  accent-color: var(--rm-accent);
+}
+
 .tool-btn {
   display: inline-flex;
   align-items: center;

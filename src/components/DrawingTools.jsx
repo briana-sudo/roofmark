@@ -7,6 +7,7 @@ import {
   effectivePhotoSize, computeFitViewport, zoomAtCursor, clampPan, clampZoom,
 } from '../store/viewport'
 import PhotoCropModal from './PhotoCropModal'
+import SnapMenu from './SnapMenu'
 
 /**
  * DrawingTools — Step 5 of Kickoff Spec §6.
@@ -24,6 +25,9 @@ const SHAPE_TOOLS = [
   { id: 'rect', icon: '▭', name: 'Rect', label: 'Rectangle — click and drag, release to commit' },
   { id: 'tri',  icon: '△', name: 'Tri',  label: 'Triangle — three clicks; auto-commits on third' },
   { id: 'circ', icon: '○', name: 'Circ', label: 'Circle — click center, drag radius, release to commit' },
+  // P6 (May 7 2026) — Arc + Ellipse.
+  { id: 'arc',     icon: '⌒', name: 'Arc', label: 'Arc — 3 clicks: start, mid, end. Arc passes through all three points.' },
+  { id: 'ellipse', icon: '⬭', name: 'Ellipse', label: 'Ellipse — click and drag to define a bounding box; ellipse fits inscribed.' },
   { id: 'line', icon: '╱', name: 'Line', label: 'Line — two clicks; auto-commits on second' },
 ]
 
@@ -72,6 +76,9 @@ export default function DrawingTools() {
   // Step 10 / P12+P14 — operator-adjustable rectangular grid spacing.
   const gridSize = useAppStore((s) => s.gridSize)
   const setGridSizeAxis = useAppStore((s) => s.setGridSizeAxis)
+  // P19 (May 7 2026) — operator-adjustable grid line opacity.
+  const gridOpacity = useAppStore((s) => s.gridOpacity)
+  const setGridOpacity = useAppStore((s) => s.setGridOpacity)
   const backgroundImage = useAppStore((s) => s.backgroundImage)
   const clearBackgroundImage = useAppStore((s) => s.clearBackgroundImage)
 
@@ -269,12 +276,12 @@ export default function DrawingTools() {
 
       <span className="tool-divider" aria-hidden="true" />
 
-      {/* Group 4: Snap + Grid + Grid X/Y inputs.
-          Grid X / Grid Y inputs — Step 10 / P12 + P14.
-          Independent X and Y spacing for rectangular grids (e.g. standing-
-          seam panel layouts: X = 24 px = 1", Y = 384 px = 16" panel width).
-          Default 20×20 keeps Step 7 square-grid behavior. Clamped to
-          positive integers in `setGridSizeAxis`. */}
+      {/* Group 4: Snap + Grid + Grid X/Y inputs + Grid opacity slider.
+          P2 (May 7 2026) — SnapMenu (chevron dropdown) sits next to the
+          master Snap button. Master toggles all snapping on/off; chevron
+          opens a popover with 5 toggle chips for per-type control.
+          P19 (May 7 2026) — Grid opacity slider after Grid X/Y inputs.
+          Grid X / Grid Y inputs — Step 10 / P12 + P14. */}
       <div className="tool-group" data-tool-group="snap-grid">
         <button
           type="button"
@@ -287,6 +294,7 @@ export default function DrawingTools() {
           <span className="tool-icon" aria-hidden="true">⊞</span>
           <span className="tool-name">Snap</span>
         </button>
+        <SnapMenu />
         <button
           type="button"
           className={gridEnabled ? 'tool-btn grid-toggle active' : 'tool-btn grid-toggle'}
@@ -318,6 +326,22 @@ export default function DrawingTools() {
             value={gridSize?.y ?? 20}
             onChange={(e) => setGridSizeAxis('y', e.target.value)}
             data-testid="input-grid-y"
+          />
+        </label>
+        <label
+          className="grid-opacity-slider"
+          title={`Grid line opacity: ${Math.round((gridOpacity ?? 0.16) * 100)}%`}
+        >
+          <span className="grid-opacity-label" aria-hidden="true">⌬</span>
+          <input
+            type="range"
+            min="0.05"
+            max="0.6"
+            step="0.02"
+            value={gridOpacity ?? 0.16}
+            onChange={(e) => setGridOpacity(Number(e.target.value))}
+            aria-label="Grid line opacity"
+            data-testid="input-grid-opacity"
           />
         </label>
       </div>

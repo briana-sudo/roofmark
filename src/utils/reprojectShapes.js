@@ -132,6 +132,18 @@ export function reprojectPoint(p, oldCrop, newCrop, sourceDims) {
  *   - circle   — center (cx, cy) + radius (r). Radius scaled by output-
  *                width ratio (see file-level comment for caveat).
  *   - poly/rect/tri/line — pts[] array of {x, y}.
+ *   - arc      — pts[] of [start, mid, end] (P6, May 7 2026). Falls
+ *                through to the generic pts-mapper. Re-projection
+ *                preserves arc identity because the circumcircle is
+ *                derivable from the 3 transformed points.
+ *   - ellipse  — pts[] of [tl, br] bounding-box corners (P6, May 7
+ *                2026). Falls through to the generic pts-mapper. After
+ *                non-uniform aspect-ratio re-crop, the bounding box
+ *                may become non-axis-aligned (operator drew an axis-
+ *                aligned ellipse, but the new crop's coordinate frame
+ *                differs); render code computes axis-aligned cx/cy/
+ *                rx/ry from the bounding box and treats it as still
+ *                axis-aligned. Documented limit.
  */
 export function reprojectShape(shape, oldCrop, newCrop, sourceDims) {
   if (shape.type === 'circ') {

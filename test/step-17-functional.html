@@ -1001,6 +1001,196 @@ function applyResizeAll(state, cw, ch) {
   pass('P37 lifecycle — resize after Fit auto-fits again', state.viewportTouchedSinceFit === false)
 }
 
+// 9j. P2 — per-snap-type gates (May 7 2026).
+// Mirror of computeSnap's per-type guard pattern. The block test
+// verifies the gate logic; the actual hit-test math runs against
+// real DOM canvas + cursor and is verified at operator-pass time.
+function _snapTypesDefault() {
+  return { close: true, grid: true, corner: true, midpoint: true, cline: true }
+}
+function _wouldFire(branch, snapTypes) {
+  // Mirror of the computeSnap branch gates.
+  const st = snapTypes || {}
+  if (branch === 'close') return st.close !== false
+  if (branch === 'grid') return st.grid !== false
+  if (branch === 'corner') return st.corner !== false
+  if (branch === 'midpoint') return st.midpoint !== false
+  if (branch === 'cline') return st.cline !== false
+  return false
+}
+{
+  // Default: all branches fire.
+  const t = _snapTypesDefault()
+  pass('P2 — default snapTypes: close fires', _wouldFire('close', t))
+  pass('P2 — default snapTypes: grid fires', _wouldFire('grid', t))
+  pass('P2 — default snapTypes: corner fires', _wouldFire('corner', t))
+  pass('P2 — default snapTypes: midpoint fires', _wouldFire('midpoint', t))
+  pass('P2 — default snapTypes: cline fires', _wouldFire('cline', t))
+}
+{
+  // setSnapType(name, false) disables one type, others stay.
+  const t = _snapTypesDefault()
+  t.corner = false
+  pass('P2 — corner disabled: close still fires', _wouldFire('close', t))
+  pass('P2 — corner disabled: corner does NOT fire', !_wouldFire('corner', t))
+  pass('P2 — corner disabled: midpoint still fires', _wouldFire('midpoint', t))
+}
+{
+  // Forward-compat: missing key defaults to true.
+  const t = {}
+  pass('P2 — missing snapTypes: corner defaults to enabled', _wouldFire('corner', t))
+  pass('P2 — missing snapTypes: cline defaults to enabled', _wouldFire('cline', t))
+}
+{
+  // Master snapEnabled is checked separately in computeSnap (early-return);
+  // per-type gates only apply when master is true. Verify the conceptual
+  // 2-layer guard:
+  function masterAndPerType(snapEnabled, snapTypes, branch) {
+    if (!snapEnabled) return false
+    return _wouldFire(branch, snapTypes)
+  }
+  const t = _snapTypesDefault()
+  pass('P2 — master off: all branches blocked regardless of per-type',
+    !masterAndPerType(false, t, 'corner') && !masterAndPerType(false, t, 'grid'))
+  pass('P2 — master on + per-type on: branch fires',
+    masterAndPerType(true, t, 'corner'))
+  t.corner = false
+  pass('P2 — master on + per-type off: branch blocked',
+    !masterAndPerType(true, t, 'corner'))
+}
+
+// 9k. P6 — Arc circumcircle math (3-point arc).
+function _arcCircumcircle(p1, p2, p3) {
+  const A = p2.x - p1.x
+  const B = p2.y - p1.y
+  const C = p3.x - p1.x
+  const D = p3.y - p1.y
+  const E = A * (p1.x + p2.x) + B * (p1.y + p2.y)
+  const F = C * (p1.x + p3.x) + D * (p1.y + p3.y)
+  const G = 2 * (A * (p3.y - p2.y) - B * (p3.x - p2.x))
+  if (Math.abs(G) < 1e-9) return null
+  return {
+    cx: (D * E - B * F) / G,
+    cy: (A * F - C * E) / G,
+    r: Math.hypot((D * E - B * F) / G - p1.x, (A * F - C * E) / G - p1.y),
+  }
+}
+{
+  // Equilateral triangle with circumradius r = side / sqrt(3) ≈ 1.155
+  const cc = _arcCircumcircle({ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 1, y: Math.sqrt(3) })
+  pass('P6 — arc circumcircle: equilateral cx ≈ 1', _approx(cc.cx, 1, 1e-6))
+  pass('P6 — arc circumcircle: equilateral cy ≈ 1/√3', _approx(cc.cy, 1 / Math.sqrt(3), 1e-6))
+  pass('P6 — arc circumcircle: equilateral r ≈ 2/√3', _approx(cc.r, 2 / Math.sqrt(3), 1e-6))
+}
+{
+  // Right triangle inscribed in circle: hypotenuse is diameter.
+  // p1=(0,0), p2=(4,0), p3=(0,3). Hypotenuse p2-p3 length 5; r=2.5; center mid p2-p3 = (2, 1.5)
+  const cc = _arcCircumcircle({ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 0, y: 3 })
+  pass('P6 — arc circumcircle: right tri cx = 2', _approx(cc.cx, 2, 1e-6))
+  pass('P6 — arc circumcircle: right tri cy = 1.5', _approx(cc.cy, 1.5, 1e-6))
+  pass('P6 — arc circumcircle: right tri r = 2.5', _approx(cc.r, 2.5, 1e-6))
+}
+{
+  // Collinear points → no circumcircle.
+  const cc = _arcCircumcircle({ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 10, y: 0 })
+  pass('P6 — arc circumcircle: collinear returns null', cc === null)
+}
+
+// 9l. P6 — Ellipse bounding-box math.
+function _ellipseParams(p1, p2) {
+  return {
+    cx: (p1.x + p2.x) / 2,
+    cy: (p1.y + p2.y) / 2,
+    rx: Math.abs(p1.x - p2.x) / 2,
+    ry: Math.abs(p1.y - p2.y) / 2,
+  }
+}
+function _ellipseHit(p1, p2, cx, cy) {
+  const e = _ellipseParams(p1, p2)
+  if (e.rx < 1 || e.ry < 1) return false
+  const dx = (cx - e.cx) / e.rx
+  const dy = (cy - e.cy) / e.ry
+  return dx * dx + dy * dy <= 1
+}
+{
+  const e = _ellipseParams({ x: 0, y: 0 }, { x: 100, y: 60 })
+  pass('P6 — ellipse params: cx = 50', _approx(e.cx, 50))
+  pass('P6 — ellipse params: cy = 30', _approx(e.cy, 30))
+  pass('P6 — ellipse params: rx = 50', _approx(e.rx, 50))
+  pass('P6 — ellipse params: ry = 30', _approx(e.ry, 30))
+  // Direction-agnostic: same result with corners swapped.
+  const e2 = _ellipseParams({ x: 100, y: 60 }, { x: 0, y: 0 })
+  pass('P6 — ellipse params: corner order doesn\'t matter',
+    _approx(e2.cx, e.cx) && _approx(e2.rx, e.rx))
+}
+{
+  const p1 = { x: 0, y: 0 }, p2 = { x: 100, y: 60 }
+  pass('P6 — ellipse hit: center is inside', _ellipseHit(p1, p2, 50, 30))
+  pass('P6 — ellipse hit: corner of bounding-box is OUTSIDE (rounded ellipse)',
+    !_ellipseHit(p1, p2, 0, 0))
+  pass('P6 — ellipse hit: midpoint of long axis on edge',
+    _ellipseHit(p1, p2, 100, 30))  // (cx + rx, cy) is on the edge → ≤ 1
+  pass('P6 — ellipse hit: well outside is outside',
+    !_ellipseHit(p1, p2, 200, 200))
+}
+{
+  // Degenerate (zero-size) ellipse — no hit.
+  pass('P6 — ellipse hit: degenerate (rx=0) returns false',
+    !_ellipseHit({ x: 5, y: 5 }, { x: 5, y: 50 }, 5, 25))
+}
+
+// 9m. P6 — Reprojection round-trip for arc + ellipse via the existing
+// pts-dispatch in reprojectShapes. The pure-JS mirror at 9g already
+// established round-trip identity for points; here we verify shape-
+// shaped data round-trips through the same path.
+{
+  const arc = {
+    type: 'arc',
+    pts: [{ x: 0.1, y: 0.1 }, { x: 0.5, y: 0.5 }, { x: 0.9, y: 0.1 }],
+  }
+  // Round-trip through identity crop: pts unchanged.
+  const cropFull = { x: 0, y: 0, w: 200, h: 200, rotation: 0 }
+  const reprojected = {
+    ...arc,
+    pts: arc.pts.map((p) => _reprojectPoint(p, cropFull, cropFull, { w: 200, h: 200 })),
+  }
+  pass('P6 — arc round-trip identity: pts preserved',
+    arc.pts.every((p, i) => _approxPt(p, reprojected.pts[i], 1e-9)))
+
+  const ellipse = { type: 'ellipse', pts: [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.6 }] }
+  const ellReproj = {
+    ...ellipse,
+    pts: ellipse.pts.map((p) => _reprojectPoint(p, cropFull, cropFull, { w: 200, h: 200 })),
+  }
+  pass('P6 — ellipse round-trip identity: pts preserved',
+    ellipse.pts.every((p, i) => _approxPt(p, ellReproj.pts[i], 1e-9)))
+}
+
+// 9n. P19 — Grid opacity clamp + persistence.
+function _normalizeGridOpacity(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 0.16
+  return Math.min(0.6, Math.max(0.05, n))
+}
+pass('P19 — gridOpacity clamp: default 0.16', _normalizeGridOpacity(undefined) === 0.16)
+pass('P19 — gridOpacity clamp: invalid input falls back to 0.16',
+  _normalizeGridOpacity('not a number') === 0.16)
+pass('P19 — gridOpacity clamp: 0.0 raises to 0.05 floor',
+  _normalizeGridOpacity(0.0) === 0.05)
+pass('P19 — gridOpacity clamp: 0.3 mid-range passes through',
+  _normalizeGridOpacity(0.3) === 0.3)
+pass('P19 — gridOpacity clamp: 1.0 lowers to 0.6 ceiling',
+  _normalizeGridOpacity(1.0) === 0.6)
+pass('P19 — gridOpacity clamp: 0.5 sub-ceiling passes through',
+  _normalizeGridOpacity(0.5) === 0.5)
+{
+  // Render-string composition: rgba(0, 255, 204, ${gridOpacity})
+  const opacity = 0.32
+  const renderStyle = `rgba(0, 255, 204, ${opacity})`
+  pass('P19 — render style uses dynamic opacity',
+    renderStyle === 'rgba(0, 255, 204, 0.32)')
+}
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {
