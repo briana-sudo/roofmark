@@ -1191,6 +1191,192 @@ pass('P19 — gridOpacity clamp: 0.5 sub-ceiling passes through',
     renderStyle === 'rgba(0, 255, 204, 0.32)')
 }
 
+// 9o. P31 + P35 — sequence-default + per-annotation override fallback chain
+// (May 7 2026). Verifies the pure resolution rule that the render path
+// uses: anno.<field> ?? seq.default<Field> ?? hardcodedFallback. No
+// store mutation here; pure logic only.
+function _resolveAnnoColor(anno, seq, fallback = '#f5a623') {
+  if (typeof anno?.color === 'string' && anno.color.length > 0) return anno.color
+  if (typeof seq?.defaultAnnoColor === 'string' && seq.defaultAnnoColor.length > 0) return seq.defaultAnnoColor
+  return fallback
+}
+function _resolveAnnoFont(anno, seq, fallback = 11) {
+  if (typeof anno?.fontSize === 'number' && Number.isFinite(anno.fontSize)) return anno.fontSize
+  if (typeof seq?.defaultAnnoFontSize === 'number' && Number.isFinite(seq.defaultAnnoFontSize)) return seq.defaultAnnoFontSize
+  return fallback
+}
+{
+  const seq = { defaultAnnoColor: '#2563eb', defaultAnnoFontSize: 14 }
+  const annoNoOverride = { type: 'note' }
+  const annoColorOverride = { type: 'note', color: '#dc2626' }
+  const annoFontOverride = { type: 'note', fontSize: 18 }
+  const annoBothOverride = { type: 'note', color: '#16a34a', fontSize: 22 }
+  const annoNullOverride = { type: 'note', color: null, fontSize: null } // post-↺ reset shape
+  pass('P31 — resolveColor: no override returns sequence default',
+    _resolveAnnoColor(annoNoOverride, seq) === '#2563eb')
+  pass('P31 — resolveColor: override beats sequence default',
+    _resolveAnnoColor(annoColorOverride, seq) === '#dc2626')
+  pass('P31 — resolveColor: null override falls through to sequence default',
+    _resolveAnnoColor(annoNullOverride, seq) === '#2563eb')
+  pass('P31 — resolveColor: missing sequence falls through to fallback',
+    _resolveAnnoColor(annoNoOverride, null) === '#f5a623')
+  pass('P31 — resolveColor: both override + seq present uses override',
+    _resolveAnnoColor(annoBothOverride, seq) === '#16a34a')
+  pass('P35 — resolveFont: no override returns sequence default',
+    _resolveAnnoFont(annoNoOverride, seq) === 14)
+  pass('P35 — resolveFont: override beats sequence default',
+    _resolveAnnoFont(annoFontOverride, seq) === 18)
+  pass('P35 — resolveFont: null override falls through to sequence default',
+    _resolveAnnoFont(annoNullOverride, seq) === 14)
+  pass('P35 — resolveFont: missing sequence falls through to fallback 11',
+    _resolveAnnoFont(annoNoOverride, null) === 11)
+  pass('P35 — resolveFont: both override + seq present uses override',
+    _resolveAnnoFont(annoBothOverride, seq) === 22)
+}
+
+// 9p. P31 + P35 — normalizeSequence migration. Pre-P31 sequences saved
+// without the default-* fields are backfilled at hydration / importJSON
+// time. Clamp logic on font enforces [8, 32].
+function _normalizeSequence(seq) {
+  if (!seq || typeof seq !== 'object') return seq
+  const fontRaw = Number(seq.defaultAnnoFontSize)
+  const fontOk = Number.isFinite(fontRaw)
+  return {
+    ...seq,
+    defaultAnnoColor:
+      typeof seq.defaultAnnoColor === 'string' && seq.defaultAnnoColor.length > 0
+        ? seq.defaultAnnoColor
+        : '#f5a623',
+    defaultAnnoFontSize: fontOk
+      ? Math.min(32, Math.max(8, Math.round(fontRaw)))
+      : 11,
+  }
+}
+{
+  const preP31 = { id: 's1', title: 'S1', layers: {}, annotations: [] }
+  const norm = _normalizeSequence(preP31)
+  pass('P31 — migration: backfills defaultAnnoColor on pre-P31 seq',
+    norm.defaultAnnoColor === '#f5a623')
+  pass('P35 — migration: backfills defaultAnnoFontSize on pre-P31 seq',
+    norm.defaultAnnoFontSize === 11)
+  pass('P31 — migration: preserves existing color',
+    _normalizeSequence({ defaultAnnoColor: '#2563eb' }).defaultAnnoColor === '#2563eb')
+  pass('P35 — migration: clamps fontSize=2 to 8 (min)',
+    _normalizeSequence({ defaultAnnoFontSize: 2 }).defaultAnnoFontSize === 8)
+  pass('P35 — migration: clamps fontSize=99 to 32 (max)',
+    _normalizeSequence({ defaultAnnoFontSize: 99 }).defaultAnnoFontSize === 32)
+  pass('P35 — migration: rounds 13.7 to 14',
+    _normalizeSequence({ defaultAnnoFontSize: 13.7 }).defaultAnnoFontSize === 14)
+  pass('P35 — migration: NaN string falls back to 11',
+    _normalizeSequence({ defaultAnnoFontSize: 'not-a-number' }).defaultAnnoFontSize === 11)
+}
+
+// 9q. P34 — annotation handle math. Per-type handle layout that
+// CanvasStage's annotationHandles + annotationCentroid + body-translate
+// helpers must obey.
+function _annotationHandles(anno) {
+  if (!anno) return []
+  if (anno.type === 'note') return anno.at ? [{ field: 'at', point: anno.at }] : []
+  if (anno.type === 'callout') {
+    const out = []
+    if (anno.tip) out.push({ field: 'tip', point: anno.tip })
+    if (anno.tail) out.push({ field: 'tail', point: anno.tail })
+    return out
+  }
+  if (anno.type === 'dimline') {
+    const out = []
+    if (anno.a) out.push({ field: 'a', point: anno.a })
+    if (anno.b) out.push({ field: 'b', point: anno.b })
+    return out
+  }
+  return []
+}
+function _annotationCentroid(anno) {
+  if (!anno) return null
+  if (anno.type === 'note') return null
+  if (anno.type === 'callout' && anno.tip && anno.tail) return { x: (anno.tip.x + anno.tail.x) / 2, y: (anno.tip.y + anno.tail.y) / 2 }
+  if (anno.type === 'dimline' && anno.a && anno.b) return { x: (anno.a.x + anno.b.x) / 2, y: (anno.a.y + anno.b.y) / 2 }
+  return null
+}
+function _annotationBodyTranslatePartial(anno, deltaCanvas, viewport, photoSize) {
+  const dxN = deltaCanvas.x / (photoSize.width * viewport.zoom || 1)
+  const dyN = deltaCanvas.y / (photoSize.height * viewport.zoom || 1)
+  if (anno.type === 'note' && anno.at) return { at: { x: anno.at.x + dxN, y: anno.at.y + dyN } }
+  if (anno.type === 'callout' && anno.tip && anno.tail) {
+    return {
+      tip:  { x: anno.tip.x + dxN, y: anno.tip.y + dyN },
+      tail: { x: anno.tail.x + dxN, y: anno.tail.y + dyN },
+    }
+  }
+  if (anno.type === 'dimline' && anno.a && anno.b) {
+    return {
+      a: { x: anno.a.x + dxN, y: anno.a.y + dyN },
+      b: { x: anno.b.x + dxN, y: anno.b.y + dyN },
+    }
+  }
+  return null
+}
+{
+  const note = { type: 'note', at: { x: 0.5, y: 0.5 } }
+  const callout = { type: 'callout', tip: { x: 0.2, y: 0.2 }, tail: { x: 0.6, y: 0.4 } }
+  const dim = { type: 'dimline', a: { x: 0.1, y: 0.1 }, b: { x: 0.3, y: 0.3 } }
+  pass('P34 — handles: note returns 1 handle (at)',
+    _annotationHandles(note).length === 1 && _annotationHandles(note)[0].field === 'at')
+  pass('P34 — handles: callout returns 2 handles (tip, tail)',
+    _annotationHandles(callout).map(h => h.field).join(',') === 'tip,tail')
+  pass('P34 — handles: dimline returns 2 handles (a, b)',
+    _annotationHandles(dim).map(h => h.field).join(',') === 'a,b')
+  pass('P34 — centroid: note has no separate centroid',
+    _annotationCentroid(note) === null)
+  pass('P34 — centroid: callout midpoint computed correctly',
+    _approx(_annotationCentroid(callout).x, 0.4) && _approx(_annotationCentroid(callout).y, 0.3))
+  pass('P34 — centroid: dimline midpoint computed correctly',
+    _approx(_annotationCentroid(dim).x, 0.2) && _approx(_annotationCentroid(dim).y, 0.2))
+
+  // Body translate: shift by 100 canvas-px on a 1000×800 photo at zoom 1
+  // = +0.1 normX, +0 normY (delta y = 0).
+  const vp = { panX: 0, panY: 0, zoom: 1 }
+  const ps = { width: 1000, height: 800 }
+  const partialNote = _annotationBodyTranslatePartial(note, { x: 100, y: 0 }, vp, ps)
+  pass('P34 — body translate: note shifts .at by +0.1 normX',
+    _approx(partialNote.at.x, 0.6) && _approx(partialNote.at.y, 0.5))
+  const partialCall = _annotationBodyTranslatePartial(callout, { x: 100, y: 0 }, vp, ps)
+  pass('P34 — body translate: callout tip + tail both shift +0.1 normX',
+    _approx(partialCall.tip.x, 0.3) && _approx(partialCall.tail.x, 0.7))
+  pass('P34 — body translate: callout y unchanged when delta y = 0',
+    _approx(partialCall.tip.y, 0.2) && _approx(partialCall.tail.y, 0.4))
+  const partialDim = _annotationBodyTranslatePartial(dim, { x: 0, y: 80 }, vp, ps)
+  pass('P34 — body translate: dimline a + b both shift +0.1 normY',
+    _approx(partialDim.a.y, 0.2) && _approx(partialDim.b.y, 0.4))
+
+  // Zoom-aware translate: 100 canvas-px at zoom 2 on the same photo
+  // is HALF the normX delta (+0.05 instead of +0.1).
+  const partialZoom = _annotationBodyTranslatePartial(note, { x: 100, y: 0 }, { panX: 0, panY: 0, zoom: 2 }, ps)
+  pass('P34 — body translate: zoom 2 halves the normalized delta',
+    _approx(partialZoom.at.x, 0.55))
+}
+
+// 9r. P34 + shape-drag-undo side fix — JSON-comparison "anything actually
+// changed?" check. Mirror of the predicate at onMouseUp that decides
+// whether to push the captured snapshot.
+{
+  const sh1 = { type: 'rect', pts: [{ x: 0.1, y: 0.1 }, { x: 0.5, y: 0.5 }] }
+  const sh1Same = JSON.parse(JSON.stringify(sh1))
+  const sh1Changed = { type: 'rect', pts: [{ x: 0.2, y: 0.1 }, { x: 0.5, y: 0.5 }] }
+  pass('P34 side fix — drag-no-op compares equal (no undo entry)',
+    JSON.stringify(sh1) === JSON.stringify(sh1Same))
+  pass('P34 side fix — drag with movement compares unequal (push undo)',
+    JSON.stringify(sh1) !== JSON.stringify(sh1Changed))
+
+  const a1 = { type: 'callout', tip: { x: 0.1, y: 0.1 }, tail: { x: 0.3, y: 0.3 }, textEN: 'X' }
+  const a1Same = JSON.parse(JSON.stringify(a1))
+  const a1Changed = { ...a1, tip: { x: 0.15, y: 0.1 } }
+  pass('P34 — annotation drag-no-op compares equal',
+    JSON.stringify(a1) === JSON.stringify(a1Same))
+  pass('P34 — annotation drag-with-move compares unequal',
+    JSON.stringify(a1) !== JSON.stringify(a1Changed))
+}
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {

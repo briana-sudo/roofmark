@@ -267,6 +267,111 @@ function hitTest(cursorCanvas, layers, viewport, photoSize) {
   return null
 }
 
+// ============================================================================
+// P34 (May 7 2026) — Annotation handle / hit-test helpers (EDIT mode).
+// Each annotation type exposes per-point handles (vertex dots) for drag-to-
+// reshape, plus a body-center handle for translate. Patterns mirror the
+// existing shape helpers (shapeHandlePoints / shapeCentroid / movePoint /
+// moveBody) so the EDIT-mode drag plumbing reuses cleanly.
+//
+// Handle field-name semantics — important for the drag handler since it
+// has to call updateAnnotation(seqId, annoId, { [field]: newPt }):
+//   note     — single 'at' point (handle index 0)
+//   callout  — 'tip' (handle index 0) + 'tail' (handle index 1)
+//   dimline  — 'a' (handle index 0) + 'b' (handle index 1)
+// ============================================================================
+function annotationHandles(anno) {
+  // Returns array of { field, point } in canvas-norm space (0..1).
+  // Caller translates to canvas px via photoNormToCanvas before render
+  // / hit-test.
+  if (!anno || typeof anno !== 'object') return []
+  if (anno.type === 'note') {
+    return anno.at ? [{ field: 'at', point: anno.at }] : []
+  }
+  if (anno.type === 'callout') {
+    const out = []
+    if (anno.tip)  out.push({ field: 'tip',  point: anno.tip })
+    if (anno.tail) out.push({ field: 'tail', point: anno.tail })
+    return out
+  }
+  if (anno.type === 'dimline') {
+    const out = []
+    if (anno.a) out.push({ field: 'a', point: anno.a })
+    if (anno.b) out.push({ field: 'b', point: anno.b })
+    return out
+  }
+  return []
+}
+
+// Body-center for translate. Note has no separate body-center (its single
+// point IS the body); callout / dimline use the midpoint of their two
+// points.
+function annotationCentroid(anno) {
+  if (!anno) return null
+  if (anno.type === 'note') return null  // body == single anchor; no separate centroid handle
+  if (anno.type === 'callout' && anno.tip && anno.tail) {
+    return { x: (anno.tip.x + anno.tail.x) / 2, y: (anno.tip.y + anno.tail.y) / 2 }
+  }
+  if (anno.type === 'dimline' && anno.a && anno.b) {
+    return { x: (anno.a.x + anno.b.x) / 2, y: (anno.a.y + anno.b.y) / 2 }
+  }
+  return null
+}
+
+// Hit-test for new annotation selection (cursor near anchor point).
+// Tolerance is 8 canvas-px (slightly looser than shape's 6px since
+// annotations are smaller markers).
+function annotationHit(anno, cursorCanvas, viewport, photoSize, tolerance = 8) {
+  const handles = annotationHandles(anno)
+  for (const h of handles) {
+    const c = photoNormToCanvas(h.point, viewport, photoSize)
+    const dx = cursorCanvas.x - c.x
+    const dy = cursorCanvas.y - c.y
+    if (dx * dx + dy * dy <= tolerance * tolerance) return true
+  }
+  return false
+}
+
+// Hit-test scan across all annotations of a sequence. Returns
+// { sequenceId, annotationId } for the first hit (creation order),
+// or null if none.
+function annotationHitTest(annotations, sequenceId, cursorCanvas, viewport, photoSize, tolerance = 8) {
+  if (!annotations) return null
+  // Iterate in REVERSE so top-rendered (later-in-array) annotations
+  // are hit first under the cursor.
+  for (let i = annotations.length - 1; i >= 0; i--) {
+    const a = annotations[i]
+    if (annotationHit(a, cursorCanvas, viewport, photoSize, tolerance)) {
+      return { sequenceId, annotationId: a.id }
+    }
+  }
+  return null
+}
+
+// Translate a single annotation field-point by canvas-px delta. Used for
+// body drag (callout / dimline shift all points; note shifts its single
+// .at). Returns the partial that updateAnnotation should receive.
+function annotationBodyTranslatePartial(anno, deltaCanvas, viewport, photoSize) {
+  const dxN = deltaCanvas.x / (photoSize.width * viewport.zoom || 1)
+  const dyN = deltaCanvas.y / (photoSize.height * viewport.zoom || 1)
+  if (anno.type === 'note' && anno.at) {
+    return { at: { x: anno.at.x + dxN, y: anno.at.y + dyN } }
+  }
+  if (anno.type === 'callout' && anno.tip && anno.tail) {
+    return {
+      tip:  { x: anno.tip.x  + dxN, y: anno.tip.y  + dyN },
+      tail: { x: anno.tail.x + dxN, y: anno.tail.y + dyN },
+    }
+  }
+  if (anno.type === 'dimline' && anno.a && anno.b) {
+    return {
+      a: { x: anno.a.x + dxN, y: anno.a.y + dyN },
+      b: { x: anno.b.x + dxN, y: anno.b.y + dyN },
+    }
+  }
+  return null
+}
+
 function shapeHandlePoints(shape, viewport, photoSize) {
   const tx = (p) => photoNormToCanvas(p, viewport, photoSize)
   if (shape.type === 'circ') {
@@ -465,6 +570,21 @@ export default function CanvasStage() {
     //   originCursor: cursor canvas-px at drag start (for body delta)
     let editDrag = null
 
+    // P34 (May 7 2026) — annotation drag state (closure-scoped). Mirrors
+    // editDrag for shapes. Set on EDIT-mode mousedown when a handle / body
+    // / new-annotation hit fires; updated on mousemove via updateAnnotation;
+    // cleared + (if changed) pushCapturedSnapshot at mouseup.
+    //   mode:         'point' (vertex handle) | 'body' (centroid drag)
+    //   sequenceId:   active sequence id at drag start
+    //   annotationId: target annotation id
+    //   field:        'at' | 'tip' | 'tail' | 'a' | 'b'  (point mode only)
+    //   originAnno:   deep-cloned annotation at drag start (for body delta
+    //                 baseline + Cancel semantics)
+    //   originCursor: cursor canvas-px at drag start (for body delta)
+    //   preDragSnap:  dataSnapshot string captured at drag start, pushed
+    //                 to undoStack on mouseup if anything changed
+    let annoDrag = null
+
     // Section 7.A — viewport pan state (closure-scoped). Set when a pan
     // input begins (middle-mouse, space+left, two-finger touch); applies
     // delta to the store viewport on each move; cleared on release.
@@ -537,13 +657,30 @@ export default function CanvasStage() {
     // to canvas px via the viewport. Pin geometry (size of dot, tick length,
     // diamond size) intentionally stays in canvas px so labels remain legible
     // regardless of zoom (similar to dimension labels in CAD apps).
-    const ANNO_ACCENT = '#f5a623' // amber — distinct from layer colors
-    const drawAnnotationOnContext = (ctx, anno, viewport, photoSize) => {
+    // P31 + P35 (May 7 2026) — 3-tier color / font-size fallback chain:
+    //   anno.<field> ?? seq.default<Field> ?? hardcoded fallback
+    // The `seq` argument is the active sequence (provides defaults).
+    // Per-annotation overrides take priority; sequence default applies
+    // when no override; hardcoded fallback covers pre-P31 sequences
+    // that never had the default field.
+    const ANNO_ACCENT_FALLBACK = '#f5a623'
+    const ANNO_FONT_SIZE_FALLBACK_LOCAL = 11
+    const drawAnnotationOnContext = (ctx, anno, viewport, photoSize, seq) => {
+      const color = (typeof anno.color === 'string' && anno.color.length > 0)
+        ? anno.color
+        : (seq && typeof seq.defaultAnnoColor === 'string' && seq.defaultAnnoColor.length > 0)
+          ? seq.defaultAnnoColor
+          : ANNO_ACCENT_FALLBACK
+      const fontSize = (typeof anno.fontSize === 'number' && Number.isFinite(anno.fontSize))
+        ? anno.fontSize
+        : (seq && typeof seq.defaultAnnoFontSize === 'number' && Number.isFinite(seq.defaultAnnoFontSize))
+          ? seq.defaultAnnoFontSize
+          : ANNO_FONT_SIZE_FALLBACK_LOCAL
       ctx.save()
-      ctx.strokeStyle = ANNO_ACCENT
-      ctx.fillStyle = ANNO_ACCENT
+      ctx.strokeStyle = color
+      ctx.fillStyle = color
       ctx.lineWidth = 1.5
-      ctx.font = 'bold 11px var(--rm-sans, sans-serif)'
+      ctx.font = `bold ${fontSize}px var(--rm-sans, sans-serif)`
 
       if (anno.type === 'note') {
         const at = photoNormToCanvas(anno.at, viewport, photoSize)
@@ -559,7 +696,7 @@ export default function CanvasStage() {
         ctx.fill()
         // Body indicator: "?" placeholder until Step 13 adds the text panel
         const label = anno.textEN ? anno.textEN.slice(0, 24) : '?'
-        ctx.fillStyle = ANNO_ACCENT
+        ctx.fillStyle = color
         ctx.fillText(label, x + 10, y + 4)
       } else if (anno.type === 'callout') {
         const tipPt  = photoNormToCanvas(anno.tip,  viewport, photoSize)
@@ -840,14 +977,21 @@ export default function CanvasStage() {
         ? storeState.sequences.find((s) => s.id === storeState.activeSeqId)
         : null
       if (activeSeq && Array.isArray(activeSeq.annotations)) {
-        for (const a of activeSeq.annotations) drawAnnotationOnContext(ctxStatic, a, viewport, photoSize)
+        for (const a of activeSeq.annotations) drawAnnotationOnContext(ctxStatic, a, viewport, photoSize, activeSeq)
       }
 
       // Step 13 — annotation selection highlight (white ring around the
       // primary anchor of the panel-selected annotation). Painted on top
       // so it sits above the annotation itself.
+      // P34 (May 7 2026) — when in EDIT mode, the white ring is replaced
+      // by drag handles (vertex dots + body-center crosshair if
+      // applicable). The ring stays for non-EDIT modes (panel-driven
+      // selection in SEQUENCE mode is just a "this is highlighted"
+      // marker, not draggable). Static canvas paints the ring; dynamic
+      // canvas paints the handles (handles re-render on every animation
+      // frame so they track during drag).
       const selAnno = storeState.selectedAnnotation
-      if (selAnno && activeSeq && selAnno.sequenceId === activeSeq.id) {
+      if (selAnno && activeSeq && selAnno.sequenceId === activeSeq.id && storeState.mode !== 'EDIT') {
         const a = (activeSeq.annotations || []).find((x) => x.id === selAnno.annotationId)
         if (a) {
           let anchor = null
@@ -1104,6 +1248,66 @@ export default function CanvasStage() {
           if (shape.type !== 'circ') {
             const c = shapeCentroid(shape, state.viewport, ps)
             if (c) {
+              ctxDynamic.strokeStyle = '#ffffff'
+              ctxDynamic.lineWidth = 1.5
+              ctxDynamic.beginPath()
+              ctxDynamic.arc(c.x, c.y, 8, 0, Math.PI * 2)
+              ctxDynamic.stroke()
+              ctxDynamic.beginPath()
+              ctxDynamic.moveTo(c.x - 5, c.y + 0.5)
+              ctxDynamic.lineTo(c.x + 5, c.y + 0.5)
+              ctxDynamic.moveTo(c.x + 0.5, c.y - 5)
+              ctxDynamic.lineTo(c.x + 0.5, c.y + 5)
+              ctxDynamic.stroke()
+            }
+          }
+        }
+      }
+
+      // P34 (May 7 2026) — annotation selection handles in EDIT mode.
+      // Mirrors the shape handles block above. Renders only when:
+      //   - mode === 'EDIT'
+      //   - selectedAnnotation is set AND points at an annotation in the
+      //     active sequence (cross-sequence selection is impossible —
+      //     setActiveSequence clears selectedAnnotation)
+      // Handle layout per type (canvas-px coords from photoNormToCanvas):
+      //   note    — 1 dot at .at
+      //   callout — 2 dots at .tip + .tail PLUS body-center crosshair
+      //   dimline — 2 dots at .a   + .b    PLUS body-center crosshair
+      // Same color/size convention as shape handles (5px filled dots,
+      // 8px ringed crosshair for body), but uses the annotation's
+      // effective render color (3-tier fallback) so the operator
+      // visually matches the body line.
+      if (state.mode === 'EDIT' && state.selectedAnnotation) {
+        const selA = state.selectedAnnotation
+        const activeSeqLocal = state.sequences.find((sq) => sq.id === state.activeSeqId)
+        if (activeSeqLocal && selA.sequenceId === activeSeqLocal.id) {
+          const anno = (activeSeqLocal.annotations || []).find((a) => a.id === selA.annotationId)
+          if (anno) {
+            const cwLocal = container.clientWidth
+            const chLocal = container.clientHeight
+            const ps = effectivePhotoSize(state.photoMeta, cwLocal, chLocal)
+            const annoColor = (typeof anno.color === 'string' && anno.color.length > 0)
+              ? anno.color
+              : (typeof activeSeqLocal.defaultAnnoColor === 'string' && activeSeqLocal.defaultAnnoColor.length > 0)
+                ? activeSeqLocal.defaultAnnoColor
+                : '#f5a623'
+            const handles = annotationHandles(anno)
+            for (const h of handles) {
+              const c = photoNormToCanvas(h.point, state.viewport, ps)
+              ctxDynamic.fillStyle = annoColor
+              ctxDynamic.strokeStyle = '#ffffff'
+              ctxDynamic.lineWidth = 1.5
+              ctxDynamic.beginPath()
+              ctxDynamic.arc(c.x, c.y, 5, 0, Math.PI * 2)
+              ctxDynamic.fill()
+              ctxDynamic.stroke()
+            }
+            // Body-center crosshair for callout / dimline (note has no
+            // separate centroid — its single anchor IS the body).
+            const centroidNorm = annotationCentroid(anno)
+            if (centroidNorm) {
+              const c = photoNormToCanvas(centroidNorm, state.viewport, ps)
               ctxDynamic.strokeStyle = '#ffffff'
               ctxDynamic.lineWidth = 1.5
               ctxDynamic.beginPath()
@@ -1413,6 +1617,42 @@ export default function CanvasStage() {
         store.updateShape(editDrag.layerId, editDrag.shapeId, newShape)
       }
 
+      // P34 (May 7 2026) — annotation handle / body drag. Same snap-on-
+      // point convention as shapes. Snap applies during point drag only;
+      // body drag uses raw cursor delta from drag origin so the
+      // annotation moves rigidly without snapping individual anchors.
+      // Renders to the static canvas (annotations live there), so flag
+      // both staticDirty and dynamicDirty.
+      if (annoDrag) {
+        const useX = (annoDrag.mode === 'point' && snapPt) ? Math.round(snapPt.x) : x
+        const useY = (annoDrag.mode === 'point' && snapPt) ? Math.round(snapPt.y) : y
+        if (annoDrag.mode === 'point') {
+          // Convert canvas-px to photo-normalized coords; write the
+          // single field (e.g. {tip: {x, y}}). photoSize-aware so handle
+          // tracks cursor 1:1 across zoom.
+          const newNorm = canvasToPhotoNorm({ x: useX, y: useY }, store.viewport, photoSizeLocal)
+          store.updateAnnotation(
+            annoDrag.sequenceId, annoDrag.annotationId,
+            { [annoDrag.field]: newNorm },
+          )
+        } else {
+          // Body drag — translate ALL the annotation's points by the
+          // canvas-px delta from drag origin. annotationBodyTranslatePartial
+          // handles the per-type field shape (note→.at, callout→.tip+.tail,
+          // dimline→.a+.b).
+          const dx = useX - annoDrag.originCursor.x
+          const dy = useY - annoDrag.originCursor.y
+          const partial = annotationBodyTranslatePartial(
+            annoDrag.originAnno, { x: dx, y: dy },
+            store.viewport, photoSizeLocal,
+          )
+          if (partial) {
+            store.updateAnnotation(annoDrag.sequenceId, annoDrag.annotationId, partial)
+          }
+        }
+        staticDirty = true
+      }
+
       dynamicDirty = true
     }
 
@@ -1443,6 +1683,81 @@ export default function CanvasStage() {
         // Don't intercept right-clicks (handled by onContextMenu instead).
         if (e.button === 2) return
         const photoSizeMD = effectivePhotoSize(store.photoMeta, cw, ch)
+
+        // P34 (May 7 2026) — annotation hit-test runs BEFORE shape hit-test
+        // so an annotation sitting on top of a shape can still be grabbed.
+        // Annotations only render for the active sequence; gate on it.
+        // Order: selectedAnnotation handles → selectedAnnotation body-center
+        // crosshair (callout/dimline only) → any-annotation hit (new
+        // selection) → fall through to shape branches below.
+        const activeSeqMD = store.sequences.find((sq) => sq.id === store.activeSeqId)
+        if (activeSeqMD) {
+          const selA = store.selectedAnnotation
+          // 0a. Drag handles of the already-selected annotation.
+          if (selA && selA.sequenceId === activeSeqMD.id) {
+            const selAnno = (activeSeqMD.annotations || []).find((a) => a.id === selA.annotationId)
+            if (selAnno) {
+              // Point handles (5px filled dots; 8-px hit tolerance).
+              const aHandles = annotationHandles(selAnno)
+              const ANNO_HANDLE_TOL_SQ = 64 // 8-px radius
+              for (const h of aHandles) {
+                const c = photoNormToCanvas(h.point, store.viewport, photoSizeMD)
+                const dx = raw.x - c.x
+                const dy = raw.y - c.y
+                if (dx * dx + dy * dy <= ANNO_HANDLE_TOL_SQ) {
+                  annoDrag = {
+                    mode: 'point',
+                    sequenceId: activeSeqMD.id,
+                    annotationId: selAnno.id,
+                    field: h.field,
+                    originAnno: JSON.parse(JSON.stringify(selAnno)),
+                    originCursor: { x: raw.x, y: raw.y },
+                    preDragSnap: useAppStore.getState().captureUndoSnapshot(),
+                  }
+                  dynamicDirty = true
+                  return
+                }
+              }
+              // Body-center crosshair (callout / dimline only — note's
+              // single anchor is hit by the point handle path above).
+              const cNorm = annotationCentroid(selAnno)
+              if (cNorm) {
+                const c = photoNormToCanvas(cNorm, store.viewport, photoSizeMD)
+                const dx = raw.x - c.x
+                const dy = raw.y - c.y
+                if (dx * dx + dy * dy <= 81) { // 9-px radius (matches shape body)
+                  annoDrag = {
+                    mode: 'body',
+                    sequenceId: activeSeqMD.id,
+                    annotationId: selAnno.id,
+                    originAnno: JSON.parse(JSON.stringify(selAnno)),
+                    originCursor: { x: raw.x, y: raw.y },
+                    preDragSnap: useAppStore.getState().captureUndoSnapshot(),
+                  }
+                  dynamicDirty = true
+                  return
+                }
+              }
+            }
+          }
+          // 0b. Any-annotation hit-test for new panel selection. No drag —
+          //     operator picks first, drags second (matches shape sel/handle
+          //     pattern). Selecting an annotation clears any shape selection
+          //     so the right-drawer state stays coherent.
+          const annoHit = annotationHitTest(
+            activeSeqMD.annotations || [],
+            activeSeqMD.id,
+            { x: raw.x, y: raw.y },
+            store.viewport, photoSizeMD,
+          )
+          if (annoHit) {
+            store.setSelectedAnnotation(annoHit)
+            store.clearSelection()
+            dynamicDirty = true
+            return
+          }
+        }
+
         const sel = store.selected
         // 1. If something is already selected, check handle proximity first
         if (sel) {
@@ -1457,6 +1772,9 @@ export default function CanvasStage() {
               const dx = raw.x - handles[i].x
               const dy = raw.y - handles[i].y
               if (dx * dx + dy * dy <= HANDLE_TOL_SQ) {
+                // P34 side fix (May 7 2026) — capture pre-drag snapshot.
+                // updateShape doesn't pushUndo (per-mousemove would burn
+                // one entry per pixel); push at mouseup if changed.
                 editDrag = {
                   mode: 'point',
                   layerId: sel.layerId,
@@ -1464,6 +1782,7 @@ export default function CanvasStage() {
                   pointIndex: i,
                   originShape: JSON.parse(JSON.stringify(shape)),
                   originCursor: { x: raw.x, y: raw.y },
+                  preDragSnap: useAppStore.getState().captureUndoSnapshot(),
                 }
                 dynamicDirty = true
                 return
@@ -1482,6 +1801,7 @@ export default function CanvasStage() {
                     shapeId: sel.shapeId,
                     originShape: JSON.parse(JSON.stringify(shape)),
                     originCursor: { x: raw.x, y: raw.y },
+                    preDragSnap: useAppStore.getState().captureUndoSnapshot(),
                   }
                   dynamicDirty = true
                   return
@@ -1494,8 +1814,16 @@ export default function CanvasStage() {
         const hit = hitTest({ x: raw.x, y: raw.y }, store.layers, store.viewport, photoSizeMD)
         if (hit) {
           store.setSelected(hit)
+          // P34 — picking a shape clears any annotation panel selection
+          // so the right-drawer state stays coherent (one selection at a
+          // time, like the shape branch).
+          store.setSelectedAnnotation(null)
         } else {
+          // P34 — empty-canvas click clears BOTH shape and annotation
+          // panel selections. Shape was the only selection field before
+          // P34; annotations now mirror the same deselect convention.
           store.clearSelection()
+          store.setSelectedAnnotation(null)
         }
         dynamicDirty = true
         return
@@ -1601,7 +1929,41 @@ export default function CanvasStage() {
       }
       // Spec §9 — end edit-mode drag if active
       if (editDrag) {
+        // P34 side fix (May 7 2026) — push captured pre-drag snapshot
+        // if the shape actually changed. updateShape doesn't pushUndo
+        // (per-mousemove granularity would burn one entry per pixel),
+        // so we do it here: one undo entry per drag, regardless of
+        // mousemove count. JSON-comparison covers both point and body
+        // modes uniformly.
+        const layer = useAppStore.getState().layers.find((l) => l.id === editDrag.layerId)
+        const cur = layer?.shapes?.find((sh) => sh.id === editDrag.shapeId)
+        if (
+          cur
+          && JSON.stringify(cur) !== JSON.stringify(editDrag.originShape)
+          && typeof editDrag.preDragSnap === 'string'
+        ) {
+          useAppStore.getState().pushCapturedSnapshot(editDrag.preDragSnap)
+        }
         editDrag = null
+        dynamicDirty = true
+        return
+      }
+      // P34 (May 7 2026) — end annotation drag if active. Same captured-
+      // snapshot pattern as shape drag (one undo entry per drag, not
+      // per mousemove). updateAnnotation also doesn't pushUndo.
+      if (annoDrag) {
+        const sequences = useAppStore.getState().sequences
+        const seqCur = sequences.find((sq) => sq.id === annoDrag.sequenceId)
+        const annoCur = (seqCur?.annotations || []).find((a) => a.id === annoDrag.annotationId)
+        if (
+          annoCur
+          && JSON.stringify(annoCur) !== JSON.stringify(annoDrag.originAnno)
+          && typeof annoDrag.preDragSnap === 'string'
+        ) {
+          useAppStore.getState().pushCapturedSnapshot(annoDrag.preDragSnap)
+        }
+        annoDrag = null
+        staticDirty = true
         dynamicDirty = true
         return
       }
@@ -1729,8 +2091,8 @@ export default function CanvasStage() {
 
       if (e.key === 'Escape') {
         // Priority: cancel in-progress draw draft → cancel edit drag →
-        // clear selection. Each layer is independent so Escape always
-        // unwinds the topmost interaction.
+        // cancel annotation drag → clear selection. Each layer is
+        // independent so Escape always unwinds the topmost interaction.
         if (draft) {
           draft = null
           isDragging = false
@@ -1742,20 +2104,48 @@ export default function CanvasStage() {
           dynamicDirty = true
           return
         }
+        // P34 — Escape cancels annotation drag. updateAnnotation calls
+        // during the drag mutated the live state; restore the original
+        // annotation snapshot from drag start so Cancel really cancels
+        // (matches the operator's mental model — Esc = back to where
+        // I was at mousedown).
+        if (annoDrag) {
+          useAppStore.getState().updateAnnotation(
+            annoDrag.sequenceId, annoDrag.annotationId, annoDrag.originAnno,
+          )
+          annoDrag = null
+          staticDirty = true
+          dynamicDirty = true
+          return
+        }
         const s = useAppStore.getState()
-        if (s.mode === 'EDIT' && s.selected) {
-          s.clearSelection()
+        if (s.mode === 'EDIT' && (s.selected || s.selectedAnnotation)) {
+          // P34 — clear both selections on Escape to mirror click-empty.
+          if (s.selected) s.clearSelection()
+          if (s.selectedAnnotation) s.setSelectedAnnotation(null)
           return
         }
       }
 
       // Spec §9 — Delete / Backspace removes the selected shape (no
       // confirm dialog per spec; rely on undo).
+      // P34 (May 7 2026) — also removes the selected annotation when in
+      // EDIT mode and selectedAnnotation is set. Same rely-on-undo
+      // convention; deleteAnnotation pushes its own undo entry.
       if ((e.key === 'Delete' || e.key === 'Backspace')) {
         const s = useAppStore.getState()
         if (s.mode === 'EDIT' && s.selected) {
           e.preventDefault()
           s.deleteShape(s.selected.layerId, s.selected.shapeId)
+          return
+        }
+        if (s.mode === 'EDIT' && s.selectedAnnotation) {
+          e.preventDefault()
+          s.deleteAnnotation(
+            s.selectedAnnotation.sequenceId,
+            s.selectedAnnotation.annotationId,
+          )
+          s.setSelectedAnnotation(null)
           return
         }
       }

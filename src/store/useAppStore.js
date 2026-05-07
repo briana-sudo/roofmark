@@ -82,12 +82,49 @@ const layerDefaults = () => ({
   shapes: [],
 })
 
+// P31 + P35 (May 7 2026) — global annotation rendering fallbacks.
+// ANNO_COLOR_FALLBACK matches the pre-P31 hardcoded amber so sequences
+// saved before P31 (no defaultAnnoColor field) render unchanged.
+// Used by sequenceDefaults + the render-path 3-tier fallback chain
+// (anno.<field> ?? seq.default<Field> ?? fallback).
+const ANNO_COLOR_FALLBACK = '#f5a623'
+const ANNO_FONT_SIZE_FALLBACK = 11
+const ANNO_FONT_SIZE_MIN = 8
+const ANNO_FONT_SIZE_MAX = 32
+
 const sequenceDefaults = (n) => ({
   id: newSeqId(),
   title: `S${n} — New Sequence`,
   layers: {},
   annotations: [],
+  // P31 + P35 — per-sequence annotation defaults. Per-annotation
+  // overrides (anno.color / anno.fontSize) stick across sequence-
+  // default changes; only ↺ reset clears the override (which sets
+  // the field back to null/undefined).
+  defaultAnnoColor: ANNO_COLOR_FALLBACK,
+  defaultAnnoFontSize: ANNO_FONT_SIZE_FALLBACK,
 })
+
+// P31 + P35 — normalize a hydrated/imported sequence so it has the
+// new default-* fields. Backfills missing fields with the global
+// fallbacks; clamps fontSize to [8, 32]. Run at hydration + on
+// importJSON so localStorage / Save JSON gets the migrated shape on
+// next persist.
+const normalizeSequence = (seq) => {
+  if (!seq || typeof seq !== 'object') return seq
+  const fontRaw = Number(seq.defaultAnnoFontSize)
+  const fontOk = Number.isFinite(fontRaw)
+  return {
+    ...seq,
+    defaultAnnoColor:
+      typeof seq.defaultAnnoColor === 'string' && seq.defaultAnnoColor.length > 0
+        ? seq.defaultAnnoColor
+        : ANNO_COLOR_FALLBACK,
+    defaultAnnoFontSize: fontOk
+      ? Math.min(ANNO_FONT_SIZE_MAX, Math.max(ANNO_FONT_SIZE_MIN, Math.round(fontRaw)))
+      : ANNO_FONT_SIZE_FALLBACK,
+  }
+}
 
 // ---- Persistence -----------------------------------------------------------
 // Step 10 added `gridSize` (now {x, y} per P12/P14) and `rightDrawerOpen`
@@ -232,7 +269,7 @@ reseedCounters(hydrated)
 const initialState = {
   // ---- data (persisted) ----
   layers: hydrated?.layers || [],
-  sequences: hydrated?.sequences || [],
+  sequences: (hydrated?.sequences || []).map(normalizeSequence),
   clines: hydrated?.clines || [],
   jobContext: hydrated?.jobContext || null,
 
@@ -606,6 +643,35 @@ export const useAppStore = create((set, get) => {
           seq.id === id ? { ...seq, title } : seq
         ),
       })),
+
+    // P31 + P35 (May 7 2026) — set per-sequence annotation defaults.
+    // partial may have defaultAnnoColor and/or defaultAnnoFontSize. The
+    // fontSize is clamped here so the operator can't drag the stepper
+    // outside [8, 32]. Pure setter (no pushUndo) — caller is expected
+    // to manage snapshots (focus→blur for stepper, capture+push for
+    // swatch click) so the undo granularity matches the input mode.
+    setSeqAnnoDefaults: (seqId, partial) => {
+      if (!partial || typeof partial !== 'object') return
+      const update = {}
+      if (typeof partial.defaultAnnoColor === 'string' && partial.defaultAnnoColor.length > 0) {
+        update.defaultAnnoColor = partial.defaultAnnoColor
+      }
+      if (partial.defaultAnnoFontSize != null) {
+        const n = Number(partial.defaultAnnoFontSize)
+        if (Number.isFinite(n)) {
+          update.defaultAnnoFontSize = Math.min(
+            ANNO_FONT_SIZE_MAX,
+            Math.max(ANNO_FONT_SIZE_MIN, Math.round(n)),
+          )
+        }
+      }
+      if (Object.keys(update).length === 0) return
+      set((s) => ({
+        sequences: s.sequences.map((seq) =>
+          seq.id === seqId ? { ...seq, ...update } : seq
+        ),
+      }))
+    },
 
     setSeqLayerVisibility: (seqId, layerId, visible) =>
       set((s) => ({
@@ -1159,7 +1225,12 @@ export const useAppStore = create((set, get) => {
       // Validate inbound fields the same way hydration does so a
       // hand-edited or older-version JSON file doesn't corrupt state.
       const layers = Array.isArray(obj.layers) ? obj.layers : []
-      const sequences = Array.isArray(obj.sequences) ? obj.sequences : []
+      // P31 + P35 — normalize imported sequences so they pick up the
+      // new default-* fields if the file predates the migration. The
+      // existing fallback chain in the render path means missing fields
+      // wouldn't visually break anything, but explicit normalization
+      // makes localStorage / next Save JSON consistent with the schema.
+      const sequences = (Array.isArray(obj.sequences) ? obj.sequences : []).map(normalizeSequence)
       const clines = Array.isArray(obj.clines) ? obj.clines : []
       const mode = (obj.mode && VALID_MODES.has(obj.mode)) ? obj.mode : 'DRAW'
       const drawerTab = (obj.drawerTab && VALID_DRAWER_TABS.has(obj.drawerTab))

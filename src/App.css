@@ -1746,3 +1746,194 @@ body {
   border-color: var(--rm-amber);
   box-shadow: 0 0 0 1px var(--rm-amber);
 }
+
+/* ============================================================================
+ * P31 + P35 (May 7 2026) — Sequence-level annotation defaults section
+ * (palette + font stepper) + per-annotation style row (override box +
+ * font stepper + ↺ reset).
+ * ============================================================================ */
+
+/* Sequence defaults section sits between the panel header and the cards.
+ * Treated as a header sub-section: tighter padding, mid-tone background,
+ * border-bottom to separate from the cards body. */
+.anno-seq-defaults {
+  background: var(--rm-panel-2);
+  border-bottom: 1px solid var(--rm-border);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.anno-seq-defaults-title {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--rm-fg-dim);
+}
+
+.anno-seq-defaults-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.anno-seq-defaults-label {
+  font-size: 11px;
+  color: var(--rm-fg);
+  width: 36px;
+  flex-shrink: 0;
+}
+
+.anno-seq-defaults-unit {
+  font-size: 10px;
+  color: var(--rm-fg-dim);
+}
+
+/* 10-swatch palette + 1 fine-tune box. Mirrors .color-palette / .swatch
+ * idiom but scoped to annotation defaults so a future restyle of one
+ * doesn't bleed into the other. Smaller cells (fewer columns) so the
+ * row fits beside the "Color" label inside the narrower panel. */
+.anno-color-palette {
+  display: grid;
+  grid-template-columns: repeat(11, 1fr);
+  gap: 4px;
+  flex: 1;
+  align-items: center;
+}
+
+.anno-swatch {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 80ms ease, border-color 80ms ease;
+}
+
+.anno-swatch:hover {
+  border-color: var(--rm-fg-dim);
+  transform: scale(1.08);
+}
+
+.anno-swatch.active {
+  border-color: var(--rm-fg);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);
+}
+
+.anno-swatch-fine-tune {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background:
+    repeating-conic-gradient(#444 0 25%, #2a2a2a 0 50%) 50% 50% / 6px 6px;
+  border: 1px dashed var(--rm-border);
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.anno-swatch-fine-tune:hover { border-color: var(--rm-fg-dim); }
+
+/* Font size stepper — both sequence-level (in defaults section) and
+ * per-annotation (in card style row) share this class; the per-card
+ * .override variant gets a subtle amber outline so the operator sees
+ * "this is overriding the default" at a glance. */
+.anno-font-stepper {
+  background: var(--rm-bg);
+  color: var(--rm-fg);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  padding: 3px 4px;
+  font-family: inherit;
+  font-size: 12px;
+  width: 56px;
+  outline: none;
+}
+
+.anno-font-stepper:focus {
+  border-color: var(--rm-amber);
+  box-shadow: 0 0 0 1px var(--rm-amber);
+}
+
+.anno-font-stepper.override {
+  border-color: rgba(245, 166, 35, 0.6);
+}
+
+/* Per-annotation card style row — color box + font stepper + ↺ reset.
+ * Lives BELOW the type-specific fields (textareas / value input) inside
+ * the card. */
+.anno-card-style-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--rm-border);
+  margin-top: 2px;
+}
+
+.anno-style-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--rm-fg-dim);
+}
+
+.anno-style-label { /* same UPPERCASE label idiom as anno-field-label */ }
+
+.anno-style-unit {
+  font-size: 10px;
+  color: var(--rm-fg-dim);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+/* Native color input box for per-annotation override. .override variant
+ * gets an amber outline mirror of .anno-font-stepper.override so the
+ * two style fields read consistently. */
+.anno-color-box {
+  width: 28px;
+  height: 22px;
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0;
+  background: transparent;
+}
+
+.anno-color-box::-webkit-color-swatch-wrapper { padding: 0; border-radius: 2px; }
+.anno-color-box::-webkit-color-swatch { border: none; border-radius: 2px; }
+.anno-color-box::-moz-color-swatch { border: none; border-radius: 2px; }
+
+.anno-color-box.override {
+  border-color: rgba(245, 166, 35, 0.7);
+  box-shadow: 0 0 0 1px rgba(245, 166, 35, 0.4);
+}
+
+/* ↺ reset button — only visible when an override is set (gated in JSX). */
+.anno-style-reset {
+  background: transparent;
+  border: 1px solid var(--rm-border);
+  color: var(--rm-fg-dim);
+  border-radius: 3px;
+  width: 20px;
+  height: 20px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.anno-style-reset:hover {
+  color: var(--rm-fg);
+  border-color: var(--rm-fg-dim);
+}
