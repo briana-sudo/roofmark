@@ -352,26 +352,40 @@ export default function CanvasStage() {
       sizeCanvas(cvDynamic)
       staticDirty = true
       dynamicDirty = true
-      // Section 7.A — when canvas dims change AND a photo is loaded but
-      // its viewport zoom is below the new fit-to-viewport floor, raise
-      // it so the photo stays visible. Pan is also clamped to keep ≥10%
-      // of photo on-screen.
+      // Section 7.A — handle canvas dims change.
+      // P37 (May 7 2026): two branches based on viewportTouchedSinceFit:
+      //   - flag === false (operator has NOT manually panned/zoomed
+      //     since last fit): auto-fit to the new canvas dims via
+      //     fitToViewport, which preserves the flag at false.
+      //   - flag === true (operator has manually panned/zoomed):
+      //     preserve their viewport — only do the protective clamp
+      //     (raise zoom to fit-floor + clamp pan to keep ≥10% of photo
+      //     visible) so the canvas isn't visually broken at very small
+      //     sizes.
+      // The ResizeObserver on container (below) catches both window
+      // resizes AND toolbar-wrap canvas-area-height changes (which
+      // don't fire window.resize); both route through this same path.
       const s = useAppStore.getState()
-      if (s.photoMeta) {
-        const cw = container.clientWidth
-        const ch = container.clientHeight
-        const fit = computeFitViewport({ width: s.photoMeta.width, height: s.photoMeta.height }, cw, ch)
-        const v = s.viewport || DEFAULT_VIEWPORT_LOCAL
-        let nextZoom = v.zoom
-        if (nextZoom < fit.zoom) nextZoom = fit.zoom
-        const nextPan = clampPan(
-          { ...v, zoom: nextZoom },
-          { width: s.photoMeta.width, height: s.photoMeta.height },
-          cw, ch,
-        )
-        if (nextZoom !== v.zoom || nextPan.panX !== v.panX || nextPan.panY !== v.panY) {
-          useAppStore.getState().setViewport({ zoom: nextZoom, panX: nextPan.panX, panY: nextPan.panY })
-        }
+      if (!s.photoMeta) return
+      const cw = container.clientWidth
+      const ch = container.clientHeight
+      if (!cw || !ch) return
+      if (!s.viewportTouchedSinceFit) {
+        useAppStore.getState().fitToViewport(cw, ch)
+        return
+      }
+      // Operator-touched branch: protective clamp only, never auto-fit.
+      const fit = computeFitViewport({ width: s.photoMeta.width, height: s.photoMeta.height }, cw, ch)
+      const v = s.viewport || DEFAULT_VIEWPORT_LOCAL
+      let nextZoom = v.zoom
+      if (nextZoom < fit.zoom) nextZoom = fit.zoom
+      const nextPan = clampPan(
+        { ...v, zoom: nextZoom },
+        { width: s.photoMeta.width, height: s.photoMeta.height },
+        cw, ch,
+      )
+      if (nextZoom !== v.zoom || nextPan.panX !== v.panX || nextPan.panY !== v.panY) {
+        useAppStore.getState().setViewport({ zoom: nextZoom, panX: nextPan.panX, panY: nextPan.panY })
       }
     }
     // Default viewport literal for closure (matches store's DEFAULT_VIEWPORT
@@ -1068,6 +1082,10 @@ export default function CanvasStage() {
           effectivePhotoSize(store.photoMeta, cwL, chL),
           cwL, chL,
         )
+        // P37 — operator-initiated drag pan. Mark touched so subsequent
+        // canvas-size changes preserve the operator's viewport instead
+        // of auto-fitting back.
+        store.markViewportTouched()
         store.setPan(next.panX, next.panY)
         dynamicDirty = true
         return
@@ -1350,6 +1368,8 @@ export default function CanvasStage() {
       const targetZoom = clampZoom(store.viewport.zoom * factor, fitFloor)
       const v = zoomAtCursor(store.viewport, ps, cursor, targetZoom)
       const clamped = clampPan(v, ps, cwL, chL)
+      // P37 — operator-initiated wheel zoom. Mark touched.
+      store.markViewportTouched()
       store.setViewport({ zoom: v.zoom, panX: clamped.panX, panY: clamped.panY })
     }
 
@@ -1364,6 +1384,8 @@ export default function CanvasStage() {
       const center = { x: cwL / 2, y: chL / 2 }
       const v = zoomAtCursor(store.viewport, ps, center, target)
       const clamped = clampPan(v, ps, cwL, chL)
+      // P37 — operator-initiated keyboard +/- zoom. Mark touched.
+      store.markViewportTouched()
       store.setViewport({ zoom: v.zoom, panX: clamped.panX, panY: clamped.panY })
     }
     const zoomTo = (target) => {
@@ -1376,14 +1398,18 @@ export default function CanvasStage() {
       const center = { x: cwL / 2, y: chL / 2 }
       const v = zoomAtCursor(store.viewport, ps, center, t)
       const clamped = clampPan(v, ps, cwL, chL)
+      // P37 — operator-initiated keyboard 1 (zoom to 100%). Mark touched.
+      store.markViewportTouched()
       store.setViewport({ zoom: v.zoom, panX: clamped.panX, panY: clamped.panY })
     }
     const fitViewport = () => {
       const store = useAppStore.getState()
       const cwL = container.clientWidth
       const chL = container.clientHeight
-      const ps = effectivePhotoSize(store.photoMeta, cwL, chL)
-      store.setViewport(computeFitViewport(ps, cwL, chL))
+      // P37 — keyboard 0 (Fit). Routes through fitToViewport which sets
+      // viewport + clears the touched flag so subsequent canvas-size
+      // changes auto-fit again.
+      store.fitToViewport(cwL, chL)
     }
 
     const onKeyDown = (e) => {
@@ -1518,6 +1544,8 @@ export default function CanvasStage() {
         const dx = currentMid.x - pinch.originMid.x
         const dy = currentMid.y - pinch.originMid.y
         const clamped = clampPan({ ...v, panX: v.panX + dx, panY: v.panY + dy }, ps, cwL, chL)
+        // P37 — operator-initiated touch pinch+pan. Mark touched.
+        store.markViewportTouched()
         store.setViewport({ zoom: v.zoom, panX: clamped.panX, panY: clamped.panY })
         return
       }
@@ -1648,10 +1676,13 @@ export default function CanvasStage() {
           queueMicrotask(() => {
             const s = useAppStore.getState()
             // If the operator has a persisted viewport from a prior session,
-            // honor it; otherwise fit-to-viewport.
+            // honor it; otherwise fit-to-viewport. P37: routes through
+            // fitToViewport so the touched flag clears on auto-fit
+            // (photo load + crop confirm both pass through here when
+            // viewport.zoom <= 0).
             const v = s.viewport || DEFAULT_VIEWPORT_LOCAL
             if (v.zoom <= 0 || (!prev.backgroundImage && (v.panX === 0 && v.panY === 0))) {
-              s.setViewport(computeFitViewport(s.photoMeta, cwL, chL))
+              s.fitToViewport(cwL, chL)
             }
           })
         }

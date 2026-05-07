@@ -57,6 +57,12 @@ export default function DrawingTools() {
   const viewport = useAppStore((s) => s.viewport)
   const photoMeta = useAppStore((s) => s.photoMeta)
   const setViewport = useAppStore((s) => s.setViewport)
+  // P37 (May 7 2026) — Zoom in/out are operator-initiated so they mark
+  // the viewport touched. Fit routes through fitToViewport which
+  // computes fit + clears the flag, restoring auto-fit behavior on
+  // subsequent canvas-size changes.
+  const markViewportTouched = useAppStore((s) => s.markViewportTouched)
+  const fitToViewport = useAppStore((s) => s.fitToViewport)
   const clinesVisible = useAppStore((s) => s.clinesVisible)
   const toggleClinesVisibility = useAppStore((s) => s.toggleClinesVisibility)
   const snapEnabled = useAppStore((s) => s.snapEnabled)
@@ -102,6 +108,9 @@ export default function DrawingTools() {
     const center = { x: cw / 2, y: ch / 2 }
     const v = zoomAtCursor(viewport, ps, center, target)
     const clamped = clampPan(v, ps, cw, ch)
+    // P37 — operator-initiated toolbar zoom. Mark touched so subsequent
+    // window resize / toolbar wrap doesn't auto-fit back.
+    markViewportTouched()
     setViewport({ zoom: v.zoom, panX: clamped.panX, panY: clamped.panY })
   }
   const onZoomIn  = () => applyZoom(1.25)
@@ -109,8 +118,10 @@ export default function DrawingTools() {
   const onFit = () => {
     const { cw, ch } = readCanvasSize()
     if (!cw || !ch) return
-    const ps = effectivePhotoSize(photoMeta, cw, ch)
-    setViewport(computeFitViewport(ps, cw, ch))
+    // P37 — Fit button is "reset my viewport." fitToViewport sets the
+    // computed fit + clears the touched flag so subsequent canvas-size
+    // changes auto-fit again until the operator pans/zooms manually.
+    fitToViewport(cw, ch)
   }
 
   // Section 7.A — photo flow:

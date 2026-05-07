@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { loadPhoto, savePhoto, clearPhoto } from './photoIDB'
+import { computeFitViewport } from './viewport'
 import {
   reprojectShape,
   reprojectCline,
@@ -261,6 +262,13 @@ const initialState = {
   // overridden by fit-to-viewport when a photo loads (deferred until after
   // canvas dimensions are known).
   viewport: normalizeViewport(hydrated?.viewport),
+  // P37 (May 7 2026) — session-scoped flag that gates auto-fit on canvas
+  // size changes (window resize, toolbar wrap). False by default;
+  // markViewportTouched sets it true on user-initiated pan/zoom;
+  // fitToViewport clears it back to false. When true, resizeAll's
+  // auto-fit branch skips so the operator's manual viewport is
+  // preserved across resizes. Not persisted (transient).
+  viewportTouchedSinceFit: false,
   // Working (cropped) photo dimensions in photo-px. Set when a photo
   // commits from the crop modal; cleared when photo is cleared. Used by
   // viewport math to translate normalized 0–1 shape coords to canvas px.
@@ -723,6 +731,14 @@ export const useAppStore = create((set, get) => {
     // (e.g. fit-to-viewport calc), or update one field. Zoom always clamped
     // to [ZOOM_MIN_CAP, ZOOM_MAX]; pan clamped lazily by the renderer/
     // pan-handler since the constraint depends on canvas dimensions.
+    //
+    // P37 (May 7 2026) — these setters are pure (don't touch the
+    // viewportTouchedSinceFit flag). User-initiated pan/zoom call sites
+    // (CanvasStage wheel zoom / drag pan / pinch / keyboard +/-)
+    // explicitly call markViewportTouched alongside their setViewport
+    // call. Internal call sites (resize clamp, fit, undo restore)
+    // don't, so the flag accurately tracks "did the operator do
+    // something deliberate."
     setViewport: (v) => set({ viewport: normalizeViewport(v) }),
     setZoom: (zoom) => set((s) => ({
       viewport: normalizeViewport({ ...s.viewport, zoom }),
@@ -730,6 +746,39 @@ export const useAppStore = create((set, get) => {
     setPan: (panX, panY) => set((s) => ({
       viewport: normalizeViewport({ ...s.viewport, panX, panY }),
     })),
+
+    // P37 (May 7 2026) — flag lifecycle helpers.
+    //
+    // markViewportTouched: called from user-initiated pan/zoom handlers
+    // in CanvasStage / DrawingTools so the flag reflects intentional
+    // operator action. Subsequent canvas-size-change events (window
+    // resize, toolbar wrap) read this flag and SKIP auto-fit so the
+    // operator's chosen viewport is preserved.
+    markViewportTouched: () => set({ viewportTouchedSinceFit: true }),
+    // fitToViewport: computes fit + sets viewport + clears the flag in
+    // one set. Used by:
+    //   - manual Fit button (DrawingTools onFit)
+    //   - keyboard 0 (CanvasStage fitViewport)
+    //   - photo-load microtask in CanvasStage (backgroundImage change)
+    //   - auto-fit branch in resizeAll (when flag was already false)
+    //   - commitCroppedPhoto path (zoom=0 + flag=false in store, then
+    //     CanvasStage microtask sees zoom <= 0 and calls fitToViewport)
+    // Operator who has manually panned/zoomed gets a fresh fit when
+    // they hit Fit; operator who hasn't keeps fit on canvas resize.
+    fitToViewport: (canvasW, canvasH) => {
+      const s = get()
+      if (!s.photoMeta || !canvasW || !canvasH) {
+        // No photo or no canvas dims — just clear the flag so subsequent
+        // resize doesn't try to fit a missing photo.
+        set({ viewportTouchedSinceFit: false })
+        return
+      }
+      const fit = computeFitViewport(s.photoMeta, canvasW, canvasH)
+      set({
+        viewport: normalizeViewport(fit),
+        viewportTouchedSinceFit: false,
+      })
+    },
 
     // Section 7.A — the source + cropped photo lifecycle. Pure state
     // setter — kept for any existing callers; the awaitable photo-
@@ -866,6 +915,13 @@ export const useAppStore = create((set, get) => {
 
       // ---- Single atomic apply ----------------------------------------
       // Re-projected coords (no-op if not re-crop) + new photo state.
+      // P37 (May 7 2026): on photo-crop confirm, ALWAYS re-fit the
+      // viewport. Set zoom=0 + clear the touched flag here; CanvasStage's
+      // backgroundImage subscription microtask sees zoom <= 0 and calls
+      // fitToViewport with the current canvas dims (which knows the
+      // photo's new dimensions and the live canvas size). Keeps the
+      // re-fit logic in the canvas layer where canvas dims live; the
+      // store just signals "please re-fit" via the zoom=0 sentinel.
       set({
         layers: reprojectedLayers,
         sequences: reprojectedSequences,
@@ -874,6 +930,8 @@ export const useAppStore = create((set, get) => {
         photoMeta: { width, height },
         cropMeta: cropMeta || null,
         hasSourcePhoto: true,
+        viewport: { panX: 0, panY: 0, zoom: 0 },
+        viewportTouchedSinceFit: false,
       })
 
       return true

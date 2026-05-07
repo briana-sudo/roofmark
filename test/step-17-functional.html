@@ -863,6 +863,144 @@ function moveTargetsFor(state) {
     afterSelect.activeLayerId === afterSelect.selected.layerId)
 }
 
+// 9i. P37 — auto-fit viewport on canvas size change (May 7 2026).
+// Pure-JS mirrors of the flag lifecycle. The actual ResizeObserver +
+// browser resize behavior is verified at operator-pass time on the
+// live URL across multiple viewport widths.
+
+// State machine for viewportTouchedSinceFit:
+//   - false on initial state
+//   - true after markViewportTouched
+//   - false after fitToViewport
+//   - false after commitCroppedPhoto (which sets viewport.zoom = 0 and
+//     flag = false in one set; the canvas microtask then calls
+//     fitToViewport to apply the actual fit)
+function applyMarkTouched(state) {
+  return { ...state, viewportTouchedSinceFit: true }
+}
+function applyFitToViewport(state, photoMeta, cw, ch) {
+  if (!photoMeta || !cw || !ch) {
+    return { ...state, viewportTouchedSinceFit: false }
+  }
+  // Mirror of computeFitViewport simplified: zoom = min(cw/w, ch/h),
+  // pan = centered.
+  const sx = cw / photoMeta.width
+  const sy = ch / photoMeta.height
+  const zoom = Math.min(sx, sy)
+  const photoCanvasW = photoMeta.width * zoom
+  const photoCanvasH = photoMeta.height * zoom
+  return {
+    ...state,
+    viewport: {
+      panX: Math.round((cw - photoCanvasW) / 2),
+      panY: Math.round((ch - photoCanvasH) / 2),
+      zoom,
+    },
+    viewportTouchedSinceFit: false,
+  }
+}
+function applyCommitCroppedPhotoSentinel(state, photoMeta) {
+  return {
+    ...state,
+    photoMeta,
+    viewport: { panX: 0, panY: 0, zoom: 0 },
+    viewportTouchedSinceFit: false,
+  }
+}
+// Mirror of resizeAll's two-branch decision.
+function applyResizeAll(state, cw, ch) {
+  if (!state.photoMeta || !cw || !ch) return state
+  if (!state.viewportTouchedSinceFit) {
+    return applyFitToViewport(state, state.photoMeta, cw, ch)
+  }
+  // Touched branch: protective clamp only — leave flag unchanged.
+  return state
+}
+
+// 9i-1. Initial state — flag is false.
+{
+  const initial = { viewport: { panX: 0, panY: 0, zoom: 1 }, viewportTouchedSinceFit: false, photoMeta: null }
+  pass('P37 — initial state: viewportTouchedSinceFit is false', initial.viewportTouchedSinceFit === false)
+}
+
+// 9i-2. markViewportTouched flips the flag.
+{
+  const before = { viewportTouchedSinceFit: false }
+  const after = applyMarkTouched(before)
+  pass('P37 — markViewportTouched sets flag to true', after.viewportTouchedSinceFit === true)
+}
+
+// 9i-3. fitToViewport clears the flag.
+{
+  const before = { viewport: { panX: 0, panY: 0, zoom: 5 }, viewportTouchedSinceFit: true, photoMeta: { width: 100, height: 100 } }
+  const after = applyFitToViewport(before, before.photoMeta, 800, 600)
+  pass('P37 — fitToViewport clears flag to false', after.viewportTouchedSinceFit === false)
+  pass('P37 — fitToViewport computes correct zoom', _approx(after.viewport.zoom, 6, 0.01))
+}
+
+// 9i-4. resizeAll auto-fits when flag is false.
+{
+  const before = { viewport: { panX: 0, panY: 0, zoom: 1 }, viewportTouchedSinceFit: false, photoMeta: { width: 100, height: 100 } }
+  const after = applyResizeAll(before, 800, 600)
+  pass('P37 — resizeAll auto-fits when flag is false (zoom changed)', after.viewport.zoom !== 1)
+  pass('P37 — resizeAll auto-fit keeps flag false', after.viewportTouchedSinceFit === false)
+}
+
+// 9i-5. resizeAll preserves viewport when flag is true.
+{
+  const before = { viewport: { panX: 50, panY: 30, zoom: 4 }, viewportTouchedSinceFit: true, photoMeta: { width: 100, height: 100 } }
+  const after = applyResizeAll(before, 800, 600)
+  pass('P37 — resizeAll preserves viewport when flag is true', after.viewport.zoom === 4)
+  pass('P37 — resizeAll touched-branch keeps flag true', after.viewportTouchedSinceFit === true)
+}
+
+// 9i-6. commitCroppedPhoto sentinel: zoom=0 + flag=false.
+{
+  const before = { viewport: { panX: 50, panY: 30, zoom: 4 }, viewportTouchedSinceFit: true }
+  const after = applyCommitCroppedPhotoSentinel(before, { width: 200, height: 100 })
+  pass('P37 — commitCroppedPhoto sets viewport.zoom = 0 (sentinel)', after.viewport.zoom === 0)
+  pass('P37 — commitCroppedPhoto clears the touched flag', after.viewportTouchedSinceFit === false)
+  // Microtask in CanvasStage would then call fitToViewport which
+  // applies the actual fit. Verify the next-step composition:
+  const afterMicrotaskFit = applyFitToViewport(after, after.photoMeta, 800, 600)
+  pass('P37 — post-commit microtask fit produces non-zero zoom', afterMicrotaskFit.viewport.zoom > 0)
+  pass('P37 — post-commit microtask fit keeps flag false', afterMicrotaskFit.viewportTouchedSinceFit === false)
+}
+
+// 9i-7. Full operator workflow lifecycle:
+//   load photo (flag false) → resize (auto-fit) → pan (mark touched) →
+//   resize (preserve) → click Fit (clear flag) → resize (auto-fit again)
+{
+  // Step 1: photo loaded, viewport at fit.
+  let state = applyFitToViewport(
+    { viewport: null, viewportTouchedSinceFit: false, photoMeta: { width: 100, height: 100 } },
+    { width: 100, height: 100 }, 800, 600,
+  )
+  pass('P37 lifecycle — after load, flag is false', state.viewportTouchedSinceFit === false)
+  const fitZoom = state.viewport.zoom
+
+  // Step 2: window resize — auto-fit.
+  state = applyResizeAll(state, 1000, 700)
+  pass('P37 lifecycle — resize while untouched auto-fits', state.viewportTouchedSinceFit === false && state.viewport.zoom !== fitZoom)
+
+  // Step 3: operator pans (mark touched).
+  state = applyMarkTouched(state)
+  pass('P37 lifecycle — after pan, flag is true', state.viewportTouchedSinceFit === true)
+  const touchedZoom = state.viewport.zoom
+
+  // Step 4: window resize — preserve viewport.
+  state = applyResizeAll(state, 1200, 800)
+  pass('P37 lifecycle — resize while touched preserves viewport', state.viewportTouchedSinceFit === true && state.viewport.zoom === touchedZoom)
+
+  // Step 5: operator clicks Fit (fitToViewport).
+  state = applyFitToViewport(state, state.photoMeta, 1200, 800)
+  pass('P37 lifecycle — Fit button clears flag', state.viewportTouchedSinceFit === false)
+
+  // Step 6: window resize — auto-fit again.
+  state = applyResizeAll(state, 1400, 900)
+  pass('P37 lifecycle — resize after Fit auto-fits again', state.viewportTouchedSinceFit === false)
+}
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {
