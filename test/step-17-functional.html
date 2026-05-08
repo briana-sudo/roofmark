@@ -2095,6 +2095,141 @@ function _undoRestoreFromSnap(snapJson) {
     pop1.gridRotation === 0 && pop1.perspectiveCorners === null)
 }
 
+// 9kk. Pass 1 fix (May 8 2026 — operator-reported boundary bug). Verify
+// importJSON's set() block applies gridRotation, perspectiveCorners,
+// perspectiveEditMode, AND pdfOrientation from the parsed JSON via the
+// same normalizers used at hydration. Pre-this-fix those four fields
+// kept their pre-Load values, causing Project A state to bleed into
+// the loaded project (operator's reported symptom: rotation input
+// dimmed because perspectiveCorners persisted from Project A).
+//
+// We test the import-side patch composition directly: apply normalizers
+// to a parsed JSON object's fields and verify each lands at the right
+// value. Caller of importJSON is the actual store.set; we mirror the
+// same normalizer + assignment logic here.
+function _normalizeGridRotation_p1(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 0
+  let r = ((n + 180) % 360 + 360) % 360 - 180
+  if (r < -180) r = -180
+  if (r > 180) r = 180
+  return r
+}
+function _normalizePerspectiveCorners_p1(v) {
+  if (!Array.isArray(v) || v.length !== 4) return null
+  const out = []
+  for (const c of v) {
+    if (!c || !Number.isFinite(c.x) || !Number.isFinite(c.y)) return null
+    if (c.x < -0.001 || c.x > 1.001 || c.y < -0.001 || c.y > 1.001) return null
+    out.push({ x: c.x, y: c.y })
+  }
+  return out
+}
+function _normalizePdfOrientation_p1(v) {
+  const VALID = new Set(['auto', 'portrait', 'landscape'])
+  return (typeof v === 'string' && VALID.has(v)) ? v : 'auto'
+}
+// Mirror of importJSON's patch composition for the four fields under test.
+function _importJSONApplyPatch(obj) {
+  return {
+    gridRotation: _normalizeGridRotation_p1(obj.gridRotation),
+    perspectiveCorners: _normalizePerspectiveCorners_p1(obj.perspectiveCorners),
+    perspectiveEditMode: false,  // always force false on Load
+    pdfOrientation: _normalizePdfOrientation_p1(obj.pdfOrientation),
+  }
+}
+
+// Case 1: full v2 JSON with all 4 fields populated — each applies.
+{
+  const json = {
+    schemaVersion: 2,
+    gridRotation: 15,
+    perspectiveCorners: [
+      { x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 },
+      { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 },
+    ],
+    pdfOrientation: 'landscape',
+    // Note: a serialized perspectiveEditMode of true should be ignored
+    // (the field is transient + always forced false on Load).
+    perspectiveEditMode: true,
+  }
+  const patch = _importJSONApplyPatch(json)
+  pass('Pass 1 — importJSON: gridRotation 15 applies',
+    patch.gridRotation === 15)
+  pass('Pass 1 — importJSON: perspectiveCorners array applies (4 elements)',
+    Array.isArray(patch.perspectiveCorners) && patch.perspectiveCorners.length === 4)
+  pass('Pass 1 — importJSON: perspectiveCorners[0] preserved exactly',
+    patch.perspectiveCorners[0].x === 0.1 && patch.perspectiveCorners[0].y === 0.1)
+  pass('Pass 1 — importJSON: perspectiveCorners[2] preserved exactly',
+    patch.perspectiveCorners[2].x === 0.9 && patch.perspectiveCorners[2].y === 0.9)
+  pass('Pass 1 — importJSON: pdfOrientation "landscape" applies',
+    patch.pdfOrientation === 'landscape')
+  pass('Pass 1 — importJSON: perspectiveEditMode FORCED false (transient — never restored from JSON)',
+    patch.perspectiveEditMode === false)
+}
+
+// Case 2: pre-Pass-1 v2 JSON file (no gridRotation / perspectiveCorners /
+// pdfOrientation fields). Older v2 exports written before P16 + P38 +
+// Step 16 PERSIST_KEYS additions. Normalizers must fall back to defaults
+// without throwing or producing undefined fields.
+{
+  const json = {
+    schemaVersion: 2,
+    layers: [],
+    sequences: [],
+    // No gridRotation, no perspectiveCorners, no pdfOrientation
+  }
+  const patch = _importJSONApplyPatch(json)
+  pass('Pass 1 — importJSON backward-compat: missing gridRotation → 0',
+    patch.gridRotation === 0)
+  pass('Pass 1 — importJSON backward-compat: missing perspectiveCorners → null',
+    patch.perspectiveCorners === null)
+  pass('Pass 1 — importJSON backward-compat: missing pdfOrientation → "auto"',
+    patch.pdfOrientation === 'auto')
+  pass('Pass 1 — importJSON backward-compat: perspectiveEditMode false regardless',
+    patch.perspectiveEditMode === false)
+}
+
+// Case 3: v2 JSON with malformed values. Each field's normalizer must
+// reject + fall back rather than passing garbage through.
+{
+  const json = {
+    schemaVersion: 2,
+    gridRotation: 'not a number',
+    perspectiveCorners: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }], // only 3
+    pdfOrientation: 'diagonal', // invalid
+  }
+  const patch = _importJSONApplyPatch(json)
+  pass('Pass 1 — importJSON malformed: bad gridRotation → 0',
+    patch.gridRotation === 0)
+  pass('Pass 1 — importJSON malformed: 3-corner perspectiveCorners → null (4 required)',
+    patch.perspectiveCorners === null)
+  pass('Pass 1 — importJSON malformed: bad pdfOrientation → "auto"',
+    patch.pdfOrientation === 'auto')
+}
+
+// Case 4: v2 JSON with out-of-bounds perspective corner (one corner > 1).
+{
+  const json = {
+    schemaVersion: 2,
+    perspectiveCorners: [
+      { x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 },
+      { x: 0.9, y: 0.9 }, { x: 1.5, y: 0.9 },  // out of bounds
+    ],
+  }
+  const patch = _importJSONApplyPatch(json)
+  pass('Pass 1 — importJSON: out-of-bounds corner rejects whole perspectiveCorners → null',
+    patch.perspectiveCorners === null)
+}
+
+// Case 5: gridRotation wraparound applies on Load (e.g., 540 → ±180).
+{
+  const json = { schemaVersion: 2, gridRotation: 540 }
+  const patch = _importJSONApplyPatch(json)
+  pass('Pass 1 — importJSON: 540° wraps to ±180° (canonical [-180, 180] range)',
+    Math.abs(Math.abs(patch.gridRotation) - 180) < 1e-9)
+}
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {

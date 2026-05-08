@@ -1508,6 +1508,27 @@ export const useAppStore = create((set, get) => {
         selected: null,
         selectedAnnotation: null,
         tool: null,
+        // Pass 1 fix (May 8 2026 — operator-reported boundary bug):
+        // pre-this-fix the importJSON set() block did NOT write
+        // gridRotation, perspectiveCorners, perspectiveEditMode, OR
+        // pdfOrientation. When loading a project, those fields kept
+        // whatever values they had pre-Load (Project A's state). For
+        // perspective corners specifically, this caused Project A's
+        // perspective to bleed into the loaded project — and since
+        // perspectiveActive=true dims the rotation input, the operator
+        // saw the rotation input "permanently disabled" after Load.
+        //
+        // Apply each field using the same normalizers used at hydration
+        // (lines 363, 366, 370 in initial state). exportJSON already
+        // wrote these fields via PERSIST_KEYS iteration; importJSON
+        // just wasn't reading them. perspectiveEditMode is intentionally
+        // forced false on Load — it's a transient UI flag that should
+        // never restore from a serialized file (operator re-enters
+        // edit mode explicitly via the Persp button).
+        gridRotation: normalizeGridRotation(obj.gridRotation),
+        perspectiveCorners: normalizePerspectiveCorners(obj.perspectiveCorners),
+        perspectiveEditMode: false,
+        pdfOrientation: normalizePdfOrientation(obj.pdfOrientation),
         // Bug A — single-entry undoStack with the pre-import snapshot.
         // Cmd+Z restores pre-import state; second Cmd+Z is a no-op
         // (button disables). Prior history is intentionally dropped to
