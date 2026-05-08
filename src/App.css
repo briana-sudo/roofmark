@@ -431,6 +431,64 @@ body {
   accent-color: var(--rm-accent);
 }
 
+/* P38 (May 8 2026) — grid rotation number input. Mirrors .grid-axis-input
+ * idiom but with a rotation-icon label + a degree-symbol unit suffix. */
+.grid-rotation-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--rm-fg-dim);
+}
+.grid-rotation-input .grid-rotation-icon {
+  color: var(--rm-fg-dim);
+  font-size: 13px;
+  width: 12px;
+  text-align: center;
+}
+.grid-rotation-input input[type="number"] {
+  width: 44px;
+  background: var(--rm-bg);
+  color: var(--rm-fg);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.grid-rotation-input input[type="number"]:focus {
+  border-color: var(--rm-amber);
+  box-shadow: 0 0 0 1px var(--rm-amber);
+}
+.grid-rotation-input .grid-rotation-unit {
+  font-size: 10px;
+  color: var(--rm-fg-dim);
+}
+/* Option Y composition: when perspective is active, rotation input is
+ * dimmed (NOT hidden) so the operator's rotation choice is preserved
+ * visually as well as in the store. */
+.grid-rotation-input.dimmed {
+  opacity: 0.45;
+}
+.grid-rotation-input.dimmed input[type="number"] {
+  cursor: not-allowed;
+}
+
+/* P16 (May 8 2026) — Perspective button in snap-grid group. Reuses the
+ * .tool-btn base with a KCC-orange .active state to differentiate from
+ * the cyan accent used by other tools — emphasizes "this is a grid
+ * setting that's currently overriding rotation." */
+.tool-btn.perspective-btn.active {
+  background: rgba(232, 83, 26, 0.18);
+  border-color: rgba(232, 83, 26, 0.6);
+  color: #ffffff;
+  box-shadow: 0 0 0 1px rgba(232, 83, 26, 0.4) inset;
+}
+.tool-btn.perspective-btn.active .tool-icon {
+  color: #e8531a;
+}
+
 .tool-btn {
   display: inline-flex;
   align-items: center;

@@ -1692,6 +1692,257 @@ function _computeContributingLayers(sequence, layers) {
     contrib.length === 1)
 }
 
+// 9aa. P16 + P38 mini-step (May 8 2026) — perspective transform math.
+// Mirror of src/utils/perspective.js — homography solve + forward +
+// inverse + degenerate detection + rotation. Pure logic, no DOM deps.
+function _solveLinearSystem(A, b) {
+  const n = A.length
+  const M = A.map((row, i) => [...row, b[i]])
+  for (let i = 0; i < n; i++) {
+    let maxRow = i, maxVal = Math.abs(M[i][i])
+    for (let k = i + 1; k < n; k++) {
+      const v = Math.abs(M[k][i])
+      if (v > maxVal) { maxRow = k; maxVal = v }
+    }
+    if (maxVal < 1e-9) return null
+    if (maxRow !== i) { const tmp = M[i]; M[i] = M[maxRow]; M[maxRow] = tmp }
+    for (let k = i + 1; k < n; k++) {
+      const factor = M[k][i] / M[i][i]
+      for (let j = i; j <= n; j++) M[k][j] -= factor * M[i][j]
+    }
+  }
+  const x = new Array(n).fill(0)
+  for (let i = n - 1; i >= 0; i--) {
+    let sum = M[i][n]
+    for (let j = i + 1; j < n; j++) sum -= M[i][j] * x[j]
+    x[i] = sum / M[i][i]
+  }
+  return x
+}
+function _anyThreeCollinear(pts) {
+  for (let i = 0; i < pts.length; i++) {
+    for (let j = i + 1; j < pts.length; j++) {
+      for (let k = j + 1; k < pts.length; k++) {
+        const a = pts[i], b = pts[j], c = pts[k]
+        const cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+        if (Math.abs(cross) < 1e-6) return true
+      }
+    }
+  }
+  return false
+}
+function _computeHomography(src, dst) {
+  if (src.length !== 4 || dst.length !== 4) return null
+  if (_anyThreeCollinear(src) || _anyThreeCollinear(dst)) return null
+  const A = [], b = []
+  for (let i = 0; i < 4; i++) {
+    const sx = src[i].x, sy = src[i].y, dx = dst[i].x, dy = dst[i].y
+    A.push([sx, sy, 1, 0, 0, 0, -dx*sx, -dx*sy]); b.push(dx)
+    A.push([0, 0, 0, sx, sy, 1, -dy*sx, -dy*sy]); b.push(dy)
+  }
+  const x = _solveLinearSystem(A, b)
+  if (!x) return null
+  return [x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], 1]
+}
+function _applyHomography(H, p) {
+  const x = p.x, y = p.y
+  const w = H[6]*x + H[7]*y + H[8]
+  if (Math.abs(w) < 1e-12) return null
+  return { x: (H[0]*x + H[1]*y + H[2]) / w, y: (H[3]*x + H[4]*y + H[5]) / w }
+}
+function _invertHomography(H) {
+  const a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7],i=H[8]
+  const det = a*(e*i-f*h) - b*(d*i-f*g) + c*(d*h-e*g)
+  if (Math.abs(det) < 1e-12) return null
+  const id = 1 / det
+  return [
+    (e*i-f*h)*id, (c*h-b*i)*id, (b*f-c*e)*id,
+    (f*g-d*i)*id, (a*i-c*g)*id, (c*d-a*f)*id,
+    (d*h-e*g)*id, (b*g-a*h)*id, (a*e-b*d)*id,
+  ]
+}
+function _rotatePoint(p, c, deg) {
+  const r = deg * Math.PI / 180
+  const cos = Math.cos(r), sin = Math.sin(r)
+  const dx = p.x - c.x, dy = p.y - c.y
+  return { x: c.x + dx*cos - dy*sin, y: c.y + dx*sin + dy*cos }
+}
+
+// Identity homography: src corners == dst corners (a unit square mapped
+// to itself).
+{
+  const unit = [{ x:0, y:0 }, { x:1, y:0 }, { x:1, y:1 }, { x:0, y:1 }]
+  const H = _computeHomography(unit, unit)
+  pass('P16 — homography: identity (square→same square) returns valid matrix',
+    H !== null && H.length === 9)
+  const out = _applyHomography(H, { x: 0.5, y: 0.5 })
+  pass('P16 — homography: identity preserves center point',
+    _approx(out.x, 0.5, 1e-6) && _approx(out.y, 0.5, 1e-6))
+}
+
+// Trapezoid: typical perspective-from-above where top edge is shorter.
+{
+  const src = [{ x:0, y:0 }, { x:100, y:0 }, { x:100, y:100 }, { x:0, y:100 }]
+  const dst = [{ x:20, y:0 }, { x:80, y:0 }, { x:100, y:100 }, { x:0, y:100 }]
+  const H = _computeHomography(src, dst)
+  pass('P16 — homography: trapezoid valid', H !== null)
+  // Each src corner maps to its dst corner.
+  for (let i = 0; i < 4; i++) {
+    const out = _applyHomography(H, src[i])
+    pass(`P16 — homography: src[${i}] → dst[${i}] (within 1e-6)`,
+      _approx(out.x, dst[i].x, 1e-6) && _approx(out.y, dst[i].y, 1e-6))
+  }
+}
+
+// Forward + inverse round-trip: apply both and verify identity.
+{
+  const src = [{ x:0, y:0 }, { x:200, y:0 }, { x:180, y:150 }, { x:30, y:160 }]
+  const dst = [{ x:50, y:10 }, { x:150, y:20 }, { x:140, y:130 }, { x:60, y:140 }]
+  const H = _computeHomography(src, dst)
+  const Hinv = _invertHomography(H)
+  pass('P16 — homography: invert returns valid matrix', Hinv !== null)
+  // Pick an arbitrary point in src space, forward then inverse should
+  // round-trip to the same point.
+  const probe = { x: 75, y: 50 }
+  const fwd = _applyHomography(H, probe)
+  const back = _applyHomography(Hinv, fwd)
+  pass('P16 — homography: forward+inverse round-trip identity',
+    _approx(back.x, probe.x, 1e-4) && _approx(back.y, probe.y, 1e-4))
+}
+
+// Degenerate detection: 3 collinear destination corners → null.
+{
+  const src = [{ x:0, y:0 }, { x:1, y:0 }, { x:1, y:1 }, { x:0, y:1 }]
+  // 3 collinear points on the y=0 axis (corners 0, 1, and a midpoint as 2)
+  const dst = [{ x:0, y:0 }, { x:1, y:0 }, { x:0.5, y:0 }, { x:0, y:1 }]
+  const H = _computeHomography(src, dst)
+  pass('P16 — homography: 3 collinear dest corners → null', H === null)
+}
+
+// 9bb. P38 — rotation math. About a center, in degrees CCW.
+{
+  const center = { x: 50, y: 50 }
+  // Rotate (100, 50) — point on the +x axis from center — by 90° CCW.
+  // Should land at (50, 100) — point on the +y axis from center.
+  const rot90 = _rotatePoint({ x: 100, y: 50 }, center, 90)
+  pass('P38 — rotation: 90° CCW maps +x to +y',
+    _approx(rot90.x, 50, 1e-9) && _approx(rot90.y, 100, 1e-9))
+  // Rotate by 180° — should land at the opposite side.
+  const rot180 = _rotatePoint({ x: 100, y: 50 }, center, 180)
+  pass('P38 — rotation: 180° maps +x to -x',
+    _approx(rot180.x, 0, 1e-9) && _approx(rot180.y, 50, 1e-9))
+  // Rotate by 0° — identity.
+  const rot0 = _rotatePoint({ x: 100, y: 50 }, center, 0)
+  pass('P38 — rotation: 0° is identity',
+    _approx(rot0.x, 100, 1e-9) && _approx(rot0.y, 50, 1e-9))
+  // Rotate forward then inverse — round-trip.
+  const fwd = _rotatePoint({ x: 100, y: 50 }, center, 30)
+  const back = _rotatePoint(fwd, center, -30)
+  pass('P38 — rotation: forward + inverse round-trip',
+    _approx(back.x, 100, 1e-9) && _approx(back.y, 50, 1e-9))
+}
+
+// 9cc. P38 — rotation normalization (clamp + wraparound).
+function _normalizeGridRotation(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 0
+  let r = ((n + 180) % 360 + 360) % 360 - 180
+  if (r < -180) r = -180
+  if (r > 180) r = 180
+  return r
+}
+pass('P38 — normalize: undefined → 0', _normalizeGridRotation(undefined) === 0)
+pass('P38 — normalize: NaN → 0', _normalizeGridRotation(NaN) === 0)
+pass('P38 — normalize: 0 preserved', _normalizeGridRotation(0) === 0)
+pass('P38 — normalize: 90 preserved', _normalizeGridRotation(90) === 90)
+pass('P38 — normalize: -90 preserved', _normalizeGridRotation(-90) === -90)
+pass('P38 — normalize: 270 wraps to -90',
+  Math.abs(_normalizeGridRotation(270) - (-90)) < 1e-9)
+// 540° = 180° (mod 360). Both 180 and -180 represent the same physical
+// angle; either result is acceptable. _normalizeGridRotation wraps to
+// the canonical [-180, 180] range and tends toward -180 for inputs
+// landing exactly on the boundary.
+pass('P38 — normalize: 540 wraps to 180 or -180 (same physical angle)',
+  Math.abs(Math.abs(_normalizeGridRotation(540)) - 180) < 1e-9)
+pass('P38 — normalize: -270 wraps to 90',
+  Math.abs(_normalizeGridRotation(-270) - 90) < 1e-9)
+
+// 9dd. P16 — perspective corner persistence + migration.
+function _normalizePerspectiveCorners(v) {
+  if (!Array.isArray(v) || v.length !== 4) return null
+  const out = []
+  for (const c of v) {
+    if (!c || !Number.isFinite(c.x) || !Number.isFinite(c.y)) return null
+    if (c.x < -0.001 || c.x > 1.001 || c.y < -0.001 || c.y > 1.001) return null
+    out.push({ x: c.x, y: c.y })
+  }
+  return out
+}
+pass('P16 — normalize: undefined → null', _normalizePerspectiveCorners(undefined) === null)
+pass('P16 — normalize: empty array → null', _normalizePerspectiveCorners([]) === null)
+pass('P16 — normalize: 3 corners → null', _normalizePerspectiveCorners([{x:0,y:0},{x:1,y:0},{x:0,y:1}]) === null)
+pass('P16 — normalize: out-of-bounds corner → null',
+  _normalizePerspectiveCorners([{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:1.5,y:1}]) === null)
+pass('P16 — normalize: NaN coord → null',
+  _normalizePerspectiveCorners([{x:0,y:0},{x:NaN,y:0},{x:1,y:1},{x:0,y:1}]) === null)
+{
+  const valid = [{x:0.1,y:0.1},{x:0.9,y:0.1},{x:0.9,y:0.9},{x:0.1,y:0.9}]
+  const out = _normalizePerspectiveCorners(valid)
+  pass('P16 — normalize: 4 valid in-bounds corners → preserved',
+    Array.isArray(out) && out.length === 4
+    && _approx(out[0].x, 0.1) && _approx(out[2].y, 0.9))
+}
+
+// 9ee. P16 + P38 — Option Y composition rule. Render-path branching:
+// when perspectiveCorners != null AND not at default bounds, perspective
+// dominates; rotation is ignored.
+function _selectGridBranch(perspectiveCorners, gridRotation) {
+  if (perspectiveCorners && perspectiveCorners.length === 4) {
+    const isIdentity = perspectiveCorners[0].x === 0 && perspectiveCorners[0].y === 0
+      && perspectiveCorners[1].x === 1 && perspectiveCorners[1].y === 0
+      && perspectiveCorners[2].x === 1 && perspectiveCorners[2].y === 1
+      && perspectiveCorners[3].x === 0 && perspectiveCorners[3].y === 1
+    if (!isIdentity) return 'perspective'
+  }
+  if (gridRotation && gridRotation !== 0) return 'rotation'
+  return 'axis-aligned'
+}
+{
+  const defaultCorners = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}]
+  const editedCorners = [{x:0.1,y:0.1},{x:0.9,y:0.1},{x:0.9,y:0.9},{x:0.1,y:0.9}]
+  pass('Option Y — null corners + 0 rotation → axis-aligned',
+    _selectGridBranch(null, 0) === 'axis-aligned')
+  pass('Option Y — null corners + 15° rotation → rotation',
+    _selectGridBranch(null, 15) === 'rotation')
+  pass('Option Y — default corners + 0 rotation → axis-aligned (identity passthrough)',
+    _selectGridBranch(defaultCorners, 0) === 'axis-aligned')
+  pass('Option Y — edited corners + 0 rotation → perspective',
+    _selectGridBranch(editedCorners, 0) === 'perspective')
+  pass('Option Y — edited corners + 15° rotation → perspective dominates',
+    _selectGridBranch(editedCorners, 15) === 'perspective')
+  pass('Option Y — default corners + 15° rotation → rotation (perspective is no-op)',
+    _selectGridBranch(defaultCorners, 15) === 'rotation')
+}
+
+// 9ff. P16 — countOutOfBounds extension. perspective field counts 1 if
+// any of the 4 corners falls outside [0, 1].
+function _isPointOutOfBounds(p) {
+  if (!p) return true
+  return !(p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1)
+}
+function _countPerspectiveOOB(corners) {
+  if (!Array.isArray(corners) || corners.length !== 4) return 0
+  for (const c of corners) if (_isPointOutOfBounds(c)) return 1
+  return 0
+}
+pass('P16 — countOOB: null corners → 0', _countPerspectiveOOB(null) === 0)
+pass('P16 — countOOB: all 4 in-bounds → 0',
+  _countPerspectiveOOB([{x:0.1,y:0.1},{x:0.9,y:0.1},{x:0.9,y:0.9},{x:0.1,y:0.9}]) === 0)
+pass('P16 — countOOB: one corner above 1 → 1',
+  _countPerspectiveOOB([{x:0.1,y:0.1},{x:1.5,y:0.1},{x:0.9,y:0.9},{x:0.1,y:0.9}]) === 1)
+pass('P16 — countOOB: one corner below 0 → 1',
+  _countPerspectiveOOB([{x:0.1,y:0.1},{x:0.9,y:-0.5},{x:0.9,y:0.9},{x:0.1,y:0.9}]) === 1)
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {

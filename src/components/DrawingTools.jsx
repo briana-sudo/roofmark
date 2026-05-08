@@ -79,6 +79,18 @@ export default function DrawingTools() {
   // P19 (May 7 2026) — operator-adjustable grid line opacity.
   const gridOpacity = useAppStore((s) => s.gridOpacity)
   const setGridOpacity = useAppStore((s) => s.setGridOpacity)
+  // P38 (May 8 2026) — single-angle grid rotation. Dimmed (NOT hidden)
+  // when perspectiveCorners are active (Option Y).
+  const gridRotation = useAppStore((s) => s.gridRotation)
+  const setGridRotation = useAppStore((s) => s.setGridRotation)
+  // P16 (May 8 2026) — perspective grid edit mode toggle + corners state.
+  const perspectiveEditMode = useAppStore((s) => s.perspectiveEditMode)
+  const togglePerspectiveEditMode = useAppStore((s) => s.togglePerspectiveEditMode)
+  const perspectiveCorners = useAppStore((s) => s.perspectiveCorners)
+  const clearPerspectiveCorners = useAppStore((s) => s.clearPerspectiveCorners)
+  // Option Y composition: rotation is ignored at render+snap time when
+  // perspective is active. UI dims the rotation input + tooltip explains.
+  const perspectiveActive = !!(perspectiveCorners && perspectiveCorners.length === 4)
   const backgroundImage = useAppStore((s) => s.backgroundImage)
   const clearBackgroundImage = useAppStore((s) => s.clearBackgroundImage)
 
@@ -344,6 +356,59 @@ export default function DrawingTools() {
             data-testid="input-grid-opacity"
           />
         </label>
+        {/* P38 (May 8 2026) — grid rotation input. Dimmed (NOT hidden)
+            when perspective is active per Option Y so the operator's
+            rotation choice persists across perspective on/off cycles. */}
+        <label
+          className={perspectiveActive ? 'grid-rotation-input dimmed' : 'grid-rotation-input'}
+          title={
+            perspectiveActive
+              ? 'Disabled while perspective grid is active'
+              : `Grid rotation: ${gridRotation ?? 0}°`
+          }
+        >
+          <span className="grid-rotation-icon" aria-hidden="true">↻</span>
+          <input
+            type="number"
+            min="-180"
+            max="180"
+            step="1"
+            value={gridRotation ?? 0}
+            onChange={(e) => setGridRotation(e.target.value)}
+            disabled={perspectiveActive}
+            aria-label="Grid rotation in degrees"
+            data-testid="input-grid-rotation"
+          />
+          <span className="grid-rotation-unit">°</span>
+        </label>
+        {/* P16 (May 8 2026) — Perspective button. Click toggles
+            perspective-edit mode; when active, 4 corner handles render on
+            canvas. First-time activation pre-loads default corners. The
+            same button doubles as a "Clear" affordance: shift-click or
+            right-click clears corners and exits edit mode. */}
+        <button
+          type="button"
+          className={perspectiveEditMode ? 'tool-btn perspective-btn active' : 'tool-btn perspective-btn'}
+          onClick={togglePerspectiveEditMode}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            // Right-click clears perspective corners + exits edit mode.
+            if (perspectiveCorners) clearPerspectiveCorners()
+            if (perspectiveEditMode) togglePerspectiveEditMode()
+          }}
+          title={
+            perspectiveEditMode
+              ? 'Exit perspective edit mode (Esc). Right-click to clear corners.'
+              : perspectiveActive
+                ? 'Edit perspective grid corners. Right-click to clear corners.'
+                : 'Define perspective grid (drag 4 corners over the visible roof rectangle)'
+          }
+          aria-pressed={perspectiveEditMode}
+          data-testid="btn-perspective"
+        >
+          <span className="tool-icon" aria-hidden="true">▱</span>
+          <span className="tool-name">Persp</span>
+        </button>
       </div>
 
       <span className="tool-divider" aria-hidden="true" />

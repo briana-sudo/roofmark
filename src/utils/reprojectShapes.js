@@ -255,10 +255,14 @@ export function annoOutOfBounds(anno) {
 
 /**
  * Tally out-of-bounds counts across an entire project's coord-bearing
- * data. Returns { shapes, clines, annotations } — feeds the confirm
- * dialog "This crop will hide N shapes, M clines, K annotations."
+ * data. Returns { shapes, clines, annotations, perspective } — feeds
+ * the confirm dialog "This crop will hide N shapes, M clines, K
+ * annotations" (extended for P16 perspective grid May 8 2026 — if any
+ * of the 4 perspective corners falls out of bounds after re-crop, the
+ * perspective is unusable in the new crop and the corners should be
+ * cleared; counted as a single "perspective grid" item in the dialog).
  */
-export function countOutOfBounds(layers, clines, sequences) {
+export function countOutOfBounds(layers, clines, sequences, perspectiveCorners) {
   let shapes = 0
   for (const l of layers || []) {
     for (const sh of l.shapes || []) {
@@ -275,5 +279,28 @@ export function countOutOfBounds(layers, clines, sequences) {
       if (annoOutOfBounds(a)) annotations += 1
     }
   }
-  return { shapes, clines: cl, annotations }
+  // P16 — perspective grid is binary (in-bounds or unusable). Count = 1
+  // when any of the 4 re-projected corners lies outside [0, 1] in the new
+  // crop; 0 when all 4 stay in bounds.
+  let perspective = 0
+  if (Array.isArray(perspectiveCorners) && perspectiveCorners.length === 4) {
+    for (const c of perspectiveCorners) {
+      if (isPointOutOfBounds(c)) { perspective = 1; break }
+    }
+  }
+  return { shapes, clines: cl, annotations, perspective }
+}
+
+/**
+ * P16 (May 8 2026) — re-project perspective grid corners across a crop
+ * change. Mirrors reprojectAnnotation for the .at field: each of the 4
+ * corners is treated as a normalized point and re-projected through the
+ * source-px intermediate. Returns a new 4-element array (TL/TR/BR/BL
+ * order preserved) — caller decides whether to keep them (all in bounds)
+ * or clear (any out of bounds) based on the countOutOfBounds.perspective
+ * tally.
+ */
+export function reprojectPerspectiveCorners(corners, oldCrop, newCrop, sourceDims) {
+  if (!Array.isArray(corners) || corners.length !== 4) return null
+  return corners.map((c) => reprojectPoint(c, oldCrop, newCrop, sourceDims))
 }

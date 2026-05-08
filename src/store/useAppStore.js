@@ -5,6 +5,7 @@ import {
   reprojectShape,
   reprojectCline,
   reprojectAnnotation,
+  reprojectPerspectiveCorners,
   countOutOfBounds,
 } from '../utils/reprojectShapes'
 
@@ -147,6 +148,10 @@ const PERSIST_KEYS = [
   // Step 16 (May 8 2026) — PDF page orientation preference (auto / portrait
   // / landscape). Pre-Step-16 hydration falls back to 'auto'.
   'pdfOrientation',
+  // P16 + P38 mini-step (May 8 2026) — perspective grid corners (null OR
+  // 4 normalized points TL/TR/BR/BL) + single-angle grid rotation (degrees,
+  // [-180, 180]). Pre-this-batch hydration falls back to null + 0.
+  'gridRotation', 'perspectiveCorners',
 ]
 const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE', 'TECHNICAL'])
 // Step 13 — third tab for the per-annotation editing panel. The tab button
@@ -228,6 +233,37 @@ const normalizeGridOpacity = (v) => {
 const VALID_PDF_ORIENTATIONS = new Set(['auto', 'portrait', 'landscape'])
 const normalizePdfOrientation = (v) =>
   (typeof v === 'string' && VALID_PDF_ORIENTATIONS.has(v)) ? v : 'auto'
+
+// P38 (May 8 2026) — single-angle grid rotation. Degrees, clamped to
+// [-180, 180]. Default 0 (axis-aligned, current behavior). Pre-P38 JSON
+// files (no field) load as 0 via hydration fallback.
+const GRID_ROTATION_MIN = -180
+const GRID_ROTATION_MAX = 180
+const normalizeGridRotation = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 0
+  // Wrap into [-180, 180] for round-trip stability (e.g., 270° → -90°).
+  let r = ((n + 180) % 360 + 360) % 360 - 180
+  if (r < GRID_ROTATION_MIN) r = GRID_ROTATION_MIN
+  if (r > GRID_ROTATION_MAX) r = GRID_ROTATION_MAX
+  return r
+}
+
+// P16 (May 8 2026) — perspective grid corners (4 points in photo-norm
+// 0..1, TL/TR/BR/BL order). null = no perspective set; grid renders
+// axis-aligned (or rotated per P38). Pre-P16 JSON files (no field)
+// load as null via hydration fallback.
+const normalizePerspectiveCorners = (v) => {
+  if (!Array.isArray(v) || v.length !== 4) return null
+  const out = []
+  for (const c of v) {
+    if (!c || !Number.isFinite(c.x) || !Number.isFinite(c.y)) return null
+    // Clamp slightly outside [0, 1] to allow drag overshoot tolerance.
+    if (c.x < -0.001 || c.x > 1.001 || c.y < -0.001 || c.y > 1.001) return null
+    out.push({ x: c.x, y: c.y })
+  }
+  return out
+}
 
 const loadFromStorage = () => {
   if (typeof localStorage === 'undefined') return null
@@ -325,6 +361,17 @@ const initialState = {
   // from photo aspect ratio per-export; 'portrait' / 'landscape' force.
   // Pre-Step-16 JSON files have no field → fallback to 'auto'.
   pdfOrientation: normalizePdfOrientation(hydrated?.pdfOrientation),
+  // P38 (May 8 2026) — grid rotation in degrees. 0 = axis-aligned (current
+  // behavior). Pre-P38 JSON files have no field → fallback to 0.
+  gridRotation: normalizeGridRotation(hydrated?.gridRotation),
+  // P16 (May 8 2026) — perspective grid corners. null = no perspective set
+  // (grid renders axis-aligned, or rotated per P38). Pre-P16 JSON files
+  // have no field → fallback to null.
+  perspectiveCorners: normalizePerspectiveCorners(hydrated?.perspectiveCorners),
+  // P16 (May 8 2026) — transient UI flag for perspective-edit mode. NOT
+  // in PERSIST_KEYS (operator's mid-edit state shouldn't survive reload —
+  // they re-enter via the Perspective button).
+  perspectiveEditMode: false,
   snapTolerance: 12,      // 12 mouse / 22 touch (Spec §8 amendment)
   pointerType: 'mouse',
 
@@ -993,11 +1040,17 @@ export const useAppStore = create((set, get) => {
       let reprojectedLayers = cur.layers
       let reprojectedClines = cur.clines
       let reprojectedSequences = cur.sequences
+      // P16 (May 8 2026) — perspective corners re-project alongside
+      // shapes/clines/annotations. If any of the 4 corners falls out of
+      // bounds in the new crop, the perspective is unusable; folded into
+      // the existing confirm dialog rather than a new one.
+      let reprojectedPerspectiveCorners = cur.perspectiveCorners
 
       const hasAnyCoords =
         cur.layers.some((l) => (l.shapes || []).length > 0)
         || cur.clines.length > 0
         || cur.sequences.some((s) => (s.annotations || []).length > 0)
+        || (Array.isArray(cur.perspectiveCorners) && cur.perspectiveCorners.length === 4)
 
       if (isRecrop && hasAnyCoords) {
         const sourceDims = {
@@ -1019,20 +1072,33 @@ export const useAppStore = create((set, get) => {
             reprojectAnnotation(a, cur.cropMeta, cropMeta, sourceDims),
           ),
         }))
+        if (cur.perspectiveCorners) {
+          reprojectedPerspectiveCorners = reprojectPerspectiveCorners(
+            cur.perspectiveCorners, cur.cropMeta, cropMeta, sourceDims,
+          )
+        }
 
-        const counts = countOutOfBounds(reprojectedLayers, reprojectedClines, reprojectedSequences)
-        const total = counts.shapes + counts.clines + counts.annotations
+        const counts = countOutOfBounds(
+          reprojectedLayers, reprojectedClines, reprojectedSequences,
+          reprojectedPerspectiveCorners,
+        )
+        const total = counts.shapes + counts.clines + counts.annotations + counts.perspective
         if (total > 0) {
           const parts = []
           if (counts.shapes > 0) parts.push(`${counts.shapes} shape${counts.shapes === 1 ? '' : 's'}`)
           if (counts.clines > 0) parts.push(`${counts.clines} construction line${counts.clines === 1 ? '' : 's'}`)
           if (counts.annotations > 0) parts.push(`${counts.annotations} annotation${counts.annotations === 1 ? '' : 's'}`)
+          if (counts.perspective > 0) parts.push('the perspective grid')
           const ok = window.confirm(
             `This crop will hide ${parts.join(', ')} (off-canvas after re-crop). They'll persist — re-crop wider to recover. Continue?`
           )
           if (!ok) {
             return false
           }
+        }
+        // If perspective went out of bounds, clear it — operator confirmed.
+        if (counts.perspective > 0) {
+          reprojectedPerspectiveCorners = null
         }
       }
 
@@ -1082,6 +1148,11 @@ export const useAppStore = create((set, get) => {
         layers: reprojectedLayers,
         sequences: reprojectedSequences,
         clines: reprojectedClines,
+        // P16 (May 8 2026) — perspective corners follow the same
+        // re-projection path. Cleared above if any of the 4 fell out of
+        // bounds in the new crop (operator confirmed via the existing
+        // dialog).
+        perspectiveCorners: reprojectedPerspectiveCorners,
         backgroundImage: img,
         photoMeta: { width, height },
         cropMeta: cropMeta || null,
@@ -1169,6 +1240,61 @@ export const useAppStore = create((set, get) => {
     // 'auto'. Pure setter (no pushUndo) — orientation is a UI preference,
     // not data state.
     setPdfOrientation: (v) => set({ pdfOrientation: normalizePdfOrientation(v) }),
+
+    // P38 (May 8 2026) — single-angle grid rotation setter. Clamped to
+    // [-180, 180] via normalizeGridRotation (with wraparound for stability
+    // on out-of-range inputs). Pure setter — rotation is a UI preference.
+    setGridRotation: (v) => set({ gridRotation: normalizeGridRotation(v) }),
+
+    // P16 (May 8 2026) — perspective grid corner setters. setPerspectiveCorners
+    // takes the full 4-point array (TL/TR/BR/BL); setPerspectiveCorner(idx, p)
+    // updates a single corner during drag. Both validate via normalizer; an
+    // invalid array falls back to null (clears perspective). Pure setters —
+    // perspective state is geometry-adjacent but operators DO want Cmd+Z to
+    // revert a drag (P34 captured-snapshot pattern from CanvasStage handles
+    // the undo at the drag layer, same as shape/annotation drags).
+    setPerspectiveCorners: (corners) => set({
+      perspectiveCorners: normalizePerspectiveCorners(corners),
+    }),
+    setPerspectiveCorner: (idx, point) => {
+      if (!Number.isInteger(idx) || idx < 0 || idx > 3) return
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return
+      set((s) => {
+        const cur = s.perspectiveCorners
+          ? s.perspectiveCorners.map((c) => ({ ...c }))
+          : [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }]
+        // Clamp to [0, 1] with overshoot tolerance.
+        const clamped = {
+          x: Math.min(1, Math.max(0, point.x)),
+          y: Math.min(1, Math.max(0, point.y)),
+        }
+        cur[idx] = clamped
+        return { perspectiveCorners: cur }
+      })
+    },
+    clearPerspectiveCorners: () => set({ perspectiveCorners: null }),
+
+    // P16 (May 8 2026) — perspective-edit mode toggle. Operator clicks the
+    // Perspective button in the snap-grid group; mode flag flips. While
+    // active, CanvasStage paints corner handles + the dotted overlay, and
+    // mousedown on a corner starts a perspectiveDrag. Mode is transient —
+    // not persisted across reload (operator re-enters explicitly).
+    setPerspectiveEditMode: (v) => set({ perspectiveEditMode: !!v }),
+    togglePerspectiveEditMode: () => set((s) => {
+      // Entering edit mode for the first time pre-loads default corners
+      // (the cropped photo's bounds, TL/TR/BR/BL) so the operator has
+      // handles to drag. Exiting doesn't change corners.
+      const next = !s.perspectiveEditMode
+      if (next && !s.perspectiveCorners) {
+        return {
+          perspectiveEditMode: true,
+          perspectiveCorners: [
+            { x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 },
+          ],
+        }
+      }
+      return { perspectiveEditMode: next }
+    }),
     // Step 10 / P12+P14 — accept number (square) or {x, y} (rectangular).
     // Internal state always lives as {x, y}.
     setGridSize: (gridSize) => set({ gridSize: normalizeGridSize(gridSize) }),
@@ -1550,6 +1676,12 @@ export const useAppStore = create((set, get) => {
         cropMeta: null,
         hasSourcePhoto: false,
         viewport: { panX: 0, panY: 0, zoom: 1 },
+        // P16 + P38 mini-step (May 8 2026) — wipe perspective grid +
+        // rotation alongside the rest of the project state. They're
+        // photo-anchored geometry, so they don't survive a New Project.
+        perspectiveCorners: null,
+        perspectiveEditMode: false,
+        gridRotation: 0,
         // HARD boundary — wipe undo/redo history so the prior project's
         // snapshots (and their embedded photo binaries) can't bleed
         // into the cleared project via Cmd+Z.

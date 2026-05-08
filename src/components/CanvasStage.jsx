@@ -9,6 +9,7 @@ import {
   drawShapeOnContext as drawShapeOnContextShared,
   drawAnnotationOnContext as drawAnnotationOnContextShared,
 } from '../utils/canvasRender'
+import { buildPerspectiveTransform, rotatePoint } from '../utils/perspective'
 import ContextMenu from './ContextMenu'
 
 /**
@@ -385,6 +386,10 @@ function computeSnap(args) {
     snapEnabled, snapTypes,
     gridEnabled, gridSize, snapTolerance,
     draft, tool, clinesVisible, viewport, photoSize,
+    // P16 + P38 (May 8 2026) — perspective corners + grid rotation. Both
+    // optional / default-zero. Per Option Y, perspective dominates when
+    // active.
+    perspectiveCorners, gridRotation,
   } = args
   if (!snapEnabled) return null
   // P2 (May 7 2026) — per-snap-type gates. Each branch checks its own
@@ -411,15 +416,49 @@ function computeSnap(args) {
   // are at integer multiples of (gridSize.x, gridSize.y) in photo space;
   // translate to canvas px before the distance test so the on-screen
   // tolerance remains pixel-true regardless of zoom.
+  // P16 + P38 (May 8 2026) — three branches matching the render path.
+  // Option Y: perspective dominates rotation when both are active.
   if (allowGrid && gridEnabled) {
     const gxStep = (typeof gridSize === 'object' ? gridSize.x : gridSize) || 20
     const gyStep = (typeof gridSize === 'object' ? gridSize.y : gridSize) || 20
-    // Convert cursor to photo-px to find the nearest grid intersection.
+    // Cursor canvas → photo px (common to all branches).
     const cursorPhotoX = (cursorX - viewport.panX) / viewport.zoom
     const cursorPhotoY = (cursorY - viewport.panY) / viewport.zoom
-    const gxPhoto = Math.round(cursorPhotoX / gxStep) * gxStep
-    const gyPhoto = Math.round(cursorPhotoY / gyStep) * gyStep
-    // Translate back to canvas px for the distance test + the snap point.
+
+    const persp = (perspectiveCorners && perspectiveCorners.length === 4)
+      ? buildPerspectiveTransform(perspectiveCorners, photoSize)
+      : null
+    const rotation = (typeof gridRotation === 'number' && Number.isFinite(gridRotation))
+      ? gridRotation : 0
+
+    let gxPhoto, gyPhoto
+    if (persp && !persp.isIdentity) {
+      // ---- PERSPECTIVE: cursor dest-photo-px → source-photo-px (inverse
+      // homography) → snap in source space → forward back to dest. ----
+      const sourcePt = persp.inverse({ x: cursorPhotoX, y: cursorPhotoY })
+      if (!sourcePt) return null
+      const sx = Math.round(sourcePt.x / gxStep) * gxStep
+      const sy = Math.round(sourcePt.y / gyStep) * gyStep
+      const destPt = persp.forward({ x: sx, y: sy })
+      if (!destPt) return null
+      gxPhoto = destPt.x
+      gyPhoto = destPt.y
+    } else if (rotation !== 0) {
+      // ---- ROTATION: cursor → unrotated photo space → snap → rotate back. ----
+      const center = { x: photoSize.width / 2, y: photoSize.height / 2 }
+      const unrot = rotatePoint({ x: cursorPhotoX, y: cursorPhotoY }, center, -rotation)
+      const sx = Math.round(unrot.x / gxStep) * gxStep
+      const sy = Math.round(unrot.y / gyStep) * gyStep
+      const back = rotatePoint({ x: sx, y: sy }, center, rotation)
+      gxPhoto = back.x
+      gyPhoto = back.y
+    } else {
+      // ---- AXIS-ALIGNED (existing pre-P16/P38 behavior). ----
+      gxPhoto = Math.round(cursorPhotoX / gxStep) * gxStep
+      gyPhoto = Math.round(cursorPhotoY / gyStep) * gyStep
+    }
+
+    // photo-px → canvas px for the distance test + snap point return.
     const gx = gxPhoto * viewport.zoom + viewport.panX
     const gy = gyPhoto * viewport.zoom + viewport.panY
     const dx = cursorX - gx, dy = cursorY - gy
@@ -543,6 +582,17 @@ export default function CanvasStage() {
     //   preDragSnap:  dataSnapshot string captured at drag start, pushed
     //                 to undoStack on mouseup if anything changed
     let annoDrag = null
+
+    // P16 (May 8 2026) — perspective corner drag state. Set on mousedown
+    // when in perspective-edit mode AND the cursor hits one of the 4
+    // corner handles. Mirrors editDrag/annoDrag's preDragSnap pattern so
+    // Cmd+Z reverts the entire drag as one undo entry.
+    //   cornerIndex:  0..3 (TL/TR/BR/BL)
+    //   originCorners: deep-clone of the 4 corners at drag start
+    //   originCursor:  cursor canvas-px at drag start (unused but kept
+    //                  for parity with editDrag/annoDrag)
+    //   preDragSnap:   dataSnapshot string captured at drag start
+    let perspectiveDrag = null
 
     // Section 7.A — viewport pan state (closure-scoped). Set when a pan
     // input begins (middle-mouse, space+left, two-finger touch); applies
@@ -671,40 +721,151 @@ export default function CanvasStage() {
       }
 
       // Spec §7 step 3 — snap grid overlay when gridEnabled. Section 7.A —
-      // grid lives in PHOTO px (so e.g. X=24 px / 1" stays 1" regardless
-      // of zoom). Compute the visible photo-px range that overlaps the
-      // canvas, then iterate grid steps within it.
+      // grid lives in PHOTO px. P16 + P38 (May 8 2026) — three branches:
+      //   1. perspective active (corners != null AND not at default bounds)
+      //      → grid lines transform through homography from source-rect
+      //        space (0..photoW, 0..photoH) to dest-quad photo-px, then
+      //        photo-px → canvas-px via existing viewport math
+      //   2. rotation != 0 → rotate each photo-px endpoint about the photo
+      //      center (0.5, 0.5 normalized) before photo-px → canvas-px
+      //   3. neither → existing axis-aligned path (unchanged)
+      // Per Option Y (locked May 8 2026): perspective dominates rotation
+      // when both are set. Rotation field is preserved in store but
+      // ignored at render+snap time when perspective corners are active.
       if (storeState.gridEnabled) {
         const gs = storeState.gridSize
         const gxStep = (typeof gs === 'object' ? gs.x : gs) || 20
         const gyStep = (typeof gs === 'object' ? gs.y : gs) || 20
         const z = viewport.zoom || 1
-        // Visible photo-px range within the canvas:
-        const photoX0 = Math.max(0, (-viewport.panX) / z)
-        const photoX1 = Math.min(photoSize.width,  (cw - viewport.panX) / z)
-        const photoY0 = Math.max(0, (-viewport.panY) / z)
-        const photoY1 = Math.min(photoSize.height, (ch - viewport.panY) / z)
-        // P19 (May 7 2026) — operator-adjustable grid line opacity.
-        // Default 0.16 matches the prior hardcoded value; clamped to
-        // [0.05, 0.6] in the store action for sane bounds.
         const gridOpacity = typeof storeState.gridOpacity === 'number' ? storeState.gridOpacity : 0.16
         ctxStatic.strokeStyle = `rgba(0, 255, 204, ${gridOpacity})`
         ctxStatic.lineWidth = 1
-        const startX = Math.ceil(photoX0 / gxStep) * gxStep
-        for (let xPhoto = startX; xPhoto <= photoX1; xPhoto += gxStep) {
-          const x = xPhoto * z + viewport.panX
+
+        const corners = storeState.perspectiveCorners
+        const persp = (corners && corners.length === 4)
+          ? buildPerspectiveTransform(corners, photoSize)
+          : null
+        const rotation = (typeof storeState.gridRotation === 'number' && Number.isFinite(storeState.gridRotation))
+          ? storeState.gridRotation : 0
+
+        // Helper: photo-px → canvas-px
+        const toCanvas = (p) => ({ x: p.x * z + viewport.panX, y: p.y * z + viewport.panY })
+
+        if (persp && !persp.isIdentity) {
+          // ---- BRANCH 1: PERSPECTIVE GRID ----
+          // Clip to dest quadrilateral so grid lines don't extend beyond
+          // the operator's marked roof rectangle.
+          ctxStatic.save()
           ctxStatic.beginPath()
-          ctxStatic.moveTo(x + 0.5, 0)
-          ctxStatic.lineTo(x + 0.5, ch)
-          ctxStatic.stroke()
+          const d0 = toCanvas(persp.destCornersPx[0])
+          const d1 = toCanvas(persp.destCornersPx[1])
+          const d2 = toCanvas(persp.destCornersPx[2])
+          const d3 = toCanvas(persp.destCornersPx[3])
+          ctxStatic.moveTo(d0.x, d0.y)
+          ctxStatic.lineTo(d1.x, d1.y)
+          ctxStatic.lineTo(d2.x, d2.y)
+          ctxStatic.lineTo(d3.x, d3.y)
+          ctxStatic.closePath()
+          ctxStatic.clip()
+
+          // Vertical lines: in source space, x = k * gxStep, y from 0 to photoH
+          for (let xPhoto = 0; xPhoto <= photoSize.width; xPhoto += gxStep) {
+            const a = persp.forward({ x: xPhoto, y: 0 })
+            const b = persp.forward({ x: xPhoto, y: photoSize.height })
+            if (!a || !b) continue
+            const ac = toCanvas(a), bc = toCanvas(b)
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(ac.x, ac.y)
+            ctxStatic.lineTo(bc.x, bc.y)
+            ctxStatic.stroke()
+          }
+          // Horizontal lines: y = k * gyStep
+          for (let yPhoto = 0; yPhoto <= photoSize.height; yPhoto += gyStep) {
+            const a = persp.forward({ x: 0, y: yPhoto })
+            const b = persp.forward({ x: photoSize.width, y: yPhoto })
+            if (!a || !b) continue
+            const ac = toCanvas(a), bc = toCanvas(b)
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(ac.x, ac.y)
+            ctxStatic.lineTo(bc.x, bc.y)
+            ctxStatic.stroke()
+          }
+          ctxStatic.restore()
+        } else if (rotation !== 0) {
+          // ---- BRANCH 2: ROTATED GRID ----
+          // Rotate each photo-px endpoint about the photo center.
+          const center = { x: photoSize.width / 2, y: photoSize.height / 2 }
+          // Pre-compute extent — rotated grid lines need to span far
+          // enough to cover the canvas under any rotation. Use a
+          // diagonal-of-photo length to be safe.
+          const ext = Math.hypot(photoSize.width, photoSize.height) * 1.5
+          // Vertical lines (in unrotated space): x = k*gxStep
+          for (let xPhoto = 0; xPhoto <= photoSize.width; xPhoto += gxStep) {
+            const a = rotatePoint({ x: xPhoto, y: -ext }, center, rotation)
+            const b = rotatePoint({ x: xPhoto, y: photoSize.height + ext }, center, rotation)
+            const ac = toCanvas(a), bc = toCanvas(b)
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(ac.x, ac.y)
+            ctxStatic.lineTo(bc.x, bc.y)
+            ctxStatic.stroke()
+          }
+          for (let yPhoto = 0; yPhoto <= photoSize.height; yPhoto += gyStep) {
+            const a = rotatePoint({ x: -ext, y: yPhoto }, center, rotation)
+            const b = rotatePoint({ x: photoSize.width + ext, y: yPhoto }, center, rotation)
+            const ac = toCanvas(a), bc = toCanvas(b)
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(ac.x, ac.y)
+            ctxStatic.lineTo(bc.x, bc.y)
+            ctxStatic.stroke()
+          }
+        } else {
+          // ---- BRANCH 3: AXIS-ALIGNED (existing pre-P16/P38 behavior) ----
+          const photoX0 = Math.max(0, (-viewport.panX) / z)
+          const photoX1 = Math.min(photoSize.width,  (cw - viewport.panX) / z)
+          const photoY0 = Math.max(0, (-viewport.panY) / z)
+          const photoY1 = Math.min(photoSize.height, (ch - viewport.panY) / z)
+          const startX = Math.ceil(photoX0 / gxStep) * gxStep
+          for (let xPhoto = startX; xPhoto <= photoX1; xPhoto += gxStep) {
+            const x = xPhoto * z + viewport.panX
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(x + 0.5, 0)
+            ctxStatic.lineTo(x + 0.5, ch)
+            ctxStatic.stroke()
+          }
+          const startY = Math.ceil(photoY0 / gyStep) * gyStep
+          for (let yPhoto = startY; yPhoto <= photoY1; yPhoto += gyStep) {
+            const y = yPhoto * z + viewport.panY
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(0, y + 0.5)
+            ctxStatic.lineTo(cw, y + 0.5)
+            ctxStatic.stroke()
+          }
         }
-        const startY = Math.ceil(photoY0 / gyStep) * gyStep
-        for (let yPhoto = startY; yPhoto <= photoY1; yPhoto += gyStep) {
-          const y = yPhoto * z + viewport.panY
-          ctxStatic.beginPath()
-          ctxStatic.moveTo(0, y + 0.5)
-          ctxStatic.lineTo(cw, y + 0.5)
-          ctxStatic.stroke()
+
+        // P16 — when perspective corners are set (whether identity or
+        // not), paint a subtle dotted outline of the 4-corner quad on
+        // the static canvas so the operator sees the anchored plane
+        // even when grid is off OR when corners ARE at default bounds.
+        if (corners && corners.length === 4) {
+          const persp2 = persp || buildPerspectiveTransform(corners, photoSize)
+          if (persp2) {
+            ctxStatic.save()
+            ctxStatic.strokeStyle = 'rgba(232, 83, 26, 0.55)' // KCC orange
+            ctxStatic.setLineDash([4, 3])
+            ctxStatic.lineWidth = 1.5
+            ctxStatic.beginPath()
+            const c0 = toCanvas(persp2.destCornersPx[0])
+            const c1 = toCanvas(persp2.destCornersPx[1])
+            const c2 = toCanvas(persp2.destCornersPx[2])
+            const c3 = toCanvas(persp2.destCornersPx[3])
+            ctxStatic.moveTo(c0.x, c0.y)
+            ctxStatic.lineTo(c1.x, c1.y)
+            ctxStatic.lineTo(c2.x, c2.y)
+            ctxStatic.lineTo(c3.x, c3.y)
+            ctxStatic.closePath()
+            ctxStatic.stroke()
+            ctxStatic.restore()
+          }
         }
       }
 
@@ -1109,6 +1270,29 @@ export default function CanvasStage() {
         }
       }
 
+      // P16 (May 8 2026) — perspective corner handles when in
+      // perspective-edit mode. 4 large filled-circle handles in KCC
+      // orange so they read distinctly from shape/annotation handles.
+      // Only painted while edit mode is active; the dotted outline on
+      // the static canvas continues to show the locked perspective when
+      // edit mode is off.
+      if (state.perspectiveEditMode && state.perspectiveCorners) {
+        const cwL = container.clientWidth
+        const chL = container.clientHeight
+        const ps = effectivePhotoSize(state.photoMeta, cwL, chL)
+        for (let i = 0; i < 4; i++) {
+          const c = state.perspectiveCorners[i]
+          const cnv = photoNormToCanvas(c, state.viewport, ps)
+          ctxDynamic.fillStyle = '#e8531a' // KCC orange
+          ctxDynamic.strokeStyle = '#ffffff'
+          ctxDynamic.lineWidth = 2
+          ctxDynamic.beginPath()
+          ctxDynamic.arc(cnv.x, cnv.y, 7, 0, Math.PI * 2)
+          ctxDynamic.fill()
+          ctxDynamic.stroke()
+        }
+      }
+
       // Snap indicator (Spec §8 colors + shapes)
       const snapPt = state.snapPt
       if (snapPt) {
@@ -1372,6 +1556,11 @@ export default function CanvasStage() {
         clinesVisible: store.clinesVisible,
         viewport: store.viewport,
         photoSize: photoSizeLocal,
+        // P16 + P38 (May 8 2026) — perspective grid + grid rotation
+        // threaded so the GRID-snap branch can match the render-path
+        // transform (Option Y: perspective dominates when active).
+        perspectiveCorners: store.perspectiveCorners,
+        gridRotation: store.gridRotation,
       })
       // Avoid spurious store mutations when the snap result is unchanged
       // (cursor moved a pixel but snap target stayed the same).
@@ -1438,6 +1627,21 @@ export default function CanvasStage() {
         staticDirty = true
       }
 
+      // P16 (May 8 2026) — perspective corner drag. Convert cursor canvas-px
+      // → photo-norm (0..1) and update the dragged corner via the store
+      // single-corner setter (clamps to [0, 1] internally). Render is
+      // photo-anchored, so static repaint reflects the new corner shape.
+      if (perspectiveDrag) {
+        const cursorPhotoX = (x - store.viewport.panX) / store.viewport.zoom
+        const cursorPhotoY = (y - store.viewport.panY) / store.viewport.zoom
+        const newNorm = {
+          x: cursorPhotoX / photoSizeLocal.width,
+          y: cursorPhotoY / photoSizeLocal.height,
+        }
+        store.setPerspectiveCorner(perspectiveDrag.cornerIndex, newNorm)
+        staticDirty = true
+      }
+
       dynamicDirty = true
     }
 
@@ -1459,6 +1663,36 @@ export default function CanvasStage() {
           trigger: e.button === 1 ? 'middle' : 'space',
         }
         return
+      }
+
+      // P16 (May 8 2026) — perspective-edit mode hit-test runs BEFORE
+      // mode/tool dispatch so the operator can drag corner handles
+      // regardless of DRAW/EDIT/SEQUENCE mode (perspective is a grid
+      // setting, not a mode). Hit-test the 4 corner handles in canvas-px
+      // space; mousedown on a handle starts a perspectiveDrag.
+      if (store.perspectiveEditMode && store.perspectiveCorners) {
+        if (e.button === 2) return // ignore right-click
+        const photoSizeP = effectivePhotoSize(store.photoMeta, cw, ch)
+        const HANDLE_TOL_SQ = 100 // 10-px radius (slightly looser than shapes for confidence)
+        for (let i = 0; i < 4; i++) {
+          const c = store.perspectiveCorners[i]
+          const cPx = { x: c.x * photoSizeP.width, y: c.y * photoSizeP.height }
+          const cnv = { x: cPx.x * store.viewport.zoom + store.viewport.panX,
+                        y: cPx.y * store.viewport.zoom + store.viewport.panY }
+          const dx = raw.x - cnv.x
+          const dy = raw.y - cnv.y
+          if (dx * dx + dy * dy <= HANDLE_TOL_SQ) {
+            perspectiveDrag = {
+              cornerIndex: i,
+              originCorners: store.perspectiveCorners.map((p) => ({ ...p })),
+              originCursor: { x: raw.x, y: raw.y },
+              preDragSnap: useAppStore.getState().captureUndoSnapshot(),
+            }
+            dynamicDirty = true
+            return
+          }
+        }
+        // No handle hit — don't intercept. Fall through to other branches.
       }
 
       // Spec §9 — EDIT mode branches BEFORE the tool dispatch.
@@ -1752,6 +1986,23 @@ export default function CanvasStage() {
         dynamicDirty = true
         return
       }
+      // P16 (May 8 2026) — end perspective corner drag if active. Same
+      // captured-snapshot pattern as shape/annotation drags. setPerspectiveCorner
+      // doesn't push undo per mousemove; one entry per drag at mouseup.
+      if (perspectiveDrag) {
+        const curCorners = useAppStore.getState().perspectiveCorners
+        if (
+          curCorners
+          && JSON.stringify(curCorners) !== JSON.stringify(perspectiveDrag.originCorners)
+          && typeof perspectiveDrag.preDragSnap === 'string'
+        ) {
+          useAppStore.getState().pushCapturedSnapshot(perspectiveDrag.preDragSnap)
+        }
+        perspectiveDrag = null
+        staticDirty = true
+        dynamicDirty = true
+        return
+      }
       if (!draft) return
       if (draft.type === 'rect') {
         const w = Math.abs(draft.x - draft.startX)
@@ -1900,6 +2151,22 @@ export default function CanvasStage() {
           )
           annoDrag = null
           staticDirty = true
+          dynamicDirty = true
+          return
+        }
+        // P16 — Escape cancels perspective corner drag + restores origin.
+        if (perspectiveDrag) {
+          useAppStore.getState().setPerspectiveCorners(perspectiveDrag.originCorners)
+          perspectiveDrag = null
+          staticDirty = true
+          dynamicDirty = true
+          return
+        }
+        // P16 — Escape exits perspective-edit mode (matches the toolbar
+        // button toggle convention).
+        const sEsc = useAppStore.getState()
+        if (sEsc.perspectiveEditMode) {
+          sEsc.setPerspectiveEditMode(false)
           dynamicDirty = true
           return
         }
@@ -2122,12 +2389,24 @@ export default function CanvasStage() {
       // Spec §7 step 3 — grid overlay visibility flips redraw static.
       // P19 (May 7 2026) — gridOpacity change also redraws static so
       // the slider gives live feedback as the operator drags.
+      // P16 + P38 (May 8 2026) — gridRotation + perspectiveCorners
+      // changes also flip staticDirty so the operator sees live
+      // updates as they type rotation OR drag corners.
       if (
         state.gridEnabled !== prev.gridEnabled
         || state.gridSize !== prev.gridSize
         || state.gridOpacity !== prev.gridOpacity
+        || state.gridRotation !== prev.gridRotation
+        || state.perspectiveCorners !== prev.perspectiveCorners
       ) {
         staticDirty = true
+      }
+      // P16 — perspective-edit mode toggle flips dynamic (corner handles
+      // appear/disappear) AND static (the dotted outline still renders
+      // when corners are set, but visual emphasis changes).
+      if (state.perspectiveEditMode !== prev.perspectiveEditMode) {
+        staticDirty = true
+        dynamicDirty = true
       }
       // Spec §7 step 2 — photo background load/clear redraws static.
       // Section 7.A — when a NEW photo is set (prev was null or different
