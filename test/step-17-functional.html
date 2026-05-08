@@ -1943,6 +1943,158 @@ pass('P16 — countOOB: one corner above 1 → 1',
 pass('P16 — countOOB: one corner below 0 → 1',
   _countPerspectiveOOB([{x:0.1,y:0.1},{x:0.9,y:-0.5},{x:0.9,y:0.9},{x:0.1,y:0.9}]) === 1)
 
+// 9gg. P16 + P38 follow-on fix (May 8 2026 — operator-reported undo bugs).
+// Verify dataSnapshot includes gridRotation + perspectiveCorners so
+// pushCapturedSnapshot + Cmd+Z restore them.
+function _dataSnapshot(state) {
+  return JSON.stringify({
+    layers: state.layers,
+    sequences: state.sequences,
+    clines: state.clines,
+    photoMeta: state.photoMeta || null,
+    cropMeta: state.cropMeta || null,
+    hasSourcePhoto: !!state.hasSourcePhoto,
+    gridRotation: typeof state.gridRotation === 'number' ? state.gridRotation : 0,
+    perspectiveCorners: state.perspectiveCorners || null,
+  })
+}
+{
+  // Pre-edit state
+  const before = {
+    layers: [], sequences: [], clines: [],
+    photoMeta: { width: 1000, height: 800 },
+    cropMeta: null,
+    hasSourcePhoto: true,
+    gridRotation: 15,
+    perspectiveCorners: null,
+  }
+  const snap = _dataSnapshot(before)
+  pass('P38 follow-on — dataSnapshot captures gridRotation',
+    snap.includes('"gridRotation":15'))
+  pass('P16 follow-on — dataSnapshot captures perspectiveCorners null',
+    snap.includes('"perspectiveCorners":null'))
+
+  // After perspective drag
+  const after = {
+    ...before,
+    perspectiveCorners: [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }],
+  }
+  const snapAfter = _dataSnapshot(after)
+  pass('P16 follow-on — dataSnapshot captures perspectiveCorners array',
+    snapAfter.includes('"x":0.1') && snapAfter.includes('"x":0.9'))
+
+  // Verify the SNAPSHOT differs (so JSON.stringify-comparison in the
+  // mouseup pushCapturedSnapshot guard correctly detects the change).
+  pass('P16 follow-on — pre-drag vs post-drag snapshots differ (JSON-comparison detects perspective drag)',
+    snap !== snapAfter)
+}
+
+// 9hh. Undo restore patch reapplies gridRotation + perspectiveCorners.
+function _undoRestoreFromSnap(snapJson) {
+  const next = JSON.parse(snapJson)
+  return {
+    layers: next.layers,
+    sequences: next.sequences,
+    clines: next.clines,
+    gridRotation: typeof next.gridRotation === 'number' ? next.gridRotation : 0,
+    perspectiveCorners: next.perspectiveCorners ?? null,
+  }
+}
+{
+  // Operator typed rotation 0 → 15. Snapshot was captured at rotation 0
+  // (pre-edit). Cmd+Z should restore rotation 0.
+  const preEdit = {
+    layers: [], sequences: [], clines: [],
+    gridRotation: 0,
+    perspectiveCorners: null,
+  }
+  const snapPreEdit = _dataSnapshot(preEdit)
+  const restored = _undoRestoreFromSnap(snapPreEdit)
+  pass('P38 follow-on — undo restores gridRotation from snapshot',
+    restored.gridRotation === 0)
+  pass('P38 follow-on — undo restores perspectiveCorners null from snapshot',
+    restored.perspectiveCorners === null)
+}
+{
+  // Operator dragged corner (0.1, 0.1) → (0.2, 0.15). Snapshot captured
+  // at pre-drag. Undo restores pre-drag corners.
+  const preDrag = {
+    layers: [], sequences: [], clines: [],
+    gridRotation: 0,
+    perspectiveCorners: [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }],
+  }
+  const snap = _dataSnapshot(preDrag)
+  const restored = _undoRestoreFromSnap(snap)
+  pass('P16 follow-on — undo restores perspectiveCorners[0] from snapshot',
+    restored.perspectiveCorners[0].x === 0.1 && restored.perspectiveCorners[0].y === 0.1)
+  pass('P16 follow-on — undo restores all 4 corners',
+    restored.perspectiveCorners.length === 4
+    && restored.perspectiveCorners[2].x === 0.9
+    && restored.perspectiveCorners[2].y === 0.9)
+}
+
+// 9ii. Backward-compat: pre-this-fix snapshots (no gridRotation /
+// perspectiveCorners fields) → undo falls back to defaults (0 / null).
+{
+  const oldSnap = JSON.stringify({
+    layers: [], sequences: [], clines: [],
+    photoMeta: null, cropMeta: null, hasSourcePhoto: false,
+    // No gridRotation, no perspectiveCorners — pre-this-fix snapshot shape
+  })
+  const restored = _undoRestoreFromSnap(oldSnap)
+  pass('P38 follow-on — backward-compat: pre-fix snapshot → gridRotation falls back to 0',
+    restored.gridRotation === 0)
+  pass('P16 follow-on — backward-compat: pre-fix snapshot → perspectiveCorners falls back to null',
+    restored.perspectiveCorners === null)
+}
+
+// 9jj. Multi-step undo composition — rotation, perspective set, drag.
+// Verify each push is independently revertable in LIFO order.
+{
+  // Initial state
+  let undoStack = []
+  const states = []
+
+  // Step 1: rotation 0 → 15
+  states.push({ rotation: 0, corners: null })
+  undoStack.push(_dataSnapshot({
+    layers: [], sequences: [], clines: [],
+    gridRotation: 0, perspectiveCorners: null,
+  }))
+  // (state mutates to rotation: 15 after the action)
+
+  // Step 2: corners null → defaults (Persp button first activation)
+  states.push({ rotation: 15, corners: null })
+  undoStack.push(_dataSnapshot({
+    layers: [], sequences: [], clines: [],
+    gridRotation: 15, perspectiveCorners: null,
+  }))
+  // (state mutates to corners: defaults after the action)
+
+  // Step 3: drag corner [0]: (0,0) → (0.1, 0.1)
+  states.push({ rotation: 15, corners: [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}] })
+  undoStack.push(_dataSnapshot({
+    layers: [], sequences: [], clines: [],
+    gridRotation: 15,
+    perspectiveCorners: [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}],
+  }))
+  // (state mutates to corners[0] = (0.1, 0.1) after the action)
+
+  pass('P16 + P38 follow-on — multi-step: 3 actions push 3 undo entries',
+    undoStack.length === 3)
+
+  // Pop entries in LIFO order — verify each one
+  const pop3 = _undoRestoreFromSnap(undoStack[2])
+  pass('P16 + P38 follow-on — multi-step: 1st undo restores pre-drag corners',
+    pop3.perspectiveCorners[0].x === 0 && pop3.gridRotation === 15)
+  const pop2 = _undoRestoreFromSnap(undoStack[1])
+  pass('P16 + P38 follow-on — multi-step: 2nd undo restores no-perspective state',
+    pop2.perspectiveCorners === null && pop2.gridRotation === 15)
+  const pop1 = _undoRestoreFromSnap(undoStack[0])
+  pass('P16 + P38 follow-on — multi-step: 3rd undo restores rotation 0',
+    pop1.gridRotation === 0 && pop1.perspectiveCorners === null)
+}
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {

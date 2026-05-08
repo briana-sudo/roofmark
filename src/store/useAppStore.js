@@ -466,6 +466,18 @@ const dataSnapshot = (state) => JSON.stringify({
   photoMeta: state.photoMeta || null,
   cropMeta: state.cropMeta || null,
   hasSourcePhoto: !!state.hasSourcePhoto,
+  // P16 + P38 follow-on fix (May 8 2026 — operator verification surfaced
+  // missing undo coverage for grid rotation + perspective corner drag):
+  // both fields belong inside the undo snapshot so Cmd+Z can revert them.
+  // Pre-this-fix the snapshot only carried layers/sequences/clines and
+  // photo state; pushCapturedSnapshot in perspectiveDrag mouseup fired
+  // correctly but the snapshot didn't carry corners, so undo restored
+  // unrelated fields and left corners at their post-drag values.
+  // Same gap as the Step 17 P34 latent shape-drag-undo bug — the lesson
+  // is "any new state field that's mutable via UI needs both pushUndo
+  // coverage AND inclusion in dataSnapshot."
+  gridRotation: typeof state.gridRotation === 'number' ? state.gridRotation : 0,
+  perspectiveCorners: state.perspectiveCorners || null,
 })
 
 // ============================================================================
@@ -1280,21 +1292,36 @@ export const useAppStore = create((set, get) => {
     // mousedown on a corner starts a perspectiveDrag. Mode is transient —
     // not persisted across reload (operator re-enters explicitly).
     setPerspectiveEditMode: (v) => set({ perspectiveEditMode: !!v }),
-    togglePerspectiveEditMode: () => set((s) => {
-      // Entering edit mode for the first time pre-loads default corners
-      // (the cropped photo's bounds, TL/TR/BR/BL) so the operator has
-      // handles to drag. Exiting doesn't change corners.
-      const next = !s.perspectiveEditMode
-      if (next && !s.perspectiveCorners) {
-        return {
+    togglePerspectiveEditMode: () => {
+      // P16 + P38 follow-on fix (May 8 2026) — first-activation path is a
+      // destructive state change (null → 4 default corners). Push a
+      // snapshot BEFORE the set so Cmd+Z restores the no-perspective
+      // state. Subsequent toggles just flip the edit-mode flag (no data
+      // mutation, no undo entry needed).
+      const cur = get()
+      const willEnter = !cur.perspectiveEditMode
+      const isFirstActivation = willEnter && !cur.perspectiveCorners
+      if (isFirstActivation) {
+        pushUndo()
+        set({
           perspectiveEditMode: true,
           perspectiveCorners: [
             { x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 },
           ],
-        }
+        })
+      } else {
+        set({ perspectiveEditMode: willEnter })
       }
-      return { perspectiveEditMode: next }
-    }),
+    },
+    // P16 (May 8 2026) — clearPerspectiveCorners is also a destructive
+    // state change (4 corners → null). Push a snapshot so Cmd+Z restores
+    // the prior corner config.
+    clearPerspectiveCornersWithUndo: () => {
+      const cur = get()
+      if (!cur.perspectiveCorners) return
+      pushUndo()
+      set({ perspectiveCorners: null })
+    },
     // Step 10 / P12+P14 — accept number (square) or {x, y} (rectangular).
     // Internal state always lives as {x, y}.
     setGridSize: (gridSize) => set({ gridSize: normalizeGridSize(gridSize) }),
@@ -1552,6 +1579,14 @@ export const useAppStore = create((set, get) => {
         layers: next.layers,
         sequences: next.sequences,
         clines: next.clines,
+        // P16 + P38 follow-on fix (May 8 2026) — restore grid rotation +
+        // perspective corners alongside the rest of the geometry. Falls
+        // back to the existing default (0 / null) when an older snapshot
+        // (pre-this-fix) doesn't carry the field — backward compat with
+        // any in-flight session that pushed snapshots before the fix
+        // landed.
+        gridRotation: typeof next.gridRotation === 'number' ? next.gridRotation : 0,
+        perspectiveCorners: next.perspectiveCorners ?? null,
         undoStack: undoStack.slice(0, -1),
         redoStack: [...redoStack, current],
       }
@@ -1634,6 +1669,11 @@ export const useAppStore = create((set, get) => {
         layers: next.layers,
         sequences: next.sequences,
         clines: next.clines,
+        // P16 + P38 follow-on fix (May 8 2026) — redo also reapplies
+        // rotation + perspective corners so Cmd+Shift+Z restores the
+        // post-action state symmetrically with undo.
+        gridRotation: typeof next.gridRotation === 'number' ? next.gridRotation : 0,
+        perspectiveCorners: next.perspectiveCorners ?? null,
         // Photo fields intentionally NOT restored. See note above.
         undoStack: [...undoStack, current],
         redoStack: redoStack.slice(0, -1),

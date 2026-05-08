@@ -87,10 +87,35 @@ export default function DrawingTools() {
   const perspectiveEditMode = useAppStore((s) => s.perspectiveEditMode)
   const togglePerspectiveEditMode = useAppStore((s) => s.togglePerspectiveEditMode)
   const perspectiveCorners = useAppStore((s) => s.perspectiveCorners)
-  const clearPerspectiveCorners = useAppStore((s) => s.clearPerspectiveCorners)
+  // P16 follow-on (May 8 2026) — use the undo-aware clear so Cmd+Z
+  // restores prior corners after right-click clear.
+  const clearPerspectiveCornersWithUndo = useAppStore((s) => s.clearPerspectiveCornersWithUndo)
   // Option Y composition: rotation is ignored at render+snap time when
   // perspective is active. UI dims the rotation input + tooltip explains.
   const perspectiveActive = !!(perspectiveCorners && perspectiveCorners.length === 4)
+
+  // P38 follow-on fix (May 8 2026) — focus→blur edit-session undo for the
+  // rotation input. Same pattern as the AnnotationPanel font stepper from
+  // P35: capture pre-edit snapshot on focus + the original value, push
+  // the captured snapshot on blur if the value actually changed. Result:
+  // one undo entry per "focus → type → tab/click-away" session, regardless
+  // of keystroke count. Cmd+Z reverts the entire edit, not just the last
+  // digit typed.
+  const rotSnapRef = useRef(null)
+  const rotOriginalRef = useRef(null)
+  const onRotationFocus = (e) => {
+    rotSnapRef.current = useAppStore.getState().captureUndoSnapshot()
+    rotOriginalRef.current = e.target.value
+  }
+  const onRotationBlur = (e) => {
+    const original = rotOriginalRef.current
+    const snap = rotSnapRef.current
+    if (typeof original === 'string' && e.target.value !== original && typeof snap === 'string') {
+      useAppStore.getState().pushCapturedSnapshot(snap)
+    }
+    rotSnapRef.current = null
+    rotOriginalRef.current = null
+  }
   const backgroundImage = useAppStore((s) => s.backgroundImage)
   const clearBackgroundImage = useAppStore((s) => s.clearBackgroundImage)
 
@@ -358,7 +383,11 @@ export default function DrawingTools() {
         </label>
         {/* P38 (May 8 2026) — grid rotation input. Dimmed (NOT hidden)
             when perspective is active per Option Y so the operator's
-            rotation choice persists across perspective on/off cycles. */}
+            rotation choice persists across perspective on/off cycles.
+            Undo: focus→blur edit-session pattern (P35 stepper precedent
+            + P16/P38 follow-on fix May 8 2026 — operator-typed rotation
+            now reverts via Cmd+Z as one undo entry per edit session,
+            not per keystroke). */}
         <label
           className={perspectiveActive ? 'grid-rotation-input dimmed' : 'grid-rotation-input'}
           title={
@@ -374,6 +403,8 @@ export default function DrawingTools() {
             max="180"
             step="1"
             value={gridRotation ?? 0}
+            onFocus={onRotationFocus}
+            onBlur={onRotationBlur}
             onChange={(e) => setGridRotation(e.target.value)}
             disabled={perspectiveActive}
             aria-label="Grid rotation in degrees"
@@ -393,7 +424,9 @@ export default function DrawingTools() {
           onContextMenu={(e) => {
             e.preventDefault()
             // Right-click clears perspective corners + exits edit mode.
-            if (perspectiveCorners) clearPerspectiveCorners()
+            // Use the undo-aware clear so Cmd+Z restores the prior
+            // corner config (P16 follow-on fix May 8 2026).
+            if (perspectiveCorners) clearPerspectiveCornersWithUndo()
             if (perspectiveEditMode) togglePerspectiveEditMode()
           }}
           title={
