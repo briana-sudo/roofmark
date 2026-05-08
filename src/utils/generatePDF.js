@@ -41,18 +41,24 @@ const PRINT_SCALE = 1
 const KCC_NAVY = '#1a3a5c'
 const KCC_ORANGE = '#e8531a'
 
-// POST-VERIFICATION FIX (May 8 2026 — Checks 2/3 FAIL on initial deploy):
 // PDF page renders at fixed pixel dimensions matching A4 at 96 DPI so the
-// hidden DOM layout doesn't depend on the operator's actual viewport
-// height (100vh was unreliable for off-screen / position:fixed elements).
-// html2pdf scales these px to the PDF's mm format at output time.
-//   A4 portrait  : 794 × 1123 px
-//   A4 landscape : 1123 × 794 px
-// Section heights chosen so they sum to exactly the page height with a
-// flexible photo zone in the middle.
+// DOM layout corresponds to physical PDF page size. html2pdf scales these
+// px to the PDF's mm format at output time.
+//
+// POST-VERIFICATION FIX (May 8 2026 — blank-pages-between-content):
+// Section height shaved 3 px below the exact A4-at-96-DPI conversion
+// (1123 → 1120) so mm↔px rounding fuzz can NEVER overflow into a
+// fragment page. Without this buffer, each section ended up producing
+// a tiny fragment on a second PDF page — combined with the legacy
+// pagebreak.before selector (now removed), this generated 8 pages for
+// 3 sequences with content only on pages 2, 5, 8.
+//
+//   A4 portrait at 96 DPI: 793.7 × 1122.5 px (theoretical)
+//   Our page dimensions  : 794 × 1120 px (3-px buffer)
+//   A4 landscape         : 1120 × 794 px (same buffer rotated)
 const PAGE_PORTRAIT_W  = 794
-const PAGE_PORTRAIT_H  = 1123
-const PAGE_LANDSCAPE_W = 1123
+const PAGE_PORTRAIT_H  = 1120
+const PAGE_LANDSCAPE_W = 1120
 const PAGE_LANDSCAPE_H = 794
 const HEADER_H   = 56
 const CALLOUTS_H = 140
@@ -632,7 +638,17 @@ export async function exportProjectPDF({ project, language, orientationPref = 'a
         // read element width from getBoundingClientRect.
       },
       jsPDF: { unit: 'mm', format: 'a4', orientation },
-      pagebreak: { mode: ['css', 'legacy'], before: '.rm-pdf-page' },
+      // POST-VERIFICATION FIX (May 8 2026 — blank-pages-between-content):
+      // Drop the legacy `before: '.rm-pdf-page'` selector. It was inserting
+      // a forced page break BEFORE every section — including section 1,
+      // producing a leading blank page. Combined with the per-section
+      // page-break-after CSS rule, this caused 1 leading blank + 2 trailing
+      // blanks per section between content pages.
+      // New config: CSS mode only (respects `page-break-after: always`
+      // already present on each section but the last) + `avoid:
+      // '.rm-pdf-page'` to keep html2pdf from splitting a single section
+      // across multiple PDF pages mid-content.
+      pagebreak: { mode: ['css'], avoid: '.rm-pdf-page' },
     }
     await html2pdf().from(root).set(opt).save()
     dbgLog('html2pdf save complete')
