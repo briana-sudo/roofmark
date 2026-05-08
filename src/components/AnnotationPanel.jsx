@@ -141,6 +141,13 @@ function SequenceDefaultsSection({ seq, annotations }) {
   const onTranslateAll = async () => {
     setTranslateError('')
     setTranslateState('busy')
+    // POST-VERIFICATION FIX (May 8 2026 — Check 9 FAIL on initial deploy):
+    // capture pre-translation snapshot SYNCHRONOUSLY before the async API
+    // call fires. bulkUpdateAnnotations is now a pure setter (no internal
+    // pushUndo) — caller controls undo so the snapshot ↔ mutation pairing
+    // is unambiguous across the await boundary. Same pattern as Step 17
+    // textarea edit-session undo + P34 drag undo.
+    const preSnap = useAppStore.getState().captureUndoSnapshot()
     try {
       const map = await translateAnnotations(annotations)
       if (map.size === 0) {
@@ -148,16 +155,21 @@ function SequenceDefaultsSection({ seq, annotations }) {
         return
       }
       // Convert the Map<annoId, textES> into a plain partial-by-id object
-      // for bulkUpdateAnnotations. Single store mutation + single pushUndo
-      // means the operator's Cmd+Z reverts the whole batch atomically.
+      // for bulkUpdateAnnotations.
       const updates = {}
       for (const [annoId, textES] of map) updates[annoId] = { textES }
       bulkUpdateAnnotations(seq.id, updates)
+      // Push the captured snapshot only AFTER the bulk write succeeds.
+      // One undo entry per Translate-all operation; Cmd+Z reverts the
+      // whole batch atomically.
+      useAppStore.getState().pushCapturedSnapshot(preSnap)
       setTranslateState('idle')
     } catch (err) {
       const msg = err?.message || String(err)
       setTranslateError(msg)
       setTranslateState('error')
+      // Snapshot is intentionally NOT pushed on failure — the undo stack
+      // stays clean so retry doesn't pile up bogus entries.
     }
   }
   const onRetry = () => {

@@ -41,6 +41,23 @@ const PRINT_SCALE = 1
 const KCC_NAVY = '#1a3a5c'
 const KCC_ORANGE = '#e8531a'
 
+// POST-VERIFICATION FIX (May 8 2026 — Checks 2/3 FAIL on initial deploy):
+// PDF page renders at fixed pixel dimensions matching A4 at 96 DPI so the
+// hidden DOM layout doesn't depend on the operator's actual viewport
+// height (100vh was unreliable for off-screen / position:fixed elements).
+// html2pdf scales these px to the PDF's mm format at output time.
+//   A4 portrait  : 794 × 1123 px
+//   A4 landscape : 1123 × 794 px
+// Section heights chosen so they sum to exactly the page height with a
+// flexible photo zone in the middle.
+const PAGE_PORTRAIT_W  = 794
+const PAGE_PORTRAIT_H  = 1123
+const PAGE_LANDSCAPE_W = 1123
+const PAGE_LANDSCAPE_H = 794
+const HEADER_H   = 56
+const CALLOUTS_H = 140
+const FOOTER_H   = 60
+
 // Per Spec §13.6 — auto-detect orientation from photo aspect ratio. Operator
 // may force via the ⋮ Project menu (orientationPref).
 //   'landscape'  → landscape regardless of photo
@@ -58,9 +75,17 @@ export function computePageOrientation(orientationPref, photoMeta) {
   return 'portrait' // tie or invalid → portrait (spec)
 }
 
-// Render one sequence's photo+annotations to a dataURL via offscreen canvas.
-// `photoImage` is the operator's working photo HTMLImageElement (loaded by
-// caller before invoking exportProjectPDF). Returns a 'image/png' data URL.
+// Render one sequence's photo+annotations to an offscreen canvas. Returns
+// the canvas element itself (not a dataURL) so callers can embed it
+// directly via <img src=canvas.toDataURL()>. We expose the canvas+dataURL
+// pair so html2canvas captures a guaranteed-loaded image (the dataURL is
+// embedded in the <img> AND the natural width/height match exactly).
+//
+// POST-VERIFICATION FIX (May 8 2026): the previous version returned only
+// the dataURL string and the caller built the <img> from it. html2canvas
+// occasionally captured the photo as 0×0 because the <img>'s natural-dim
+// layout hadn't settled when html2canvas snapshotted. Attaching the
+// canvas's dimensions explicitly + decoding sync solves that.
 export function renderSequenceImage({
   sequence, layers, clines, photoImage, photoMeta, language, clinesVisible,
 }) {
@@ -80,7 +105,7 @@ export function renderSequenceImage({
     language,
     clinesVisible,
   })
-  return canvas.toDataURL('image/png')
+  return { canvas, dataURL: canvas.toDataURL('image/png'), width: W, height: H }
 }
 
 // Escape HTML-bearing operator strings to prevent any < / > / & from breaking
@@ -139,17 +164,33 @@ function buildMaterialsRowHtml(sequence, layers) {
 }
 
 // Build the complete hidden DOM for html2pdf — one .rm-pdf-page section per
-// sequence. Inline styles (no CSS reliance) so html2pdf's html2canvas pass
-// captures everything correctly.
+// sequence. POST-VERIFICATION FIX: each page is laid out at FIXED PIXEL
+// dimensions matching A4 at 96 DPI, with absolutely-positioned sections
+// so the layout doesn't depend on viewport height or flex calculations
+// that html2canvas can mis-capture for off-screen elements.
+//
+// Page sections (top to bottom in absolute positioning):
+//   header   — 0..HEADER_H px (KCC navy bar with orange accent stripe)
+//   photo    — HEADER_H..(pageH - CALLOUTS_H - FOOTER_H) px
+//   callouts — bottom-of-photo..(pageH - FOOTER_H) px
+//   footer   — (pageH - FOOTER_H)..pageH px (materials + metadata)
 export function buildPdfPageDom({
   project, language, photoImage, photoMeta, layers, clines, sequences,
-  jobAddress, generatedYMD,
+  jobAddress, generatedYMD, orientation,
 }) {
+  const pageW = orientation === 'landscape' ? PAGE_LANDSCAPE_W : PAGE_PORTRAIT_W
+  const pageH = orientation === 'landscape' ? PAGE_LANDSCAPE_H : PAGE_PORTRAIT_H
+  const photoTop = HEADER_H
+  const photoH   = pageH - HEADER_H - CALLOUTS_H - FOOTER_H
+  const calloutsTop = pageH - CALLOUTS_H - FOOTER_H
+  const footerTop = pageH - FOOTER_H
+
   const root = document.createElement('div')
   root.className = 'rm-pdf-root'
   root.style.cssText = (
-    'background:#ffffff;color:#0d1117;'
-    + 'font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;'
+    `width:${pageW}px;`
+    + `background:#ffffff;color:#0d1117;`
+    + `font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;`
   )
 
   const totalSeqs = sequences.length
@@ -158,18 +199,21 @@ export function buildPdfPageDom({
   sequences.forEach((seq, idx) => {
     const page = document.createElement('section')
     page.className = 'rm-pdf-page'
-    // page-break-before:always EXCEPT for the first page (Spec §13.5)
     page.style.cssText = (
-      'box-sizing:border-box;'
-      + 'width:100%;'
-      + 'min-height:100vh;'
-      + 'display:flex;flex-direction:column;'
-      + 'padding:0;'
+      `position:relative;`
+      + `box-sizing:border-box;`
+      + `width:${pageW}px;`
+      + `height:${pageH}px;`
+      + `overflow:hidden;`
+      + `background:#ffffff;`
       + (idx > 0 ? 'page-break-before:always;break-before:page;' : '')
     )
 
-    // Render the offscreen canvas at print resolution; embed as <img>
-    const imgDataUrl = renderSequenceImage({
+    // Render the offscreen canvas at print resolution. We get back the
+    // canvas, dataURL, and natural pixel dims so the embedded <img> has
+    // explicit width/height attributes (forces synchronous layout — no
+    // race with html2canvas's snapshot pass).
+    const rendered = renderSequenceImage({
       sequence: seq,
       layers,
       clines,
@@ -178,49 +222,76 @@ export function buildPdfPageDom({
       language,
       clinesVisible: project?.clinesVisible !== false,
     })
-
-    // Header bar (Spec §13.8)
     const seqTitle = esc(seq.title || `S${idx + 1}`)
+
+    // Header bar (Spec §13.8) — absolutely positioned at top of page.
     const headerHtml = (
-      `<header class="rm-pdf-header" style="`
+      `<header style="`
+      + `position:absolute;left:0;top:0;width:${pageW}px;height:${HEADER_H}px;`
       + `background:${KCC_NAVY};color:#ffffff;`
       + `border-bottom:3px solid ${KCC_ORANGE};`
-      + `padding:8px 16px 6px 16px;`
+      + `box-sizing:border-box;`
+      + `padding:8px 16px;`
       + `display:flex;align-items:center;justify-content:space-between;gap:16px;`
       + `font-size:11px;line-height:1.2;`
       + `">`
-        + `<div class="rm-pdf-brand" style="display:flex;flex-direction:column;min-width:0;">`
-          + `<span style="font-size:14px;font-weight:800;letter-spacing:0.3px;">KCC</span>`
+        + `<div style="display:flex;flex-direction:column;min-width:0;">`
+          + `<span style="font-size:16px;font-weight:800;letter-spacing:0.5px;">KCC</span>`
           + `<span style="font-size:9px;opacity:0.85;">Kosarek Construction Company</span>`
         + `</div>`
-        + `<div class="rm-pdf-address" style="flex:1;text-align:center;font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">`
+        + `<div style="flex:1;text-align:center;font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">`
           + `${esc(jobAddress || '—')}`
         + `</div>`
-        + `<div class="rm-pdf-meta" style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;min-width:0;">`
+        + `<div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;min-width:0;">`
           + `<span style="font-weight:700;">${seqTitle}</span>`
           + `<span style="opacity:0.85;">Sequence ${idx + 1} of ${totalSeqs} · ${langLabel} · ${esc(generatedYMD)}</span>`
         + `</div>`
       + `</header>`
     )
 
-    // Photo section. The img is sized to fill the available width while
-    // preserving aspect ratio. Background fill in case the photo is missing.
+    // Photo section — absolutely positioned. <img> has explicit
+    // width/height attributes so the layout settles before html2canvas
+    // captures (the previous version relied on natural-dim resolution
+    // which sometimes captured as 0×0).
+    let photoInner = '<div style="color:#fff;">No photo loaded.</div>'
+    if (rendered) {
+      // Compute object-fit-contain dims for the natural canvas dataURL.
+      const containerRatio = pageW / photoH
+      const photoRatio = rendered.width / rendered.height
+      let drawW, drawH
+      if (photoRatio > containerRatio) {
+        drawW = pageW
+        drawH = Math.round(pageW / photoRatio)
+      } else {
+        drawH = photoH
+        drawW = Math.round(photoH * photoRatio)
+      }
+      photoInner = (
+        `<img src="${rendered.dataURL}" `
+        + `width="${drawW}" height="${drawH}" `
+        + `style="display:block;width:${drawW}px;height:${drawH}px;" `
+        + `alt="" />`
+      )
+    }
     const photoHtml = (
-      `<div class="rm-pdf-photo" style="`
-      + `flex:1 1 auto;display:flex;align-items:center;justify-content:center;`
-      + `background:#0d1117;padding:12px;`
+      `<div style="`
+      + `position:absolute;left:0;top:${photoTop}px;width:${pageW}px;height:${photoH}px;`
+      + `background:#0d1117;`
+      + `display:flex;align-items:center;justify-content:center;`
+      + `overflow:hidden;`
       + `">`
-        + (imgDataUrl
-          ? `<img src="${imgDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;" alt="" />`
-          : `<div style="color:#fff;font-size:14px;">No photo loaded.</div>`)
+        + photoInner
       + `</div>`
     )
 
     // Callouts list (Spec §13.7 step 3)
     const calloutsHtml = (
-      `<div class="rm-pdf-callouts" style="`
+      `<div style="`
+      + `position:absolute;left:0;top:${calloutsTop}px;width:${pageW}px;height:${CALLOUTS_H}px;`
+      + `box-sizing:border-box;`
       + `padding:8px 16px;font-size:10px;line-height:1.4;`
       + `border-top:1px solid #d0d4dc;`
+      + `overflow:hidden;`
       + `">`
         + buildCalloutsListHtml(seq, language)
       + `</div>`
@@ -228,11 +299,13 @@ export function buildPdfPageDom({
 
     // Footer (Spec §13.9): materials row on top, metadata row on bottom.
     const footerHtml = (
-      `<footer class="rm-pdf-footer" style="`
+      `<footer style="`
+      + `position:absolute;left:0;top:${footerTop}px;width:${pageW}px;height:${FOOTER_H}px;`
+      + `box-sizing:border-box;`
       + `border-top:1px solid #d0d4dc;`
       + `font-size:9px;`
       + `">`
-        + `<div style="padding:6px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;">`
+        + `<div style="padding:6px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;height:30px;overflow:hidden;">`
           + buildMaterialsRowHtml(seq, layers)
         + `</div>`
         + `<div style="padding:6px 16px;display:flex;justify-content:space-between;border-top:1px solid #e5e8ee;color:#5b6478;">`
@@ -246,15 +319,18 @@ export function buildPdfPageDom({
     root.appendChild(page)
   })
 
-  // Add inline list style so html2canvas picks up the visual treatment.
+  // Inline styles applied directly to elements above; the only class-based
+  // styling left is the callouts list + materials chip. Keep that as a
+  // dedicated <style> tag so the small number of class rules don't clutter
+  // every per-element style attribute.
   const styleTag = document.createElement('style')
   styleTag.textContent = (
-    '.rm-callouts-list { margin: 0; padding-left: 18px; }'
+    '.rm-callouts-list { margin: 0; padding-left: 18px; list-style: decimal; }'
     + ' .rm-callouts-list li { margin: 0 0 2px 0; padding: 0; }'
     + ' .rm-cn { font-weight: 700; margin-right: 4px; color: ' + KCC_NAVY + '; }'
     + ' .rm-cn-note { color: ' + KCC_ORANGE + '; }'
     + ' .rm-empty { color: #8a93a4; font-style: italic; }'
-    + ' .rm-material-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px 1px 2px; border: 1px solid #d0d4dc; border-radius: 10px; }'
+    + ' .rm-material-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px 1px 2px; border: 1px solid #d0d4dc; border-radius: 10px; background: #ffffff; }'
     + ' .rm-material-swatch { width: 10px; height: 10px; border-radius: 2px; border: 1px solid #999; display: inline-block; }'
     + ' .rm-material-label { font-size: 9px; color: #1a3a5c; }'
   )
@@ -295,16 +371,34 @@ export async function exportProjectPDF({ project, language, orientationPref = 'a
     sequences,
     jobAddress,
     generatedYMD,
+    orientation,
   })
 
-  // Mount root off-screen but in the document so html2canvas can compute
-  // styles + layout. Position fixed bottom-right with -9999 offset keeps it
-  // out of the operator's view while preserving layout fidelity.
-  root.style.position = 'fixed'
-  root.style.left = '-99999px'
-  root.style.top = '-99999px'
-  root.style.width = orientation === 'landscape' ? '297mm' : '210mm'
+  // POST-VERIFICATION FIX (May 8 2026 — Checks 2/3 FAIL on initial deploy):
+  // Mount root in the document at top-left position 0,0 with absolute
+  // positioning + opacity 0 so html2canvas can capture the layout
+  // correctly. Previous version used `position:fixed` + `left:-99999px`
+  // which html2canvas occasionally captured as blank because off-viewport
+  // fixed elements have unreliable layout calculation.
+  //
+  // Top-left absolute + opacity 0 keeps the element invisible while in
+  // normal document flow (html2canvas reads layout from there). z-index
+  // -1 + pointer-events: none ensures it can't intercept clicks even
+  // briefly during the snapshot pass.
+  root.style.position = 'absolute'
+  root.style.left = '0'
+  root.style.top = '0'
+  root.style.opacity = '0'
+  root.style.pointerEvents = 'none'
+  root.style.zIndex = '-1'
   document.body.appendChild(root)
+
+  // Wait two animation frames so the browser has computed layout for the
+  // newly-inserted DOM (image natural-dim resolution + flex/abs-pos
+  // calculations) before html2canvas snapshots. Single rAF can fire
+  // before the second layout pass on some browsers; double rAF is the
+  // standard pattern for "DOM is fully painted".
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
 
   const filename = composeFilename({
     language,
@@ -321,7 +415,19 @@ export async function exportProjectPDF({ project, language, orientationPref = 'a
       margin: 0,
       filename,
       image: { type: 'jpeg', quality: 0.92 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+      html2canvas: {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: '#ffffff',
+        // POST-VERIFICATION FIX: tell html2canvas the explicit width/height
+        // of the source element (matches the DOM's fixed-px page size) so
+        // it doesn't fall back to viewport dims. logging:false silences the
+        // library's verbose console output during normal exports.
+        logging: false,
+        width: orientation === 'landscape' ? PAGE_LANDSCAPE_W : PAGE_PORTRAIT_W,
+        // height is derived from the captured element's bounding rect
+        // (multi-page document — html2canvas handles the full element).
+      },
       jsPDF: { unit: 'mm', format: 'a4', orientation },
       pagebreak: { mode: ['css', 'legacy'], before: '.rm-pdf-page' },
     }

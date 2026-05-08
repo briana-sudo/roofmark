@@ -748,16 +748,27 @@ export const useAppStore = create((set, get) => {
       })),
 
     // P30 (May 8 2026) — atomic batch update across all annotations of one
-    // sequence. Used by AnnotationPanel's "Translate all" handler so the
-    // entire translation batch lands as ONE undo entry (single pushUndo
-    // before the set; one pushCapturedSnapshot would also work but pushUndo
-    // is the simpler primitive when the whole batch is committed at once).
-    // updates is a Map<annoId, partial> OR a plain object keyed by annoId.
+    // sequence. Used by AnnotationPanel's "Translate all" handler.
+    //
+    // POST-VERIFICATION FIX (May 8 2026 operator gate failure on Check 9):
+    // bulkUpdateAnnotations is now a PURE SETTER. The caller is responsible
+    // for capturing+pushing the undo snapshot via captureUndoSnapshot /
+    // pushCapturedSnapshot. This mirrors the Step 17 textarea + P34 drag
+    // patterns and dodges a timing issue where the internal pushUndo + set
+    // pair across an async await boundary did not produce a working Cmd+Z
+    // entry on the live URL.
+    //
+    // Caller pattern:
+    //   const snap = useAppStore.getState().captureUndoSnapshot()
+    //   try {
+    //     const updates = await asyncWork(...)  // API call etc.
+    //     useAppStore.getState().bulkUpdateAnnotations(seqId, updates)
+    //     useAppStore.getState().pushCapturedSnapshot(snap)
+    //   } catch (e) { /* don't push — failure leaves stack clean */ }
     bulkUpdateAnnotations: (seqId, updates) => {
       if (!updates) return
       const map = updates instanceof Map ? updates : new Map(Object.entries(updates))
       if (map.size === 0) return
-      pushUndo()
       set((s) => ({
         sequences: s.sequences.map((seq) =>
           seq.id !== seqId
