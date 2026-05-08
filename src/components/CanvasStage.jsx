@@ -4,6 +4,11 @@ import {
   effectivePhotoSize, photoNormToCanvas, canvasToPhotoNorm,
   computeFitViewport, clampPan, zoomAtCursor, clampZoom,
 } from '../store/viewport'
+import { arcCircumcircle, arcAnglesFor, ellipseParams } from '../utils/shapeGeometry'
+import {
+  drawShapeOnContext as drawShapeOnContextShared,
+  drawAnnotationOnContext as drawAnnotationOnContextShared,
+} from '../utils/canvasRender'
 import ContextMenu from './ContextMenu'
 
 /**
@@ -113,51 +118,15 @@ function distToSegment(px, py, ax, ay, bx, by) {
 }
 
 // ============================================================================
-// P6 (May 7 2026) — Arc (3-point) + Ellipse (bounding-box) geometry helpers.
-// Both new shape types use pts-array data models so reprojectShapes' existing
-// pts-dispatch handles them automatically (no new branches in
-// src/utils/reprojectShapes.js needed).
+// P6 (May 7 2026) — Arc (3-point) + Ellipse (bounding-box) hit-test helpers.
+// The math primitives (arcCircumcircle, arcAnglesFor, ellipseParams) live in
+// src/utils/shapeGeometry.js so they can be shared with the offscreen PDF
+// render pipeline (Step 16, May 8 2026 — see canvasRender.js). Hit-test is
+// canvas-px aware and stays here.
 //
 //   Arc:     { type: 'arc', pts: [start, mid, end] }
 //   Ellipse: { type: 'ellipse', pts: [tlOrAny, brOrAny] } (any 2 opposite corners)
-//
-// These functions operate in canvas-px space (after viewport translation).
-// Callers (shapeHit / draw) pass already-transformed points.
 // ============================================================================
-
-// Compute the unique circle through 3 points. Returns { cx, cy, r } or null
-// if the 3 points are collinear (no circumcircle exists).
-function arcCircumcircle(p1, p2, p3) {
-  const A = p2.x - p1.x
-  const B = p2.y - p1.y
-  const C = p3.x - p1.x
-  const D = p3.y - p1.y
-  const E = A * (p1.x + p2.x) + B * (p1.y + p2.y)
-  const F = C * (p1.x + p3.x) + D * (p1.y + p3.y)
-  const G = 2 * (A * (p3.y - p2.y) - B * (p3.x - p2.x))
-  if (Math.abs(G) < 1e-9) return null
-  const cx = (D * E - B * F) / G
-  const cy = (A * F - C * E) / G
-  const r = Math.hypot(cx - p1.x, cy - p1.y)
-  return { cx, cy, r }
-}
-
-// For the 3-point arc, determine sweep direction so the canvas arc()
-// call passes through P2. Default direction is "anticlockwise=false"
-// (math-CCW which renders visually CW on screen due to y-down). We
-// pick the direction whose angular sweep from a1 to a3 contains a2.
-function arcAnglesFor(p1, p2, p3, cx, cy) {
-  const TWOPI = 2 * Math.PI
-  const a1 = Math.atan2(p1.y - cy, p1.x - cx)
-  const a2 = Math.atan2(p2.y - cy, p2.x - cx)
-  const a3 = Math.atan2(p3.y - cy, p3.x - cx)
-  // Default-direction (anticlockwise=false) sweep length:
-  const ccwSweep = ((a3 - a1 + TWOPI) % TWOPI)
-  // Where a2 falls within that default sweep:
-  const a2Pos = ((a2 - a1 + TWOPI) % TWOPI)
-  const useDefault = a2Pos <= ccwSweep
-  return { startAngle: a1, endAngle: a3, anticlockwise: !useDefault }
-}
 
 // Hit-test for a 3-point arc. Returns true if the cursor is within
 // `tolerance` canvas-px of the arc curve AND between the start/end
@@ -191,16 +160,6 @@ function arcHit(p1, p2, p3, cursorX, cursorY, tolerance) {
     const tPos = ((a1 - aT + TWOPI) % TWOPI)
     return tPos <= cwSweep + 1e-3
   }
-}
-
-// Decompose an ellipse's 2-pt bounding box into render parameters.
-// Accepts any two opposite corners; doesn't matter which is TL.
-function ellipseParams(p1, p2) {
-  const cx = (p1.x + p2.x) / 2
-  const cy = (p1.y + p2.y) / 2
-  const rx = Math.abs(p1.x - p2.x) / 2
-  const ry = Math.abs(p1.y - p2.y) / 2
-  return { cx, cy, rx, ry }
 }
 
 // Hit-test for an ellipse — point-in-ellipse via the standard
@@ -652,200 +611,14 @@ export default function CanvasStage() {
     ro.observe(container)
     window.addEventListener('resize', resizeAll)
 
-    // ---- Annotation rendering (Step 12, Spec §12) -------------------------
-    // Renders one annotation. Section 7.A — translate normalized photo coords
-    // to canvas px via the viewport. Pin geometry (size of dot, tick length,
-    // diamond size) intentionally stays in canvas px so labels remain legible
-    // regardless of zoom (similar to dimension labels in CAD apps).
-    // P31 + P35 (May 7 2026) — 3-tier color / font-size fallback chain:
-    //   anno.<field> ?? seq.default<Field> ?? hardcoded fallback
-    // The `seq` argument is the active sequence (provides defaults).
-    // Per-annotation overrides take priority; sequence default applies
-    // when no override; hardcoded fallback covers pre-P31 sequences
-    // that never had the default field.
-    const ANNO_ACCENT_FALLBACK = '#f5a623'
-    const ANNO_FONT_SIZE_FALLBACK_LOCAL = 11
-    // P35 root-cause fix (May 7 2026) — Canvas 2D `ctx.font` does NOT
-    // resolve CSS custom properties (`var(--rm-sans, ...)`). Browsers
-    // silently REJECT the assignment when var() appears in the font
-    // string, leaving ctx.font at its previous value (the canvas default
-    // `10px sans-serif`). This was a latent bug going back to Step 12 —
-    // pre-P35 the fontSize was hardcoded to 11 so the silent no-op was
-    // invisible. P35 made the size variable, exposing it: typing 18 in
-    // the stepper updated the store correctly, render fired correctly,
-    // but ctx.font assignment was a no-op so canvas text stayed at 10px.
-    // Inline the literal font stack (same as --rm-sans in App.css) so
-    // the canvas parser accepts the assignment.
-    const ANNO_FONT_STACK = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
-    const drawAnnotationOnContext = (ctx, anno, viewport, photoSize, seq) => {
-      const color = (typeof anno.color === 'string' && anno.color.length > 0)
-        ? anno.color
-        : (seq && typeof seq.defaultAnnoColor === 'string' && seq.defaultAnnoColor.length > 0)
-          ? seq.defaultAnnoColor
-          : ANNO_ACCENT_FALLBACK
-      const fontSize = (typeof anno.fontSize === 'number' && Number.isFinite(anno.fontSize))
-        ? anno.fontSize
-        : (seq && typeof seq.defaultAnnoFontSize === 'number' && Number.isFinite(seq.defaultAnnoFontSize))
-          ? seq.defaultAnnoFontSize
-          : ANNO_FONT_SIZE_FALLBACK_LOCAL
-      ctx.save()
-      ctx.strokeStyle = color
-      ctx.fillStyle = color
-      ctx.lineWidth = 1.5
-      ctx.font = `bold ${fontSize}px ${ANNO_FONT_STACK}`
-
-      if (anno.type === 'note') {
-        const at = photoNormToCanvas(anno.at, viewport, photoSize)
-        const x = at.x
-        const y = at.y
-        // Pin: filled circle + center dot in white
-        ctx.beginPath()
-        ctx.arc(x, y, 7, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.fillStyle = '#000'
-        ctx.beginPath()
-        ctx.arc(x, y, 2, 0, Math.PI * 2)
-        ctx.fill()
-        // Body indicator: "?" placeholder until Step 13 adds the text panel
-        const label = anno.textEN ? anno.textEN.slice(0, 24) : '?'
-        ctx.fillStyle = color
-        ctx.fillText(label, x + 10, y + 4)
-      } else if (anno.type === 'callout') {
-        const tipPt  = photoNormToCanvas(anno.tip,  viewport, photoSize)
-        const tailPt = photoNormToCanvas(anno.tail, viewport, photoSize)
-        const tipX = tipPt.x, tipY = tipPt.y
-        const tailX = tailPt.x, tailY = tailPt.y
-        // Tip: small filled diamond (caller end)
-        ctx.beginPath()
-        ctx.moveTo(tipX, tipY - 5); ctx.lineTo(tipX + 5, tipY)
-        ctx.lineTo(tipX, tipY + 5); ctx.lineTo(tipX - 5, tipY)
-        ctx.closePath()
-        ctx.fill()
-        // Lead line tip → tail
-        ctx.beginPath()
-        ctx.moveTo(tipX, tipY)
-        ctx.lineTo(tailX, tailY)
-        ctx.stroke()
-        // Tail: hollow circle marker around the label anchor
-        ctx.beginPath()
-        ctx.arc(tailX, tailY, 6, 0, Math.PI * 2)
-        ctx.stroke()
-        const label = anno.textEN ? anno.textEN.slice(0, 24) : '?'
-        ctx.fillText(label, tailX + 10, tailY + 4)
-      } else if (anno.type === 'dimline') {
-        const aP = photoNormToCanvas(anno.a, viewport, photoSize)
-        const bP = photoNormToCanvas(anno.b, viewport, photoSize)
-        const ax = aP.x, ay = aP.y, bx = bP.x, by = bP.y
-        const dx = bx - ax, dy = by - ay
-        const len = Math.hypot(dx, dy) || 1
-        const ux = dx / len, uy = dy / len
-        const nx = -uy, ny = ux // perpendicular unit vector
-        const tickLen = 6
-        // Main line
-        ctx.beginPath()
-        ctx.moveTo(ax, ay)
-        ctx.lineTo(bx, by)
-        ctx.stroke()
-        // Extension ticks at each endpoint perpendicular to the line
-        ctx.beginPath()
-        ctx.moveTo(ax + nx * tickLen, ay + ny * tickLen)
-        ctx.lineTo(ax - nx * tickLen, ay - ny * tickLen)
-        ctx.moveTo(bx + nx * tickLen, by + ny * tickLen)
-        ctx.lineTo(bx - nx * tickLen, by - ny * tickLen)
-        ctx.stroke()
-        // Label at midpoint (above the line in the +n direction)
-        const mx = (ax + bx) / 2, my = (ay + by) / 2
-        const label = anno.value ? String(anno.value).slice(0, 16) : '?'
-        ctx.fillText(label, mx + nx * (tickLen + 2), my + ny * (tickLen + 2))
-      }
-      ctx.restore()
-    }
-
-    // ---- Shape rendering (Spec §7 static draw step 5) ----------------------
-    // Section 7.A — translate normalized photo coords to canvas px via the
-    // viewport. Stroke weight stays in canvas px (visual stroke thickness
-    // is operator-tuning, not photo-anchored). Circle radius scales WITH
-    // zoom because `r` is normalized to photo width.
-    const drawShapeOnContext = (ctx, shape, viewport, photoSize, layer) => {
-      const color = layer?.color || '#3b82f6'
-      const fillOn = layer?.fillOn !== false
-      const strokeOn = layer?.strokeOn !== false
-      const fillOpacity = layer?.fillOpacity ?? 0.25
-      const strokeOpacity = layer?.strokeOpacity ?? 1.0
-      ctx.strokeStyle = color
-      ctx.fillStyle = color
-      ctx.lineWidth = layer?.strokeWeight || 2
-
-      const tx = (p) => photoNormToCanvas(p, viewport, photoSize)
-      if (shape.type === 'circ') {
-        const c = tx({ x: shape.cx, y: shape.cy })
-        const rPx = shape.r * photoSize.width * viewport.zoom
-        ctx.beginPath()
-        ctx.arc(c.x, c.y, rPx, 0, Math.PI * 2)
-        if (fillOn) { ctx.globalAlpha = fillOpacity; ctx.fill() }
-        if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
-      } else if (shape.type === 'line') {
-        if (shape.pts && shape.pts.length === 2) {
-          const a = tx(shape.pts[0]), b = tx(shape.pts[1])
-          ctx.beginPath()
-          ctx.moveTo(a.x, a.y)
-          ctx.lineTo(b.x, b.y)
-          if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
-        }
-      } else if (shape.type === 'arc') {
-        // P6 — 3-point arc. Compute circumcircle, derive sweep direction
-        // so the arc passes through pts[1] (the mid-point operator
-        // clicked between start + end). Stroke-only — no fill (arc is a
-        // curve, not a closed region).
-        if (shape.pts && shape.pts.length >= 3) {
-          const a = tx(shape.pts[0])
-          const b = tx(shape.pts[1])
-          const c = tx(shape.pts[2])
-          const cc = arcCircumcircle(a, b, c)
-          if (cc) {
-            const { startAngle, endAngle, anticlockwise } = arcAnglesFor(a, b, c, cc.cx, cc.cy)
-            ctx.beginPath()
-            ctx.arc(cc.cx, cc.cy, cc.r, startAngle, endAngle, anticlockwise)
-            if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
-          } else {
-            // Collinear fallback — render as polyline through the 3 pts.
-            ctx.beginPath()
-            ctx.moveTo(a.x, a.y)
-            ctx.lineTo(b.x, b.y)
-            ctx.lineTo(c.x, c.y)
-            if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
-          }
-        }
-      } else if (shape.type === 'ellipse') {
-        // P6 — bounding-box ellipse. cx/cy/rx/ry computed at render
-        // time from the 2-point bounding box.
-        if (shape.pts && shape.pts.length >= 2) {
-          const a = tx(shape.pts[0])
-          const b = tx(shape.pts[1])
-          const { cx, cy, rx, ry } = ellipseParams(a, b)
-          if (rx > 0 && ry > 0) {
-            ctx.beginPath()
-            ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2)
-            if (fillOn) { ctx.globalAlpha = fillOpacity; ctx.fill() }
-            if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
-          }
-        }
-      } else {
-        // poly / tri / rect — closed path
-        if (shape.pts && shape.pts.length >= 2) {
-          ctx.beginPath()
-          shape.pts.forEach((p, i) => {
-            const c = tx(p)
-            if (i === 0) ctx.moveTo(c.x, c.y)
-            else ctx.lineTo(c.x, c.y)
-          })
-          ctx.closePath()
-          if (fillOn) { ctx.globalAlpha = fillOpacity; ctx.fill() }
-          if (strokeOn) { ctx.globalAlpha = strokeOpacity; ctx.stroke() }
-        }
-      }
-      ctx.globalAlpha = 1
-    }
+    // ---- Annotation + shape rendering ---------------------------------
+    // Step 16 (May 8 2026) — render helpers extracted to src/utils/
+    // canvasRender.js so the PDF generator (src/utils/generatePDF.js) can
+    // share the exact same render path. Single source of truth means no
+    // drift risk between the live canvas and the PDF output. The closure-
+    // local aliases below preserve the existing call shape inside drawStatic.
+    const drawAnnotationOnContext = drawAnnotationOnContextShared
+    const drawShapeOnContext = drawShapeOnContextShared
 
     // ---- Static draw -------------------------------------------------------
     // Section 7.A — viewport-onto-photo render. The PHOTO is drawn at

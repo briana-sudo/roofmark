@@ -144,6 +144,9 @@ const PERSIST_KEYS = [
   // P2 + P19 (May 7 2026) — per-snap-type gates + grid opacity persist
   // alongside other UI flags so operator settings survive reload.
   'snapTypes', 'gridOpacity',
+  // Step 16 (May 8 2026) — PDF page orientation preference (auto / portrait
+  // / landscape). Pre-Step-16 hydration falls back to 'auto'.
+  'pdfOrientation',
 ]
 const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE', 'TECHNICAL'])
 // Step 13 — third tab for the per-annotation editing panel. The tab button
@@ -216,6 +219,15 @@ const normalizeGridOpacity = (v) => {
   if (!Number.isFinite(n)) return GRID_OPACITY_DEFAULT
   return Math.min(GRID_OPACITY_MAX, Math.max(GRID_OPACITY_MIN, n))
 }
+
+// Step 16 (May 8 2026) — PDF page orientation preference. 'auto' picks
+// landscape vs portrait per photo aspect ratio at export time; explicit
+// 'portrait' / 'landscape' overrides auto-detect. Persisted in
+// PERSIST_KEYS so the operator's preference survives reload. Pre-Step-16
+// JSON files (no field) load as 'auto' via the hydration fallback.
+const VALID_PDF_ORIENTATIONS = new Set(['auto', 'portrait', 'landscape'])
+const normalizePdfOrientation = (v) =>
+  (typeof v === 'string' && VALID_PDF_ORIENTATIONS.has(v)) ? v : 'auto'
 
 const loadFromStorage = () => {
   if (typeof localStorage === 'undefined') return null
@@ -309,6 +321,10 @@ const initialState = {
   // Default 0.16 matches the prior hardcoded value, so first-load
   // appearance is unchanged.
   gridOpacity: normalizeGridOpacity(hydrated?.gridOpacity),
+  // Step 16 (May 8 2026) — PDF orientation preference. 'auto' = derive
+  // from photo aspect ratio per-export; 'portrait' / 'landscape' force.
+  // Pre-Step-16 JSON files have no field → fallback to 'auto'.
+  pdfOrientation: normalizePdfOrientation(hydrated?.pdfOrientation),
   snapTolerance: 12,      // 12 mouse / 22 touch (Spec §8 amendment)
   pointerType: 'mouse',
 
@@ -731,6 +747,31 @@ export const useAppStore = create((set, get) => {
         ),
       })),
 
+    // P30 (May 8 2026) — atomic batch update across all annotations of one
+    // sequence. Used by AnnotationPanel's "Translate all" handler so the
+    // entire translation batch lands as ONE undo entry (single pushUndo
+    // before the set; one pushCapturedSnapshot would also work but pushUndo
+    // is the simpler primitive when the whole batch is committed at once).
+    // updates is a Map<annoId, partial> OR a plain object keyed by annoId.
+    bulkUpdateAnnotations: (seqId, updates) => {
+      if (!updates) return
+      const map = updates instanceof Map ? updates : new Map(Object.entries(updates))
+      if (map.size === 0) return
+      pushUndo()
+      set((s) => ({
+        sequences: s.sequences.map((seq) =>
+          seq.id !== seqId
+            ? seq
+            : {
+                ...seq,
+                annotations: (seq.annotations || []).map((a) =>
+                  map.has(a.id) ? { ...a, ...map.get(a.id) } : a
+                ),
+              }
+        ),
+      }))
+    },
+
     deleteAnnotation: (seqId, annoId) => {
       pushUndo()
       set((s) => ({
@@ -1112,6 +1153,11 @@ export const useAppStore = create((set, get) => {
     // normalizeGridOpacity. Render path reads `gridOpacity` directly
     // from store (CanvasStage drawStatic).
     setGridOpacity: (v) => set({ gridOpacity: normalizeGridOpacity(v) }),
+    // Step 16 (May 8 2026) — PDF orientation preference setter. Validates
+    // the input via normalizePdfOrientation; invalid inputs fall back to
+    // 'auto'. Pure setter (no pushUndo) — orientation is a UI preference,
+    // not data state.
+    setPdfOrientation: (v) => set({ pdfOrientation: normalizePdfOrientation(v) }),
     // Step 10 / P12+P14 — accept number (square) or {x, y} (rectangular).
     // Internal state always lives as {x, y}.
     setGridSize: (gridSize) => set({ gridSize: normalizeGridSize(gridSize) }),

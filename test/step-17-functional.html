@@ -1377,6 +1377,321 @@ function _annotationBodyTranslatePartial(anno, deltaCanvas, viewport, photoSize)
     JSON.stringify(a1) !== JSON.stringify(a1Changed))
 }
 
+// 9s. Step 16 (May 8 2026) — slugify + smart filename composition.
+// Mirror of src/utils/slugify.js. Pure logic, no DOM deps.
+function _slugify(input) {
+  if (input == null) return ''
+  const s = String(input)
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-')
+  return s.slice(0, 40).replace(/-+$/g, '')
+}
+function _formatLocalYMD(date) {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+function _composeFilename({ language, jobAddress, date }) {
+  const lang = language === 'es' || language === 'spanish' ? 'spanish' : 'english'
+  const slug = _slugify(jobAddress)
+  const ymd = _formatLocalYMD(date instanceof Date ? date : new Date())
+  const segments = ['roofmark', lang]
+  if (slug) segments.push(slug)
+  segments.push(ymd)
+  return `${segments.join('-')}.pdf`
+}
+pass('Step 16 — slugify: simple address',
+  _slugify('123 Maple St') === '123-maple-st')
+pass('Step 16 — slugify: special chars stripped',
+  _slugify("1234 Main St., Apt #5") === '1234-main-st-apt-5')
+pass('Step 16 — slugify: empty input → empty string',
+  _slugify('') === '')
+pass('Step 16 — slugify: null → empty string',
+  _slugify(null) === '')
+pass('Step 16 — slugify: leading/trailing whitespace stripped',
+  _slugify('   spaces   ') === 'spaces')
+pass('Step 16 — slugify: collapse multiple delimiters',
+  _slugify('a    b___c---d') === 'a-b-c-d')
+pass('Step 16 — slugify: cap at 40 chars',
+  _slugify('a'.repeat(50)).length === 40)
+{
+  const fixedDate = new Date(2026, 4, 8) // May 8 2026 in LOCAL tz
+  pass('Step 16 — composeFilename: english + address',
+    _composeFilename({ language: 'en', jobAddress: '123 Maple St', date: fixedDate })
+      === 'roofmark-english-123-maple-st-2026-05-08.pdf')
+  pass('Step 16 — composeFilename: spanish + address',
+    _composeFilename({ language: 'es', jobAddress: '123 Maple St', date: fixedDate })
+      === 'roofmark-spanish-123-maple-st-2026-05-08.pdf')
+  pass('Step 16 — composeFilename: blank address → omit segment',
+    _composeFilename({ language: 'en', jobAddress: '', date: fixedDate })
+      === 'roofmark-english-2026-05-08.pdf')
+  pass('Step 16 — composeFilename: missing address → omit segment',
+    _composeFilename({ language: 'en', date: fixedDate })
+      === 'roofmark-english-2026-05-08.pdf')
+  pass('Step 16 — composeFilename: language alias "spanish" works',
+    _composeFilename({ language: 'spanish', jobAddress: '123 Maple St', date: fixedDate })
+      === 'roofmark-spanish-123-maple-st-2026-05-08.pdf')
+}
+
+// 9t. Step 16 — page orientation auto-detect from photo aspect ratio.
+function _computePageOrientation(orientationPref, photoMeta) {
+  if (orientationPref === 'landscape') return 'landscape'
+  if (orientationPref === 'portrait') return 'portrait'
+  if (!photoMeta) return 'portrait'
+  const w = Number(photoMeta.width) || 0
+  const h = Number(photoMeta.height) || 0
+  if (w > h) return 'landscape'
+  return 'portrait'
+}
+pass('Step 16 — orientation: landscape photo (4:3 horizontal) → landscape',
+  _computePageOrientation('auto', { width: 1200, height: 900 }) === 'landscape')
+pass('Step 16 — orientation: portrait photo (3:4 vertical) → portrait',
+  _computePageOrientation('auto', { width: 900, height: 1200 }) === 'portrait')
+pass('Step 16 — orientation: square photo → portrait (default)',
+  _computePageOrientation('auto', { width: 1000, height: 1000 }) === 'portrait')
+pass('Step 16 — orientation: explicit portrait override',
+  _computePageOrientation('portrait', { width: 1200, height: 900 }) === 'portrait')
+pass('Step 16 — orientation: explicit landscape override',
+  _computePageOrientation('landscape', { width: 900, height: 1200 }) === 'landscape')
+pass('Step 16 — orientation: missing photoMeta → portrait',
+  _computePageOrientation('auto', null) === 'portrait')
+
+// 9u. Step 16 — pdfOrientation persistence + migration. Pre-Step-16 v2
+// JSON files have no `pdfOrientation` field; the hydration normalizer
+// must fall back to 'auto' without throwing.
+const VALID_PDF_ORIENTATIONS = new Set(['auto', 'portrait', 'landscape'])
+function _normalizePdfOrientation(v) {
+  return (typeof v === 'string' && VALID_PDF_ORIENTATIONS.has(v)) ? v : 'auto'
+}
+pass('Step 16 — pdfOrientation migration: pre-Step-16 v2 (undefined) → auto',
+  _normalizePdfOrientation(undefined) === 'auto')
+pass('Step 16 — pdfOrientation migration: null → auto',
+  _normalizePdfOrientation(null) === 'auto')
+pass('Step 16 — pdfOrientation migration: empty string → auto',
+  _normalizePdfOrientation('') === 'auto')
+pass('Step 16 — pdfOrientation migration: invalid string → auto',
+  _normalizePdfOrientation('diagonal') === 'auto')
+pass('Step 16 — pdfOrientation: "auto" preserved',
+  _normalizePdfOrientation('auto') === 'auto')
+pass('Step 16 — pdfOrientation: "portrait" preserved',
+  _normalizePdfOrientation('portrait') === 'portrait')
+pass('Step 16 — pdfOrientation: "landscape" preserved',
+  _normalizePdfOrientation('landscape') === 'landscape')
+
+// 9v. P30 (May 8 2026) — translateAnnotations response parser. Pure
+// JSON-shape validation; no network. Mirrors parseTranslateResponse.
+function _parseTranslateResponse(responseJson, expectedLength) {
+  if (!responseJson || !Array.isArray(responseJson.content)) {
+    throw new Error('Unexpected response shape: missing content array')
+  }
+  const textBlock = responseJson.content.find((b) => b && b.type === 'text')
+  if (!textBlock || typeof textBlock.text !== 'string') {
+    throw new Error('Response missing text block')
+  }
+  let raw = textBlock.text.trim()
+  if (raw.startsWith('```')) {
+    raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('Response is not valid JSON')
+  }
+  if (!parsed || !Array.isArray(parsed.translations)) {
+    throw new Error('Response missing translations array')
+  }
+  if (parsed.translations.length !== expectedLength) {
+    throw new Error(
+      `Translation count mismatch: expected ${expectedLength}, got ${parsed.translations.length}`,
+    )
+  }
+  for (const t of parsed.translations) {
+    if (typeof t !== 'string') {
+      throw new Error('Translation array contains non-string entries')
+    }
+  }
+  return parsed.translations
+}
+{
+  // Valid response — direct JSON
+  const ok = {
+    content: [{ type: 'text', text: '{"translations":["Hola","Mundo"]}' }],
+  }
+  const parsed = _parseTranslateResponse(ok, 2)
+  pass('P30 — parseResponse: valid JSON → translations array',
+    Array.isArray(parsed) && parsed[0] === 'Hola' && parsed[1] === 'Mundo')
+
+  // Markdown-fenced JSON (defensive parse)
+  const fenced = {
+    content: [{ type: 'text', text: '```json\n{"translations":["Hola","Mundo"]}\n```' }],
+  }
+  const parsedFenced = _parseTranslateResponse(fenced, 2)
+  pass('P30 — parseResponse: markdown-fenced JSON parses correctly',
+    parsedFenced[0] === 'Hola' && parsedFenced[1] === 'Mundo')
+
+  // Length mismatch
+  let threwLengthMismatch = false
+  try {
+    _parseTranslateResponse(
+      { content: [{ type: 'text', text: '{"translations":["Hola"]}' }] },
+      2,
+    )
+  } catch (e) { if (/count mismatch/i.test(e.message)) threwLengthMismatch = true }
+  pass('P30 — parseResponse: length mismatch throws explicit error',
+    threwLengthMismatch)
+
+  // Malformed JSON
+  let threwMalformed = false
+  try {
+    _parseTranslateResponse(
+      { content: [{ type: 'text', text: 'not json at all' }] },
+      1,
+    )
+  } catch (e) { if (/not valid JSON/i.test(e.message)) threwMalformed = true }
+  pass('P30 — parseResponse: malformed JSON throws explicit error',
+    threwMalformed)
+
+  // Missing translations array
+  let threwShape = false
+  try {
+    _parseTranslateResponse(
+      { content: [{ type: 'text', text: '{"foo":"bar"}' }] },
+      1,
+    )
+  } catch (e) { if (/translations array/i.test(e.message)) threwShape = true }
+  pass('P30 — parseResponse: missing translations array throws explicit error',
+    threwShape)
+
+  // Non-string entry in translations
+  let threwNonString = false
+  try {
+    _parseTranslateResponse(
+      { content: [{ type: 'text', text: '{"translations":["Hola", 42]}' }] },
+      2,
+    )
+  } catch (e) { if (/non-string/i.test(e.message)) threwNonString = true }
+  pass('P30 — parseResponse: non-string entry throws explicit error',
+    threwNonString)
+
+  // Missing content array
+  let threwShapeRoot = false
+  try {
+    _parseTranslateResponse({}, 1)
+  } catch (e) { if (/content array/i.test(e.message)) threwShapeRoot = true }
+  pass('P30 — parseResponse: missing content array throws explicit error',
+    threwShapeRoot)
+}
+
+// 9w. P30 — eligibility filter. Only callout/note with non-empty textEN
+// are translation candidates. Dimlines are unit-bearing (skip).
+function _isTranslatable(anno) {
+  if (!anno) return false
+  if (anno.type !== 'callout' && anno.type !== 'note') return false
+  return typeof anno.textEN === 'string' && anno.textEN.trim().length > 0
+}
+{
+  pass('P30 — eligibility: callout with textEN → translatable',
+    _isTranslatable({ type: 'callout', textEN: 'Hello' }))
+  pass('P30 — eligibility: note with textEN → translatable',
+    _isTranslatable({ type: 'note', textEN: 'Note text' }))
+  pass('P30 — eligibility: dimline → NOT translatable (unit-bearing)',
+    !_isTranslatable({ type: 'dimline', value: '12\'-6"' }))
+  pass('P30 — eligibility: callout with empty textEN → NOT translatable',
+    !_isTranslatable({ type: 'callout', textEN: '' }))
+  pass('P30 — eligibility: callout with whitespace-only textEN → NOT translatable',
+    !_isTranslatable({ type: 'callout', textEN: '   ' }))
+  pass('P30 — eligibility: callout missing textEN → NOT translatable',
+    !_isTranslatable({ type: 'callout' }))
+  pass('P30 — eligibility: null annotation → NOT translatable',
+    !_isTranslatable(null))
+}
+
+// 9x. P30 — bulk update preserves non-targeted annotations + applies
+// targeted partial. Mirrors bulkUpdateAnnotations store action behavior.
+function _bulkUpdate(annotations, updatesMap) {
+  return annotations.map((a) =>
+    updatesMap.has(a.id) ? { ...a, ...updatesMap.get(a.id) } : a,
+  )
+}
+{
+  const annos = [
+    { id: 'a1', type: 'callout', textEN: 'Hello',  textES: '' },
+    { id: 'a2', type: 'note',    textEN: 'Note',   textES: 'Existing-ES' },  // already has ES
+    { id: 'a3', type: 'dimline', value: '12\'-6"' },
+  ]
+  // Translate-all builds a Map<id, {textES}> and skips dimlines (no textEN).
+  const updates = new Map([
+    ['a1', { textES: 'Hola' }],
+    ['a2', { textES: 'Nota' }],   // overwrites existing per spec decision 5
+  ])
+  const after = _bulkUpdate(annos, updates)
+  pass('P30 — bulkUpdate: a1 callout textES populated',
+    after[0].textES === 'Hola')
+  pass('P30 — bulkUpdate: a2 note textES OVERWRITES existing (decision 5: always overwrite)',
+    after[1].textES === 'Nota')
+  pass('P30 — bulkUpdate: a3 dimline untouched (no entry in updates map)',
+    after[2].value === '12\'-6"' && after[2].textES === undefined)
+  pass('P30 — bulkUpdate: a1 textEN preserved (only textES partial applied)',
+    after[0].textEN === 'Hello')
+}
+
+// 9y. Step 16 — PDF page DOM language sourcing. EN PDF reads textEN, ES
+// PDF reads textES. Empty textES on ES PDF → blank, no fallback to EN.
+function _resolveCalloutLabel(anno, language) {
+  return (language === 'es' ? anno.textES : anno.textEN) || ''
+}
+{
+  const callout = { type: 'callout', textEN: 'Caulk here', textES: 'Sellar aquí' }
+  const noEs    = { type: 'callout', textEN: 'No translation yet', textES: '' }
+  pass('Step 16 — PDF EN reads textEN',
+    _resolveCalloutLabel(callout, 'en') === 'Caulk here')
+  pass('Step 16 — PDF ES reads textES',
+    _resolveCalloutLabel(callout, 'es') === 'Sellar aquí')
+  pass('Step 16 — PDF ES with empty textES → blank (no EN fallback)',
+    _resolveCalloutLabel(noEs, 'es') === '')
+  pass('Step 16 — PDF EN with empty textEN → blank',
+    _resolveCalloutLabel({ type: 'callout', textEN: '' }, 'en') === '')
+}
+
+// 9z. Step 16 — contributing layers filter. PDF footer Materials row
+// shows only layers that have at least one shape AND aren't filtered
+// out by the sequence visibility map.
+function _computeContributingLayers(sequence, layers) {
+  if (!Array.isArray(layers)) return []
+  const seqLayers = sequence?.layers || {}
+  return layers.filter((layer) => {
+    if (!layer.visible) return false
+    if (seqLayers[layer.id] === false) return false
+    return Array.isArray(layer.shapes) && layer.shapes.length > 0
+  })
+}
+{
+  const layers = [
+    { id: 'l1', visible: true,  shapes: [{ id: 's1' }],            name: 'Layer A' },
+    { id: 'l2', visible: false, shapes: [{ id: 's2' }],            name: 'Layer B (hidden globally)' },
+    { id: 'l3', visible: true,  shapes: [],                        name: 'Layer C (no shapes)' },
+    { id: 'l4', visible: true,  shapes: [{ id: 's4' }],            name: 'Layer D' },
+  ]
+  const seq = { layers: { l4: false } } // l4 hidden in sequence
+  const contrib = _computeContributingLayers(seq, layers)
+  pass('Step 16 — contributing layers: includes visible-with-shapes',
+    contrib.some((l) => l.id === 'l1'))
+  pass('Step 16 — contributing layers: excludes globally-hidden (l2)',
+    !contrib.some((l) => l.id === 'l2'))
+  pass('Step 16 — contributing layers: excludes empty (l3)',
+    !contrib.some((l) => l.id === 'l3'))
+  pass('Step 16 — contributing layers: excludes sequence-hidden (l4)',
+    !contrib.some((l) => l.id === 'l4'))
+  pass('Step 16 — contributing layers: count exactly 1 in this fixture',
+    contrib.length === 1)
+}
+
 // 10. pushUndoCapped — capacity test (50)
 let stack = []
 for (let i = 0; i < 60; i++) {

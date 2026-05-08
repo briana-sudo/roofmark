@@ -1,5 +1,6 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
+import { translateAnnotations } from '../utils/translateAnnotations'
 
 /**
  * AnnotationPanel — Step 13 of Kickoff Spec §11/§13. Extended P31 + P35
@@ -76,8 +77,9 @@ export default function AnnotationPanel() {
       <div className="panel-header">Annotations</div>
       {/* P31 + P35 — sequence-level defaults section. Always rendered
           when a sequence is active so operator can set defaults BEFORE
-          adding annotations (don't gate on annotations.length > 0). */}
-      {seq && <SequenceDefaultsSection seq={seq} />}
+          adding annotations (don't gate on annotations.length > 0).
+          P30 (May 8 2026) — also hosts the Translate all button. */}
+      {seq && <SequenceDefaultsSection seq={seq} annotations={annotations} />}
       {annotations.length === 0 ? (
         <div className="panel-body panel-empty">
           No annotations yet. Use Callout, Dim, or Note tools to add.
@@ -107,8 +109,62 @@ export default function AnnotationPanel() {
 // palette (matches PropertiesPanel layer color UX) + native fine-tune
 // picker. Font size: number stepper (8–32). Both update via
 // setSeqAnnoDefaults; capture+push undo snapshot per discrete click.
-function SequenceDefaultsSection({ seq }) {
+//
+// P30 (May 8 2026) — also hosts the "Translate all" button which
+// populates textES for every callout/note in the active sequence via
+// the KCC Netlify Proxy → Anthropic API. Single-pushUndo at start so
+// the entire batch is reversible via Cmd+Z.
+function SequenceDefaultsSection({ seq, annotations }) {
   const setSeqAnnoDefaults = useAppStore((s) => s.setSeqAnnoDefaults)
+  const bulkUpdateAnnotations = useAppStore((s) => s.bulkUpdateAnnotations)
+
+  // P30 — Translate all state machine.
+  //   idle  → button enabled (or disabled if no eligible annotations)
+  //   busy  → button shows spinner, disabled
+  //   error → button shows retry; errorMsg displayed inline
+  const [translateState, setTranslateState] = useState('idle')
+  const [translateError, setTranslateError] = useState('')
+  // Eligible-for-translation count — only callout/note with non-empty textEN.
+  // Dimlines are skipped (unit-bearing values are language-agnostic).
+  const eligibleCount = (annotations || []).filter(
+    (a) => (a.type === 'callout' || a.type === 'note')
+      && typeof a.textEN === 'string'
+      && a.textEN.trim().length > 0,
+  ).length
+  const translateDisabled = eligibleCount === 0 || translateState === 'busy'
+  const translateDisabledReason =
+    annotations.length === 0 ? 'No annotations to translate'
+    : eligibleCount === 0 ? 'No callouts or notes with English text to translate'
+    : translateState === 'busy' ? 'Translation in progress…'
+    : ''
+
+  const onTranslateAll = async () => {
+    setTranslateError('')
+    setTranslateState('busy')
+    try {
+      const map = await translateAnnotations(annotations)
+      if (map.size === 0) {
+        setTranslateState('idle')
+        return
+      }
+      // Convert the Map<annoId, textES> into a plain partial-by-id object
+      // for bulkUpdateAnnotations. Single store mutation + single pushUndo
+      // means the operator's Cmd+Z reverts the whole batch atomically.
+      const updates = {}
+      for (const [annoId, textES] of map) updates[annoId] = { textES }
+      bulkUpdateAnnotations(seq.id, updates)
+      setTranslateState('idle')
+    } catch (err) {
+      const msg = err?.message || String(err)
+      setTranslateError(msg)
+      setTranslateState('error')
+    }
+  }
+  const onRetry = () => {
+    setTranslateError('')
+    setTranslateState('idle')
+    onTranslateAll()
+  }
 
   const defaultColor = seq.defaultAnnoColor || ANNO_COLOR_DEFAULT
   const defaultFontSize = typeof seq.defaultAnnoFontSize === 'number'
@@ -200,6 +256,46 @@ function SequenceDefaultsSection({ seq }) {
         />
         <span className="anno-seq-defaults-unit">px</span>
       </label>
+      {/* P30 (May 8 2026) — Translate all. Populates textES for every
+          callout/note in this sequence via Anthropic API (KCC Netlify
+          Proxy). Single pushUndo so Cmd+Z reverts the whole batch.
+          Disabled when no eligible annotations OR while in flight. */}
+      <div className="anno-seq-defaults-row anno-translate-row">
+        <button
+          type="button"
+          className={
+            translateState === 'busy'
+              ? 'anno-translate-btn busy'
+              : translateState === 'error'
+                ? 'anno-translate-btn error'
+                : 'anno-translate-btn'
+          }
+          onClick={translateState === 'error' ? onRetry : onTranslateAll}
+          disabled={translateDisabled && translateState !== 'error'}
+          title={translateDisabledReason || (
+            translateState === 'error'
+              ? `Retry — ${translateError}`
+              : `Translate all callouts + notes (${eligibleCount}) to Spanish via Anthropic API`
+          )}
+          aria-label="Translate all annotations to Spanish"
+          data-testid="anno-translate-all"
+        >
+          {translateState === 'busy' && <span className="anno-translate-spinner" aria-hidden="true">⏳</span>}
+          {translateState === 'error' && <span className="anno-translate-icon" aria-hidden="true">⚠</span>}
+          {translateState !== 'busy' && translateState !== 'error'
+            && <span className="anno-translate-icon" aria-hidden="true">🌐</span>}
+          {translateState === 'busy'
+            ? `Translating ${eligibleCount}…`
+            : translateState === 'error'
+              ? 'Retry translation'
+              : `Translate all → ES (${eligibleCount})`}
+        </button>
+      </div>
+      {translateState === 'error' && (
+        <div className="anno-translate-error" role="alert" data-testid="anno-translate-error">
+          {translateError}
+        </div>
+      )}
     </div>
   )
 }

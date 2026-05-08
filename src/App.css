@@ -763,6 +763,44 @@ body {
   background: rgba(210, 153, 34, 0.12);
 }
 
+/* Step 16 (May 8 2026) — PDF export + Orientation submenu styling. */
+.header-menu-divider {
+  height: 1px;
+  background: var(--rm-border);
+  margin: 4px 0;
+}
+.header-menu-section-label {
+  padding: 6px 12px 2px 12px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--rm-fg-dim);
+}
+.header-menu-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.header-menu-item:disabled:hover {
+  background: transparent;
+}
+.header-menu-item.header-menu-radio {
+  /* Tighter padding for the radio-group items so the three orientation
+   * choices read as a compact cluster. */
+  padding: 6px 12px;
+  grid-template-rows: auto;
+}
+.header-menu-item.header-menu-radio .menu-hint {
+  grid-row: 2;
+  font-size: 10px;
+}
+.header-menu-item.header-menu-radio.active {
+  background: rgba(245, 166, 35, 0.10);
+}
+.header-menu-item.header-menu-radio.active .menu-icon {
+  color: var(--rm-amber);
+}
+
 /* ============================================================================
  * Step 17 — Save / Load + Visible Undo/Redo header buttons (Spec §15 + P7)
  * ============================================================================
@@ -1936,4 +1974,73 @@ body {
 .anno-style-reset:hover {
   color: var(--rm-fg);
   border-color: var(--rm-fg-dim);
+}
+
+/* ============================================================================
+ * P30 (May 8 2026) — Translate all button + spinner + error states.
+ * Sits inside the SequenceDefaultsSection so the operator finds it where
+ * they configure other per-sequence preferences (color / font / now ES
+ * translations).
+ * ============================================================================ */
+.anno-translate-row {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--rm-border);
+}
+.anno-translate-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--rm-bg);
+  color: var(--rm-fg);
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 80ms ease, background 80ms ease;
+}
+.anno-translate-btn:hover:not(:disabled) {
+  border-color: var(--rm-amber);
+  background: rgba(245, 166, 35, 0.06);
+}
+.anno-translate-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.anno-translate-btn.busy {
+  opacity: 0.85;
+  cursor: progress;
+  border-color: var(--rm-amber);
+  background: rgba(245, 166, 35, 0.10);
+}
+.anno-translate-btn.error {
+  border-color: #dc2626;
+  background: rgba(220, 38, 38, 0.10);
+  color: #fca5a5;
+}
+.anno-translate-spinner {
+  display: inline-block;
+  animation: rm-anno-spin 1.2s linear infinite;
+}
+@keyframes rm-anno-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.anno-translate-icon {
+  font-size: 13px;
+}
+.anno-translate-error {
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: rgba(220, 38, 38, 0.10);
+  border: 1px solid rgba(220, 38, 38, 0.4);
+  border-radius: 3px;
+  color: #fca5a5;
+  font-size: 11px;
+  line-height: 1.35;
 }
