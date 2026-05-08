@@ -89,7 +89,10 @@ export function computePageOrientation(orientationPref, photoMeta) {
 export function renderSequenceImage({
   sequence, layers, clines, photoImage, photoMeta, language, clinesVisible,
 }) {
-  if (!photoMeta) return null
+  if (!photoMeta) {
+    dbgLog('renderSequenceImage: no photoMeta — returning null')
+    return null
+  }
   const W = Math.max(1, Math.round(photoMeta.width * PRINT_SCALE))
   const H = Math.max(1, Math.round(photoMeta.height * PRINT_SCALE))
   const canvas = document.createElement('canvas')
@@ -105,7 +108,18 @@ export function renderSequenceImage({
     language,
     clinesVisible,
   })
-  return { canvas, dataURL: canvas.toDataURL('image/png'), width: W, height: H }
+  // Sample center pixel to verify the canvas actually has content
+  const ctx = canvas.getContext('2d')
+  const cx = Math.floor(W / 2), cy = Math.floor(H / 2)
+  const px = ctx.getImageData(cx, cy, 1, 1).data
+  const dataURL = canvas.toDataURL('image/png')
+  dbgLog(`renderSequenceImage seq=${sequence?.id} ${W}×${H}, center px rgba=[${px[0]},${px[1]},${px[2]},${px[3]}], dataURL.length=${dataURL.length}`)
+  if (typeof window !== 'undefined' && window.__debugPDF) {
+    window.__debugPDF.lastCanvas = canvas
+    window.__debugPDF.lastCanvasDataURL = dataURL.substring(0, 100)
+    window.__debugPDF.lastCanvasCenterPixel = [px[0], px[1], px[2], px[3]]
+  }
+  return { canvas, dataURL, width: W, height: H }
 }
 
 // Escape HTML-bearing operator strings to prevent any < / > / & from breaking
@@ -342,6 +356,116 @@ export function buildPdfPageDom({
 // canonical name for caller readability.
 export const buildPdfFilename = composeFilename
 
+// ----------------------------------------------------------------------------
+// DIAGNOSTIC INSTRUMENTATION (May 8 2026 — Step 16 blank-PDF investigation).
+// Set window.__debugPDF.verbose = true OR pass `debug: true` in options to
+// emit console logs at every pipeline stage AND retain the rendered DOM
+// after export so the operator can inspect it in the Elements panel.
+//
+// Operator workflow:
+//   1. Open DevTools → Console.
+//   2. Run: window.__debugPDF.verbose = true
+//   3. Click ⋮ → Export English PDF as usual.
+//   4. Read the console — every stage logs `[PDF] <stage>` + relevant data.
+//   5. After the export completes (or fails), inspect:
+//        window.__debugPDF.lastCanvas       — offscreen canvas (in memory)
+//        window.__debugPDF.lastCanvasDataURL — first 100 chars of dataURL
+//        window.__debugPDF.lastRoot         — root DOM element (still in document if keepDOM=true)
+//        window.__debugPDF.lastRootRect     — bounding rect at snapshot time
+//        window.__debugPDF.lastImg          — first <img> in the rendered page
+//        window.__debugPDF.lastImgRect      — bounding rect of that <img>
+//
+// Minimal-repro path:
+//   await window.__debugPDF.runMinimalRepro()
+//     → hardcodes a 100×60 red square canvas, builds a 200x140 page DOM
+//       with just the image, runs html2pdf. If THAT comes out blank, the
+//       bug is in html2pdf integration, not in the photo render or
+//       full-page DOM structure.
+// ----------------------------------------------------------------------------
+if (typeof window !== 'undefined' && !window.__debugPDF) {
+  window.__debugPDF = {
+    verbose: false,
+    keepDOM: false,
+    lastCanvas: null,
+    lastCanvasDataURL: '',
+    lastRoot: null,
+    lastRootRect: null,
+    lastImg: null,
+    lastImgRect: null,
+    lastError: null,
+  }
+}
+function dbgLog(...args) {
+  if (typeof window !== 'undefined' && window.__debugPDF?.verbose) {
+    console.log('[PDF]', ...args)
+  }
+}
+
+// Minimal repro — bypasses full pipeline. If THIS produces a blank PDF, the
+// bug is in html2pdf integration. If this works, the bug is somewhere in
+// the full-page-DOM orchestration.
+async function runMinimalRepro() {
+  console.log('[PDF-minimal-repro] start')
+  // 1. Build a tiny 100×60 canvas with a red square + black text.
+  const canvas = document.createElement('canvas')
+  canvas.width = 200
+  canvas.height = 120
+  const ctx = canvas.getContext('2d')
+  ctx.fillStyle = '#dc2626'
+  ctx.fillRect(0, 0, 200, 120)
+  ctx.fillStyle = '#ffffff'
+  ctx.font = 'bold 24px sans-serif'
+  ctx.fillText('REPRO TEST', 24, 70)
+  const dataURL = canvas.toDataURL('image/png')
+  console.log('[PDF-minimal-repro] canvas dataURL length:', dataURL.length)
+  console.log('[PDF-minimal-repro] canvas dataURL preview:', dataURL.substring(0, 80))
+
+  // 2. Build the smallest possible DOM tree: a div with the image inside.
+  const root = document.createElement('div')
+  root.style.cssText = 'width:300px;height:200px;background:#ffffff;padding:20px;'
+  root.innerHTML = (
+    `<h2 style="font-family:sans-serif;color:#1a3a5c;">Minimal repro</h2>`
+    + `<img src="${dataURL}" width="200" height="120" style="display:block;border:2px solid #1a3a5c;" alt="" />`
+    + `<p style="font-family:sans-serif;color:#0d1117;">If you see this text + the red REPRO TEST image, the html2pdf integration works.</p>`
+  )
+  // Mount to document body, top-left, fully visible (operator can see briefly).
+  root.style.position = 'absolute'
+  root.style.left = '0'
+  root.style.top = '0'
+  root.style.zIndex = '99999'
+  document.body.appendChild(root)
+  console.log('[PDF-minimal-repro] DOM mounted, rect:', root.getBoundingClientRect())
+
+  // 3. Wait two rAFs for layout, then run html2pdf.
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  console.log('[PDF-minimal-repro] post-rAF rect:', root.getBoundingClientRect())
+
+  // 4. html2pdf with minimal options.
+  try {
+    const html2pdfModule = await import('html2pdf.js')
+    const html2pdf = html2pdfModule.default || html2pdfModule
+    console.log('[PDF-minimal-repro] html2pdf loaded:', typeof html2pdf)
+    await html2pdf()
+      .from(root)
+      .set({
+        margin: 10,
+        filename: 'roofmark-minimal-repro.pdf',
+        image: { type: 'jpeg', quality: 0.92 },
+        html2canvas: { scale: 2, logging: true, useCORS: true, backgroundColor: '#ffffff' },
+        jsPDF: { unit: 'mm', format: 'a5', orientation: 'portrait' },
+      })
+      .save()
+    console.log('[PDF-minimal-repro] success — file should have downloaded')
+  } catch (err) {
+    console.error('[PDF-minimal-repro] FAILED:', err)
+  } finally {
+    if (root.parentNode) root.parentNode.removeChild(root)
+  }
+}
+if (typeof window !== 'undefined' && window.__debugPDF) {
+  window.__debugPDF.runMinimalRepro = runMinimalRepro
+}
+
 // Public entry point — renders + downloads a PDF for the active project.
 //
 //   options:
@@ -360,6 +484,12 @@ export async function exportProjectPDF({ project, language, orientationPref = 'a
   const orientation = computePageOrientation(orientationPref, photoMeta)
   const generatedYMD = formatLocalYMD(new Date())
   const jobAddress = jobContext?.address || ''
+  dbgLog('exportProjectPDF — start', {
+    language, orientation, generatedYMD, jobAddress,
+    sequenceCount: sequences.length,
+    photoMeta,
+    photoImageReady: !!(photoImage && photoImage.complete && photoImage.naturalWidth > 0),
+  })
 
   const root = buildPdfPageDom({
     project,
@@ -373,32 +503,71 @@ export async function exportProjectPDF({ project, language, orientationPref = 'a
     generatedYMD,
     orientation,
   })
+  dbgLog('exportProjectPDF — root built, child count:', root.children.length)
+  // Capture diagnostic state for window.__debugPDF.
+  if (typeof window !== 'undefined' && window.__debugPDF) {
+    window.__debugPDF.lastRoot = root
+    // Find the first canvas dataURL <img> embedded inside (sequence 1's photo)
+    const firstImg = root.querySelector('img')
+    window.__debugPDF.lastImg = firstImg
+    if (firstImg) {
+      const src = firstImg.getAttribute('src') || ''
+      window.__debugPDF.lastCanvasDataURL = src.substring(0, 100)
+      dbgLog('first <img> src length:', src.length, 'starts with:', src.substring(0, 80))
+    } else {
+      dbgLog('NO <img> found in root — photo render returned null')
+    }
+  }
 
-  // POST-VERIFICATION FIX (May 8 2026 — Checks 2/3 FAIL on initial deploy):
-  // Mount root in the document at top-left position 0,0 with absolute
-  // positioning + opacity 0 so html2canvas can capture the layout
-  // correctly. Previous version used `position:fixed` + `left:-99999px`
-  // which html2canvas occasionally captured as blank because off-viewport
-  // fixed elements have unreliable layout calculation.
-  //
-  // Top-left absolute + opacity 0 keeps the element invisible while in
-  // normal document flow (html2canvas reads layout from there). z-index
-  // -1 + pointer-events: none ensures it can't intercept clicks even
-  // briefly during the snapshot pass.
+  // DIAGNOSTIC INVESTIGATION (May 8 2026 — Checks 2/3 STILL FAIL after
+  // commit 66fb671 A4-px fix). Test multiple positioning strategies to
+  // identify which the operator's browser+html2canvas combo handles
+  // correctly. Default strategy: position absolute, off-screen left
+  // (NOT off-viewport top), no opacity manipulation. opacity:0 was the
+  // suspect in the previous fix attempt — html2canvas honors computed
+  // opacity and renders transparent content.
   root.style.position = 'absolute'
-  root.style.left = '0'
-  root.style.top = '0'
-  root.style.opacity = '0'
+  root.style.left = '-99999px'  // off-screen horizontally; html2canvas reads layout regardless
+  root.style.top = '0'           // in viewport vertically — no fixed-positioning weirdness
   root.style.pointerEvents = 'none'
-  root.style.zIndex = '-1'
+  // Explicitly NO opacity: 0 — that was the bug introduced in 66fb671.
   document.body.appendChild(root)
+  dbgLog('root mounted, rect immediately after appendChild:', root.getBoundingClientRect())
 
   // Wait two animation frames so the browser has computed layout for the
   // newly-inserted DOM (image natural-dim resolution + flex/abs-pos
-  // calculations) before html2canvas snapshots. Single rAF can fire
-  // before the second layout pass on some browsers; double rAF is the
-  // standard pattern for "DOM is fully painted".
+  // calculations) before html2canvas snapshots.
   await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  dbgLog('post-rAF, rect:', root.getBoundingClientRect())
+
+  // Force ALL embedded <img> elements to fully decode before html2pdf
+  // snapshot. img.decode() is the modern way to await image-ready state
+  // (more reliable than the onload event for dataURL <img>s).
+  const imgs = Array.from(root.querySelectorAll('img'))
+  dbgLog(`waiting for ${imgs.length} <img> elements to decode...`)
+  await Promise.all(imgs.map(async (img, i) => {
+    try {
+      if (typeof img.decode === 'function') {
+        await img.decode()
+        dbgLog(`  img[${i}] decoded — natural ${img.naturalWidth}×${img.naturalHeight}, complete=${img.complete}`)
+      } else if (!img.complete) {
+        // Fallback for old browsers
+        await new Promise((res) => { img.onload = res; img.onerror = res })
+      }
+    } catch (e) {
+      dbgLog(`  img[${i}] decode failed:`, e?.message)
+    }
+  }))
+
+  // Capture final state for diagnostic inspection
+  if (typeof window !== 'undefined' && window.__debugPDF) {
+    window.__debugPDF.lastRootRect = root.getBoundingClientRect()
+    const firstImg = imgs[0]
+    if (firstImg) {
+      window.__debugPDF.lastImgRect = firstImg.getBoundingClientRect()
+      dbgLog('first img rect after decode:', window.__debugPDF.lastImgRect)
+    }
+  }
 
   const filename = composeFilename({
     language,
@@ -406,11 +575,40 @@ export async function exportProjectPDF({ project, language, orientationPref = 'a
     date: new Date(),
   })
 
+  // DIAGNOSTIC: optionally run html2canvas DIRECTLY on the root before
+  // letting html2pdf orchestrate it. This isolates whether html2canvas
+  // captures content or returns blank. Operator can inspect the captured
+  // canvas via window.__debugPDF.lastHtml2canvasOutput.
+  if (typeof window !== 'undefined' && window.__debugPDF?.verbose) {
+    try {
+      const html2pdfMod = await import('html2pdf.js')
+      // html2canvas is bundled with html2pdf.js — access via window
+      // (html2pdf attaches it on import).
+      const _h2c = (typeof window.html2canvas === 'function') ? window.html2canvas : null
+      if (_h2c) {
+        dbgLog('running html2canvas directly to inspect snapshot...')
+        const captured = await _h2c(root, { scale: 1, useCORS: true, backgroundColor: '#ffffff', logging: true })
+        window.__debugPDF.lastHtml2canvasOutput = captured
+        dbgLog(`html2canvas direct: ${captured.width}×${captured.height}`)
+        // Sample center-pixel color to detect "all white" / "all transparent"
+        const cctx = captured.getContext('2d')
+        const px = cctx.getImageData(Math.floor(captured.width / 2), Math.floor(captured.height / 2), 1, 1).data
+        dbgLog(`center pixel rgba: [${px[0]}, ${px[1]}, ${px[2]}, ${px[3]}]`)
+      } else {
+        dbgLog('html2canvas not exposed on window — relying on html2pdf only')
+      }
+      void html2pdfMod
+    } catch (e) {
+      dbgLog('html2canvas direct probe failed:', e?.message)
+    }
+  }
+
   try {
     // Lazy-load html2pdf.js on first export so the ~700 KB library lives
     // in its own Vite chunk instead of the main bundle.
     const html2pdfModule = await import('html2pdf.js')
     const html2pdf = html2pdfModule.default || html2pdfModule
+    dbgLog('html2pdf loaded, beginning save flow')
     const opt = {
       margin: 0,
       filename,
@@ -419,20 +617,33 @@ export async function exportProjectPDF({ project, language, orientationPref = 'a
         scale: 2,
         useCORS: true,
         backgroundColor: '#ffffff',
-        // POST-VERIFICATION FIX: tell html2canvas the explicit width/height
-        // of the source element (matches the DOM's fixed-px page size) so
-        // it doesn't fall back to viewport dims. logging:false silences the
-        // library's verbose console output during normal exports.
-        logging: false,
-        width: orientation === 'landscape' ? PAGE_LANDSCAPE_W : PAGE_PORTRAIT_W,
-        // height is derived from the captured element's bounding rect
-        // (multi-page document — html2canvas handles the full element).
+        logging: !!(typeof window !== 'undefined' && window.__debugPDF?.verbose),
+        // Drop the explicit width — html2canvas may use it to clip to
+        // viewport rather than capturing the full element. Let html2canvas
+        // read element width from getBoundingClientRect.
       },
       jsPDF: { unit: 'mm', format: 'a4', orientation },
       pagebreak: { mode: ['css', 'legacy'], before: '.rm-pdf-page' },
     }
     await html2pdf().from(root).set(opt).save()
+    dbgLog('html2pdf save complete')
+  } catch (err) {
+    dbgLog('html2pdf save FAILED:', err)
+    if (typeof window !== 'undefined' && window.__debugPDF) {
+      window.__debugPDF.lastError = err
+    }
+    throw err
   } finally {
-    if (root.parentNode) root.parentNode.removeChild(root)
+    // Retain DOM in document if debug.keepDOM is true so operator can
+    // inspect via Elements panel. Default behavior: remove after export.
+    const keepDOM = typeof window !== 'undefined' && window.__debugPDF?.keepDOM
+    if (root.parentNode && !keepDOM) {
+      root.parentNode.removeChild(root)
+    } else if (keepDOM) {
+      dbgLog('keepDOM=true — root retained in document.body for inspection')
+      // Move it back to the top-left visibly so operator can see it
+      root.style.left = '0'
+      root.style.zIndex = '99999'
+    }
   }
 }
