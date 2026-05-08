@@ -177,28 +177,35 @@ function buildMaterialsRowHtml(sequence, layers) {
   return `<div class="rm-materials">${chips}</div>`
 }
 
-// Build the complete hidden DOM for html2pdf — one .rm-pdf-page section per
-// sequence. POST-VERIFICATION FIX: each page is laid out at FIXED PIXEL
-// dimensions matching A4 at 96 DPI, with absolutely-positioned sections
-// so the layout doesn't depend on viewport height or flex calculations
-// that html2canvas can mis-capture for off-screen elements.
+// Build the complete DOM for html2pdf — one .rm-pdf-page section per
+// sequence.
 //
-// Page sections (top to bottom in absolute positioning):
-//   header   — 0..HEADER_H px (KCC navy bar with orange accent stripe)
-//   photo    — HEADER_H..(pageH - CALLOUTS_H - FOOTER_H) px
-//   callouts — bottom-of-photo..(pageH - FOOTER_H) px
-//   footer   — (pageH - FOOTER_H)..pageH px (materials + metadata)
+// POST-DIAGNOSTIC FIX (May 8 2026, third attempt):
+// Operator instrumentation confirmed html2canvas does NOT reliably
+// capture absolutely-positioned content — even when in-viewport. The
+// minimal repro (root with `position: absolute; left: 0; top: 0`)
+// also produced blank PDFs.
+//
+// New strategy: NORMAL DOCUMENT FLOW. No positioning trickery at all.
+// - Root: plain block, width set
+// - Each .rm-pdf-page: flexbox column with explicit width + height
+// - Each section (header / photo / callouts / footer): explicit height
+//   + flex-shrink: 0 so the column doesn't compress
+// - Page breaks via `page-break-after: always` + `break-after: page`
+// - Root mounted to body in natural flow (accepts brief visual flash
+//   during capture — that's the documented html2pdf.js usage pattern)
+//
+// Page dimensions: 794×1123 portrait / 1123×794 landscape (A4 @ 96 DPI).
 export function buildPdfPageDom({
   project, language, photoImage, photoMeta, layers, clines, sequences,
   jobAddress, generatedYMD, orientation,
 }) {
   const pageW = orientation === 'landscape' ? PAGE_LANDSCAPE_W : PAGE_PORTRAIT_W
   const pageH = orientation === 'landscape' ? PAGE_LANDSCAPE_H : PAGE_PORTRAIT_H
-  const photoTop = HEADER_H
-  const photoH   = pageH - HEADER_H - CALLOUTS_H - FOOTER_H
-  const calloutsTop = pageH - CALLOUTS_H - FOOTER_H
-  const footerTop = pageH - FOOTER_H
+  const photoH = pageH - HEADER_H - CALLOUTS_H - FOOTER_H
 
+  // Root is plain document flow — no positioning. Width fixed; height
+  // grows naturally as pages stack.
   const root = document.createElement('div')
   root.className = 'rm-pdf-root'
   root.style.cssText = (
@@ -211,22 +218,24 @@ export function buildPdfPageDom({
   const langLabel = language === 'es' ? 'Español' : 'English'
 
   sequences.forEach((seq, idx) => {
+    // Each page: flex column with explicit width + height. No positioning.
+    // Children stack top-to-bottom via flex-direction. Each child has
+    // explicit height + flex-shrink:0 so the column doesn't compress.
     const page = document.createElement('section')
     page.className = 'rm-pdf-page'
     page.style.cssText = (
-      `position:relative;`
-      + `box-sizing:border-box;`
-      + `width:${pageW}px;`
+      `width:${pageW}px;`
       + `height:${pageH}px;`
-      + `overflow:hidden;`
+      + `display:flex;`
+      + `flex-direction:column;`
+      + `box-sizing:border-box;`
       + `background:#ffffff;`
-      + (idx > 0 ? 'page-break-before:always;break-before:page;' : '')
+      + `overflow:hidden;`
+      + (idx < totalSeqs - 1
+        ? 'page-break-after:always;break-after:page;'
+        : '')
     )
 
-    // Render the offscreen canvas at print resolution. We get back the
-    // canvas, dataURL, and natural pixel dims so the embedded <img> has
-    // explicit width/height attributes (forces synchronous layout — no
-    // race with html2canvas's snapshot pass).
     const rendered = renderSequenceImage({
       sequence: seq,
       layers,
@@ -238,10 +247,10 @@ export function buildPdfPageDom({
     })
     const seqTitle = esc(seq.title || `S${idx + 1}`)
 
-    // Header bar (Spec §13.8) — absolutely positioned at top of page.
+    // Header bar — fixed height, no positioning.
     const headerHtml = (
       `<header style="`
-      + `position:absolute;left:0;top:0;width:${pageW}px;height:${HEADER_H}px;`
+      + `width:${pageW}px;height:${HEADER_H}px;flex-shrink:0;`
       + `background:${KCC_NAVY};color:#ffffff;`
       + `border-bottom:3px solid ${KCC_ORANGE};`
       + `box-sizing:border-box;`
@@ -263,13 +272,9 @@ export function buildPdfPageDom({
       + `</header>`
     )
 
-    // Photo section — absolutely positioned. <img> has explicit
-    // width/height attributes so the layout settles before html2canvas
-    // captures (the previous version relied on natural-dim resolution
-    // which sometimes captured as 0×0).
+    // Photo section — fixed height, flex container for centering the img.
     let photoInner = '<div style="color:#fff;">No photo loaded.</div>'
     if (rendered) {
-      // Compute object-fit-contain dims for the natural canvas dataURL.
       const containerRatio = pageW / photoH
       const photoRatio = rendered.width / rendered.height
       let drawW, drawH
@@ -289,7 +294,7 @@ export function buildPdfPageDom({
     }
     const photoHtml = (
       `<div style="`
-      + `position:absolute;left:0;top:${photoTop}px;width:${pageW}px;height:${photoH}px;`
+      + `width:${pageW}px;height:${photoH}px;flex-shrink:0;`
       + `background:#0d1117;`
       + `display:flex;align-items:center;justify-content:center;`
       + `overflow:hidden;`
@@ -298,10 +303,10 @@ export function buildPdfPageDom({
       + `</div>`
     )
 
-    // Callouts list (Spec §13.7 step 3)
+    // Callouts list (Spec §13.7 step 3) — fixed height.
     const calloutsHtml = (
       `<div style="`
-      + `position:absolute;left:0;top:${calloutsTop}px;width:${pageW}px;height:${CALLOUTS_H}px;`
+      + `width:${pageW}px;height:${CALLOUTS_H}px;flex-shrink:0;`
       + `box-sizing:border-box;`
       + `padding:8px 16px;font-size:10px;line-height:1.4;`
       + `border-top:1px solid #d0d4dc;`
@@ -314,15 +319,16 @@ export function buildPdfPageDom({
     // Footer (Spec §13.9): materials row on top, metadata row on bottom.
     const footerHtml = (
       `<footer style="`
-      + `position:absolute;left:0;top:${footerTop}px;width:${pageW}px;height:${FOOTER_H}px;`
+      + `width:${pageW}px;height:${FOOTER_H}px;flex-shrink:0;`
       + `box-sizing:border-box;`
       + `border-top:1px solid #d0d4dc;`
       + `font-size:9px;`
+      + `display:flex;flex-direction:column;`
       + `">`
-        + `<div style="padding:6px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;height:30px;overflow:hidden;">`
+        + `<div style="padding:6px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;height:30px;flex-shrink:0;overflow:hidden;">`
           + buildMaterialsRowHtml(seq, layers)
         + `</div>`
-        + `<div style="padding:6px 16px;display:flex;justify-content:space-between;border-top:1px solid #e5e8ee;color:#5b6478;">`
+        + `<div style="padding:6px 16px;display:flex;justify-content:space-between;border-top:1px solid #e5e8ee;color:#5b6478;flex-shrink:0;">`
           + `<span>${esc(jobAddress || '—')}</span>`
           + `<span>${esc(generatedYMD)}</span>`
         + `</div>`
@@ -519,20 +525,23 @@ export async function exportProjectPDF({ project, language, orientationPref = 'a
     }
   }
 
-  // DIAGNOSTIC INVESTIGATION (May 8 2026 — Checks 2/3 STILL FAIL after
-  // commit 66fb671 A4-px fix). Test multiple positioning strategies to
-  // identify which the operator's browser+html2canvas combo handles
-  // correctly. Default strategy: position absolute, off-screen left
-  // (NOT off-viewport top), no opacity manipulation. opacity:0 was the
-  // suspect in the previous fix attempt — html2canvas honors computed
-  // opacity and renders transparent content.
-  root.style.position = 'absolute'
-  root.style.left = '-99999px'  // off-screen horizontally; html2canvas reads layout regardless
-  root.style.top = '0'           // in viewport vertically — no fixed-positioning weirdness
-  root.style.pointerEvents = 'none'
-  // Explicitly NO opacity: 0 — that was the bug introduced in 66fb671.
+  // POST-DIAGNOSTIC FIX (May 8 2026, third attempt):
+  // Operator instrumentation confirmed html2canvas blanks ALL absolutely-
+  // positioned content — both at off-screen and in-viewport positions.
+  // Even the minimal repro (position:absolute; left:0; top:0; z-index:99999)
+  // produced a blank PDF. The bug is the absolute positioning itself, not
+  // its location.
+  //
+  // New strategy: NORMAL DOCUMENT FLOW. Append root to body without any
+  // positioning manipulation. html2pdf.js documentation shows this exact
+  // pattern as the canonical usage. Operator briefly sees the rendered
+  // pages flash at the bottom of the page during capture (~100-300ms);
+  // the DOM is removed immediately after html2pdf.save() resolves.
+  //
+  // No opacity, no visibility manipulation, no positioning — these all
+  // had problems with html2canvas's clone+render pass.
   document.body.appendChild(root)
-  dbgLog('root mounted, rect immediately after appendChild:', root.getBoundingClientRect())
+  dbgLog('root mounted in normal flow, rect:', root.getBoundingClientRect())
 
   // Wait two animation frames so the browser has computed layout for the
   // newly-inserted DOM (image natural-dim resolution + flex/abs-pos
