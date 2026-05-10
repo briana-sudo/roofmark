@@ -213,10 +213,40 @@ function LayerRow({
     useAppStore.getState().setActiveLayer(layer.id)
   }
 
+  // Pass 2 undo gap closure (May 10 2026) — setLayerColor is a discrete
+  // operator action (one swatch / picker commit = one undo entry).
+  // Capture pre-change snapshot synchronously, push it after the action
+  // fires. Same pattern as P31 sequence-default swatch click and P34
+  // shape drag (captureUndoSnapshot / pushCapturedSnapshot).
+  // Note: native <input type="color"> emits onChange on every commit,
+  // not on every pixel-drag of the picker, so capture+push per onChange
+  // matches operator's "one decision, one undo entry" expectation.
   const handleColorChange = (e) => {
+    const snap = useAppStore.getState().captureUndoSnapshot()
     useAppStore.getState().setLayerColor(layer.id, e.target.value)
+    useAppStore.getState().pushCapturedSnapshot(snap)
   }
 
+  // Pass 2 undo gap closure (May 10 2026) — renameLayer uses the focus→
+  // blur edit-session pattern (P35 stepper precedent). Capture pre-edit
+  // snapshot on focus + the original value, push the captured snapshot
+  // on blur if the value actually changed. Result: one undo entry per
+  // edit session, regardless of keystroke count.
+  const renameSnapRef = useRef(null)
+  const renameOriginalRef = useRef(null)
+  const onNameFocus = (e) => {
+    renameSnapRef.current = useAppStore.getState().captureUndoSnapshot()
+    renameOriginalRef.current = e.target.value
+  }
+  const onNameBlur = (e) => {
+    const original = renameOriginalRef.current
+    const snap = renameSnapRef.current
+    if (typeof original === 'string' && e.target.value !== original && typeof snap === 'string') {
+      useAppStore.getState().pushCapturedSnapshot(snap)
+    }
+    renameSnapRef.current = null
+    renameOriginalRef.current = null
+  }
   const handleNameChange = (e) => {
     useAppStore.getState().renameLayer(layer.id, e.target.value)
   }
@@ -256,6 +286,8 @@ function LayerRow({
         className="layer-name"
         value={layer.name}
         onChange={handleNameChange}
+        onFocus={onNameFocus}
+        onBlur={onNameBlur}
         onClick={(e) => e.stopPropagation()}
         ref={(el) => setInputRef(layer.id, el)}
         spellCheck={false}

@@ -587,26 +587,37 @@ export const useAppStore = create((set, get) => {
         layers: s.layers.map((l) => (l.id === id ? { ...l, color } : l)),
       })),
 
-    toggleLayerVisibility: (id) =>
+    // Pass 2 undo gap closure (May 10 2026) — toggleLayerVisibility is a
+    // discrete operator action (single click on Eye/EyeOff icon). One
+    // click = one undo entry. pushUndo() runs BEFORE the set so the
+    // snapshot captures pre-toggle state.
+    toggleLayerVisibility: (id) => {
+      pushUndo()
       set((s) => ({
         layers: s.layers.map((l) =>
           l.id === id ? { ...l, visible: !l.visible } : l
         ),
-      })),
+      }))
+    },
 
     updateLayerProps: (id, partial) =>
       set((s) => ({
         layers: s.layers.map((l) => (l.id === id ? { ...l, ...partial } : l)),
       })),
 
-    reorderLayers: (idsInOrder) =>
+    // Pass 2 undo gap closure (May 10 2026) — reorderLayers fires once
+    // per drag-and-drop drop event (HTML5 D&D). One drop = one undo
+    // entry regardless of intermediate drag-over positions.
+    reorderLayers: (idsInOrder) => {
+      pushUndo()
       set((s) => {
         const byId = new Map(s.layers.map((l) => [l.id, l]))
         const next = idsInOrder.map((id) => byId.get(id)).filter(Boolean)
         const seen = new Set(idsInOrder)
         for (const l of s.layers) if (!seen.has(l.id)) next.push(l)
         return { layers: next }
-      }),
+      })
+    },
 
     setActiveLayer: (id) => set({ activeLayerId: id }),
 
@@ -748,14 +759,19 @@ export const useAppStore = create((set, get) => {
       }))
     },
 
-    setSeqLayerVisibility: (seqId, layerId, visible) =>
+    // Pass 2 undo gap closure (May 10 2026) — setSeqLayerVisibility is a
+    // discrete operator action (single ●/○ click). One click = one undo
+    // entry.
+    setSeqLayerVisibility: (seqId, layerId, visible) => {
+      pushUndo()
       set((s) => ({
         sequences: s.sequences.map((seq) =>
           seq.id !== seqId
             ? seq
             : { ...seq, layers: { ...seq.layers, [layerId]: !!visible } }
         ),
-      })),
+      }))
+    },
 
     setActiveSequence: (id) => set((s) => ({
       activeSeqId: id,
@@ -768,14 +784,18 @@ export const useAppStore = create((set, get) => {
     // Step 11 — sequence reorder, mirrors `reorderLayers`. Pass the full
     // ordered list of ids; missing ids are appended at the end so the call
     // can never silently drop a sequence.
-    reorderSequences: (idsInOrder) =>
+    // Pass 2 undo gap closure (May 10 2026) — same as reorderLayers: one
+    // drop = one undo entry.
+    reorderSequences: (idsInOrder) => {
+      pushUndo()
       set((s) => {
         const byId = new Map(s.sequences.map((seq) => [seq.id, seq]))
         const next = idsInOrder.map((id) => byId.get(id)).filter(Boolean)
         const seen = new Set(idsInOrder)
         for (const seq of s.sequences) if (!seen.has(seq.id)) next.push(seq)
         return { sequences: next }
-      }),
+      })
+    },
 
     // ============ Annotation actions ========================================
     addAnnotation: (seqId, annotation) => {

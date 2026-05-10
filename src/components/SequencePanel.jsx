@@ -200,6 +200,25 @@ function SequenceRow({
     if (ok) useAppStore.getState().deleteSequence(sequence.id)
   }
 
+  // Pass 2 undo gap closure (May 10 2026) — setSeqTitle uses the focus→
+  // blur edit-session pattern. Capture pre-edit snapshot on focus + the
+  // original value, push the captured snapshot on blur if the value
+  // actually changed. One undo entry per edit session.
+  const titleSnapRef = useRef(null)
+  const titleOriginalRef = useRef(null)
+  const onTitleFocus = (e) => {
+    titleSnapRef.current = useAppStore.getState().captureUndoSnapshot()
+    titleOriginalRef.current = e.target.value
+  }
+  const onTitleBlur = (e) => {
+    const original = titleOriginalRef.current
+    const snap = titleSnapRef.current
+    if (typeof original === 'string' && e.target.value !== original && typeof snap === 'string') {
+      useAppStore.getState().pushCapturedSnapshot(snap)
+    }
+    titleSnapRef.current = null
+    titleOriginalRef.current = null
+  }
   const handleTitleChange = (e) => {
     useAppStore.getState().setSeqTitle(sequence.id, e.target.value)
   }
@@ -241,6 +260,8 @@ function SequenceRow({
         className="sequence-title"
         value={sequence.title || ''}
         onChange={handleTitleChange}
+        onFocus={onTitleFocus}
+        onBlur={onTitleBlur}
         onClick={(e) => e.stopPropagation()}
         ref={inputRef}
         spellCheck={false}

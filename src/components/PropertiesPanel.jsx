@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { useAppStore } from '../store/useAppStore'
 
 /**
@@ -52,6 +53,15 @@ export default function PropertiesPanel() {
   const selected = useAppStore((s) => s.selected)
   const layers = useAppStore((s) => s.layers)
 
+  // Pass 2 undo gap closure (May 10 2026) — focus→blur edit-session
+  // pattern for sliders + the stroke-weight number input. Refs MUST be
+  // declared before the early-return guard below (React hooks-rules:
+  // hooks first, guards second). Per-input scoping via a `data-prop`
+  // attribute on the input so a single pair of handlers serves all 3
+  // sliders + 1 weight input without curried factories.
+  const propEditSnapRef = useRef({})
+  const propEditOriginalRef = useRef({})
+
   if (!layer) {
     return (
       <>
@@ -63,8 +73,44 @@ export default function PropertiesPanel() {
     )
   }
 
-  const setColor = (color) => useAppStore.getState().setLayerColor(layer.id, color)
+  // Pass 2 undo gap closure (May 10 2026) — discrete capture+push per
+  // swatch click. Same pattern as P31 sequence-default swatch and the
+  // LayerPanel native swatch.
+  const setColor = (color) => {
+    const snap = useAppStore.getState().captureUndoSnapshot()
+    useAppStore.getState().setLayerColor(layer.id, color)
+    useAppStore.getState().pushCapturedSnapshot(snap)
+  }
+  // Pass 2 undo gap closure (May 10 2026) — discrete capture+push per
+  // checkbox click (fill on/off, stroke on/off). Each click is one
+  // operator decision; one click = one undo entry.
+  const setPropsDiscrete = (partial) => {
+    const snap = useAppStore.getState().captureUndoSnapshot()
+    useAppStore.getState().updateLayerProps(layer.id, partial)
+    useAppStore.getState().pushCapturedSnapshot(snap)
+  }
+  // Pure setter for slider-driven prop changes — undo lives in the
+  // focus→blur wrapper around each slider so a slider drag (many onChange
+  // events) collapses to one undo entry on blur.
   const setProps = (partial) => useAppStore.getState().updateLayerProps(layer.id, partial)
+
+  const onPropFocus = (e) => {
+    const k = e.target.dataset.prop
+    if (!k) return
+    propEditSnapRef.current[k] = useAppStore.getState().captureUndoSnapshot()
+    propEditOriginalRef.current[k] = e.target.value
+  }
+  const onPropBlur = (e) => {
+    const k = e.target.dataset.prop
+    if (!k) return
+    const original = propEditOriginalRef.current[k]
+    const snap = propEditSnapRef.current[k]
+    if (typeof original === 'string' && e.target.value !== original && typeof snap === 'string') {
+      useAppStore.getState().pushCapturedSnapshot(snap)
+    }
+    delete propEditSnapRef.current[k]
+    delete propEditOriginalRef.current[k]
+  }
 
   // P18 — dropdown options exclude the shape's CURRENT parent layer
   // (selected.layerId). Note that after P17 selected.layerId ===
@@ -173,7 +219,7 @@ export default function PropertiesPanel() {
             <input
               type="checkbox"
               checked={fillOn}
-              onChange={(e) => setProps({ fillOn: e.target.checked })}
+              onChange={(e) => setPropsDiscrete({ fillOn: e.target.checked })}
               data-testid="prop-fill-on"
             />
             <span>Fill on</span>
@@ -187,6 +233,9 @@ export default function PropertiesPanel() {
               step="0.01"
               value={fillOpacity}
               onChange={(e) => setProps({ fillOpacity: Number(e.target.value) })}
+              onFocus={onPropFocus}
+              onBlur={onPropBlur}
+              data-prop="fillOpacity"
               disabled={!fillOn}
               data-testid="prop-fill-opacity"
             />
@@ -200,7 +249,7 @@ export default function PropertiesPanel() {
             <input
               type="checkbox"
               checked={strokeOn}
-              onChange={(e) => setProps({ strokeOn: e.target.checked })}
+              onChange={(e) => setPropsDiscrete({ strokeOn: e.target.checked })}
               data-testid="prop-stroke-on"
             />
             <span>Stroke on</span>
@@ -216,6 +265,9 @@ export default function PropertiesPanel() {
                 const n = Math.round(Number(e.target.value))
                 if (isFinite(n) && n >= 1) setProps({ strokeWeight: n })
               }}
+              onFocus={onPropFocus}
+              onBlur={onPropBlur}
+              data-prop="strokeWeight"
               disabled={!strokeOn}
               data-testid="prop-stroke-weight"
             />
@@ -230,6 +282,9 @@ export default function PropertiesPanel() {
               step="0.01"
               value={strokeOpacity}
               onChange={(e) => setProps({ strokeOpacity: Number(e.target.value) })}
+              onFocus={onPropFocus}
+              onBlur={onPropBlur}
+              data-prop="strokeOpacity"
               disabled={!strokeOn}
               data-testid="prop-stroke-opacity"
             />
