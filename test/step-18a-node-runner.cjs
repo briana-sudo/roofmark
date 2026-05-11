@@ -630,6 +630,190 @@ function makeMockSaveStore(opts = {}) {
 })()
 
 // ============================================================================
+// PHOTO EMBED / RESTORE — operator-reported bug fix (May 10 2026)
+// ============================================================================
+// Pre-fix: importJSON's photo gate was `obj.schemaVersion === 2 && obj._photos`
+// which silently dropped the embedded photo on v3 files. The fix loosens the
+// gate to `obj.schemaVersion !== 1`. exportJSON's photo-embed has always been
+// version-agnostic. These tests mirror both the export and import sides of
+// that contract with a mocked IDB.
+
+function makeMockPhotoIDB(initial = {}) {
+  const store = { ...initial }
+  return {
+    store,
+    savePhoto: async (dataURL, key) => { store[key] = dataURL },
+    loadPhoto: async (key) => store[key] || null,
+    clearPhoto: async (key) => { delete store[key] },
+  }
+}
+
+// Mirror of exportJSON's photo-embed logic (useAppStore.js ~1682-1714).
+async function mockExportJSON(state, idb) {
+  const payload = {
+    schemaVersion: SCHEMA_VERSION,
+    exportedAt: new Date().toISOString(),
+    appMode: state.appMode || 'FIELD',
+    viewports: state.viewports || { FIELD: { ...DEFAULT_VIEWPORT }, TECHNICAL: { ...DEFAULT_VIEWPORT } },
+    layers: state.layers || [],
+    sequences: state.sequences || [],
+  }
+  payload.viewport = payload.viewports.FIELD || { ...DEFAULT_VIEWPORT }
+  const [cropped, source] = await Promise.all([
+    idb.loadPhoto('cropped').catch(() => null),
+    idb.loadPhoto('source').catch(() => null),
+  ])
+  const photos = {}
+  if (typeof cropped === 'string' && cropped.length > 0) photos.cropped = cropped
+  if (typeof source === 'string' && source.length > 0) photos.source = source
+  if (Object.keys(photos).length > 0) payload._photos = photos
+  return JSON.stringify(payload, null, 2)
+}
+
+// Mirror of importJSON's photo-restore branch (useAppStore.js ~1766-1797),
+// WITH the May 10 2026 fix applied (`schemaVersion !== 1` gate).
+async function mockImportJSON_photoRestore(jsonStr, idb) {
+  const obj = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr
+  const photos = (obj.schemaVersion !== 1 && obj._photos) ? obj._photos : null
+  const result = { backgroundImage: null, hasSourcePhoto: false, savePhotoCalls: [], clearPhotoCalls: [] }
+  if (obj.schemaVersion === 1) {
+    await Promise.all([
+      idb.clearPhoto('cropped').then(() => result.clearPhotoCalls.push('cropped')),
+      idb.clearPhoto('source').then(() => result.clearPhotoCalls.push('source')),
+    ])
+  } else {
+    const croppedURL = (photos && typeof photos.cropped === 'string') ? photos.cropped : null
+    const sourceURL  = (photos && typeof photos.source  === 'string') ? photos.source  : null
+    await Promise.all([
+      croppedURL
+        ? idb.savePhoto(croppedURL, 'cropped').then(() => result.savePhotoCalls.push(['cropped', croppedURL]))
+        : idb.clearPhoto('cropped').then(() => result.clearPhotoCalls.push('cropped')),
+      sourceURL
+        ? idb.savePhoto(sourceURL, 'source').then(() => result.savePhotoCalls.push(['source', sourceURL]))
+        : idb.clearPhoto('source').then(() => result.clearPhotoCalls.push('source')),
+    ])
+    if (croppedURL) result.backgroundImage = { src: croppedURL }
+    result.hasSourcePhoto = !!sourceURL
+  }
+  return result
+}
+
+// 27. exportJSON with cropped-only photo embeds _photos.cropped.
+;(async () => {
+  const idb = makeMockPhotoIDB({ cropped: 'data:image/jpeg;base64,CCC' })
+  const state = { appMode: 'FIELD', viewports: { FIELD: { ...DEFAULT_VIEWPORT }, TECHNICAL: { ...DEFAULT_VIEWPORT } } }
+  const json = await mockExportJSON(state, idb)
+  const obj = JSON.parse(json)
+  pass('27a. exportJSON with cropped-only embeds _photos', obj._photos !== undefined)
+  pass('27b. exportJSON embeds _photos.cropped as non-empty string',
+    typeof obj._photos.cropped === 'string' && obj._photos.cropped.length > 0)
+  pass('27c. exportJSON omits _photos.source when absent', obj._photos.source === undefined)
+})()
+
+// 28. exportJSON with both slots embeds both keys.
+;(async () => {
+  const idb = makeMockPhotoIDB({ cropped: 'data:image/jpeg;base64,CCC', source: 'data:image/jpeg;base64,SSS' })
+  const state = { appMode: 'FIELD', viewports: { FIELD: { ...DEFAULT_VIEWPORT }, TECHNICAL: { ...DEFAULT_VIEWPORT } } }
+  const json = await mockExportJSON(state, idb)
+  const obj = JSON.parse(json)
+  pass('28a. exportJSON with both slots embeds _photos.cropped', obj._photos?.cropped === 'data:image/jpeg;base64,CCC')
+  pass('28b. exportJSON with both slots embeds _photos.source',  obj._photos?.source  === 'data:image/jpeg;base64,SSS')
+})()
+
+// 29. exportJSON with no photo in IDB omits _photos entirely.
+;(async () => {
+  const idb = makeMockPhotoIDB({})
+  const state = { appMode: 'FIELD', viewports: { FIELD: { ...DEFAULT_VIEWPORT }, TECHNICAL: { ...DEFAULT_VIEWPORT } } }
+  const json = await mockExportJSON(state, idb)
+  const obj = JSON.parse(json)
+  pass('29. exportJSON with no photo omits _photos key entirely', obj._photos === undefined)
+})()
+
+// 30. importJSON of a v3 fixture with _photos.cropped calls savePhoto correctly.
+;(async () => {
+  const idb = makeMockPhotoIDB({})
+  const v3File = JSON.stringify({
+    schemaVersion: 3,
+    appMode: 'FIELD',
+    viewports: { FIELD: { ...DEFAULT_VIEWPORT }, TECHNICAL: { ...DEFAULT_VIEWPORT } },
+    _photos: { cropped: 'data:image/jpeg;base64,FIXED' },
+  })
+  const r = await mockImportJSON_photoRestore(v3File, idb)
+  pass('30a. importJSON v3 with _photos.cropped calls savePhoto("cropped")',
+    r.savePhotoCalls.some((c) => c[0] === 'cropped' && c[1] === 'data:image/jpeg;base64,FIXED'))
+  pass('30b. importJSON v3 sets backgroundImage from cropped URL',
+    r.backgroundImage?.src === 'data:image/jpeg;base64,FIXED')
+  pass('30c. importJSON v3 IDB now holds cropped slot', idb.store.cropped === 'data:image/jpeg;base64,FIXED')
+  // Regression guard: pre-fix this returned `null` because the gate was
+  // `schemaVersion === 2`. Failure of 30a would re-introduce the bug.
+})()
+
+// 31. importJSON of a v3 fixture with both _photos slots calls savePhoto twice.
+;(async () => {
+  const idb = makeMockPhotoIDB({})
+  const v3File = JSON.stringify({
+    schemaVersion: 3,
+    appMode: 'FIELD',
+    viewports: { FIELD: { ...DEFAULT_VIEWPORT }, TECHNICAL: { ...DEFAULT_VIEWPORT } },
+    _photos: { cropped: 'data:image/jpeg;base64,C2', source: 'data:image/jpeg;base64,S2' },
+  })
+  const r = await mockImportJSON_photoRestore(v3File, idb)
+  pass('31a. importJSON v3 with both slots calls savePhoto for cropped',
+    r.savePhotoCalls.some((c) => c[0] === 'cropped' && c[1] === 'data:image/jpeg;base64,C2'))
+  pass('31b. importJSON v3 with both slots calls savePhoto for source',
+    r.savePhotoCalls.some((c) => c[0] === 'source' && c[1] === 'data:image/jpeg;base64,S2'))
+})()
+
+// 32. importJSON sets hasSourcePhoto based on _photos.source presence.
+;(async () => {
+  const idb1 = makeMockPhotoIDB({})
+  const r1 = await mockImportJSON_photoRestore(JSON.stringify({
+    schemaVersion: 3, _photos: { cropped: 'data:image/jpeg;base64,X' },
+  }), idb1)
+  pass('32a. hasSourcePhoto false when only cropped present', r1.hasSourcePhoto === false)
+
+  const idb2 = makeMockPhotoIDB({})
+  const r2 = await mockImportJSON_photoRestore(JSON.stringify({
+    schemaVersion: 3, _photos: { cropped: 'data:image/jpeg;base64,X', source: 'data:image/jpeg;base64,Y' },
+  }), idb2)
+  pass('32b. hasSourcePhoto true when source present', r2.hasSourcePhoto === true)
+})()
+
+// 33. importJSON of a v2 fixture (Phase 1 format) still restores _photos
+//     (backward-compat regression guard — fix must NOT break v2 reads).
+;(async () => {
+  const idb = makeMockPhotoIDB({})
+  const v2File = JSON.stringify({
+    schemaVersion: 2,
+    viewport: { ...DEFAULT_VIEWPORT },
+    _photos: { cropped: 'data:image/jpeg;base64,V2C', source: 'data:image/jpeg;base64,V2S' },
+  })
+  const r = await mockImportJSON_photoRestore(v2File, idb)
+  pass('33a. importJSON v2 still restores _photos.cropped (backward-compat)',
+    r.savePhotoCalls.some((c) => c[0] === 'cropped' && c[1] === 'data:image/jpeg;base64,V2C'))
+  pass('33b. importJSON v2 still restores _photos.source (backward-compat)',
+    r.savePhotoCalls.some((c) => c[0] === 'source' && c[1] === 'data:image/jpeg;base64,V2S'))
+  pass('33c. importJSON v2 backgroundImage decoded from cropped',
+    r.backgroundImage?.src === 'data:image/jpeg;base64,V2C')
+})()
+
+// 34. saveProject writes exportJSON's full result (including _photos) through
+//     writeToHandle — no bypass that would drop the photo embed.
+;(async () => {
+  const idb = makeMockPhotoIDB({ cropped: 'data:image/jpeg;base64,WRITTEN' })
+  const state = { appMode: 'FIELD', viewports: { FIELD: { ...DEFAULT_VIEWPORT }, TECHNICAL: { ...DEFAULT_VIEWPORT } } }
+  const expected = await mockExportJSON(state, idb)
+  // Simulate the saveProject path: call exportJSON, then writeToHandle.
+  const handle = makeMockHandle({ name: 'save.json' })
+  await writeToHandle(handle, expected)
+  pass('34a. saveProject writes exportJSON\'s full string through writeToHandle',
+    handle._writable.written[0] === expected)
+  const writtenObj = JSON.parse(handle._writable.written[0])
+  pass('34b. written payload includes _photos.cropped',
+    writtenObj._photos?.cropped === 'data:image/jpeg;base64,WRITTEN')
+})()
+
+// ============================================================================
 // SUMMARY
 // ============================================================================
 // All async tests above push into `tests` synchronously OR via the IIFE wrap

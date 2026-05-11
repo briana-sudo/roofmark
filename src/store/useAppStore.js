@@ -1759,13 +1759,21 @@ export const useAppStore = create((set, get) => {
         && sequences.some((s) => s.id === obj.activeSeqId)
         ? obj.activeSeqId : null
 
-      // Photo restoration. v1 has no photo data; v2 may carry one or both
-      // slots under `_photos`. Always reconcile IDB to the file's intent
-      // (clear absent slots) so the imported project doesn't inherit a
-      // stale photo from whatever was loaded before.
+      // Photo restoration. v1 has no photo data; v2 and v3 may carry one
+      // or both slots under `_photos`. Always reconcile IDB to the file's
+      // intent (clear absent slots) so the imported project doesn't
+      // inherit a stale photo from whatever was loaded before.
+      //
+      // Photo-bug fix (Phase 2 18a follow-on, May 10 2026):
+      //   Pre-fix this line read `obj.schemaVersion === 2 && obj._photos`,
+      //   which silently dropped the embedded photo on v3 files. Operator
+      //   reported on live URL `01615d1` that Save As → Load Project
+      //   restored everything BUT the photo. exportJSON has always written
+      //   `_photos` regardless of schemaVersion; the gate was on the
+      //   reader side only. Now reads from any non-v1 file.
       let backgroundImage = null
       let hasSourcePhoto = false
-      const photos = (obj.schemaVersion === 2 && obj._photos) ? obj._photos : null
+      const photos = (obj.schemaVersion !== 1 && obj._photos) ? obj._photos : null
       if (obj.schemaVersion === 1) {
         console.warn('RoofMark: importing v1 project file — no photo embedded. Use 📷 Photo to upload one.')
         await Promise.all([
@@ -1774,7 +1782,7 @@ export const useAppStore = create((set, get) => {
           clearPhoto('background').catch(() => {}),
         ])
       } else {
-        // v2 — write whatever slots are present, clear the rest.
+        // v2 / v3 — write whatever slots are present, clear the rest.
         const croppedURL = (photos && typeof photos.cropped === 'string') ? photos.cropped : null
         const sourceURL  = (photos && typeof photos.source  === 'string') ? photos.source  : null
         await Promise.all([
