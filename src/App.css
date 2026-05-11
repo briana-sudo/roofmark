@@ -1157,28 +1157,40 @@ body {
   border-color: #3fb950;
   color: #d2f8d8;
 }
-.tech-length-input {
+/* Phase 2 18c (May 11 2026) — TechInputPanel replaces TechLengthInput.
+   Vertical stack: length row, angle row, unit toggle row. Wrapper grows
+   from ~28px tall (18b length-only) to ~80px tall. Width stays near
+   160px so the panel doesn't crowd a small viewport at cursor+12 offset. */
+.tech-input-panel {
   position: absolute;
   z-index: 100;
   background: var(--rm-panel);
   border: 1px solid var(--rm-border);
   border-radius: 4px;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
-  padding: 6px 8px;
+  padding: 8px 10px;
   font-family: var(--rm-sans);
   font-size: 12px;
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 160px;
   pointer-events: auto;
 }
-.tech-length-label {
+.tech-input-panel .tip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tech-input-panel .tip-label {
+  width: 52px;
   color: var(--rm-fg-dim);
   font-size: 11px;
   user-select: none;
 }
-.tech-length-field {
-  width: 110px;
+.tech-input-panel .tip-field {
+  flex: 1;
+  min-width: 0;
   padding: 4px 6px;
   background: rgba(0, 0, 0, 0.25);
   border: 1px solid var(--rm-border);
@@ -1188,14 +1200,37 @@ body {
   font-size: 12px;
   outline: none;
 }
-.tech-length-field:focus {
+.tech-input-panel .tip-field:focus {
   border-color: #3fb950;
 }
-.tech-length-field.invalid {
+.tech-input-panel .tip-field.invalid {
   border-color: var(--rm-red);
 }
-.tech-length-field.invalid:focus {
+.tech-input-panel .tip-field.invalid:focus {
   border-color: var(--rm-red);
+}
+.tech-input-panel .tip-toggle-row {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 2px;
+}
+.tech-input-panel .unit-toggle {
+  padding: 2px 10px;
+  font-size: 11px;
+  background: var(--rm-panel-2);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  color: var(--rm-fg-dim);
+  cursor: pointer;
+  font-family: inherit;
+}
+.tech-input-panel .unit-toggle.active {
+  background: rgba(63, 185, 80, 0.18);
+  border-color: #3fb950;
+  color: #d2f8d8;
+}
+.tech-input-panel .unit-toggle:hover {
+  color: var(--rm-fg);
 }
 
 /* ---- Context menu (Step 9) ---- */

@@ -500,16 +500,21 @@ const initialState = {
   // in PERSIST_KEYS (operator's mid-edit state shouldn't survive reload —
   // they re-enter via the Perspective button).
   perspectiveEditMode: false,
-  // Phase 2 18b (May 10 2026) — Technical Drawing line-tool draft state.
+  // Phase 2 18b/18c — Technical Drawing line-tool draft state.
   // Transient. NOT in PERSIST_KEYS. null when no draft in progress.
   // Active shape:
-  //   { a: { x, y },          // anchor placed by first click
-  //     typedInches: number | null,  // operator-typed length (null = freehand) }
-  // The end-point `b` is NOT stored here — it's the live cursor (when
-  // typedInches is null) or the projection of cursor direction at
-  // (typedInches * PX_PER_INCH) distance (when set). Commit reads
-  // cursor + typedInches at commit time to compute `b`. Cleared on
-  // commit, cancel, tool change, appMode change.
+  //   { a: { x, y },                        // anchor placed by first click
+  //     typedInches: number | null,         // operator-typed length (null = freehand)
+  //     typedAngleDegrees: number | null }  // operator-typed angle in degrees,
+  //                                         // canvas-Y-down convention (null = freehand)
+  // 18c (May 11 2026) added `typedAngleDegrees`. Each typed field is
+  // independently lockable: typing only length keeps angle freehand
+  // (line direction follows cursor), typing only angle keeps length
+  // freehand (line length follows cursor distance to anchor), typing
+  // both fully locks the line geometry. The end-point `b` is NOT
+  // stored here — it's projected at commit/render time from `a` plus
+  // the (typed-or-freehand) length + angle. Cleared on commit, cancel,
+  // tool change, appMode change.
   techDraft: null,
   snapTolerance: 12,      // 12 mouse / 22 touch (Spec §8 amendment)
   pointerType: 'mouse',
@@ -888,11 +893,16 @@ export const useAppStore = create((set, get) => {
     // Per Kickoff Spec §21. technicalLayers[] holds Technical Drawing layers
     // (separate from Field Markup `layers`). Each technical layer:
     //   { id: 'tech-layer-{n}', name: string, visible: true, shapes: [] }
-    // 18b ships only the line shape:
+    // 18b/18c — line shape:
     //   { id: 'tech-shape-{n}', type: 'line', a: {x,y}, b: {x,y},
-    //     lengthInches: number, lengthSource: 'typed' | 'freehand' }
+    //     lengthInches: number,
+    //     lengthSource: 'typed' | 'freehand',
+    //     angleSource:  'typed' | 'freehand' }  // ← added 18c
     // a / b are RAW canvas pixel coords in TECHNICAL viewport space (no
     // photo to normalize against). Pan/zoom is applied at render time.
+    // angle is NOT stored on the shape — it's derivable at render time
+    // from atan2(b.y - a.y, b.x - a.x). Only the SOURCE flag persists so
+    // the operator's typed-vs-freehand intent round-trips through save.
     //
     // addTechnicalShape auto-creates 'Layer 1' on first commit so the
     // operator can start drawing without a layer-panel detour. 18c+ adds

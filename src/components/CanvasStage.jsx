@@ -11,12 +11,16 @@ import {
 } from '../utils/canvasRender'
 import { buildPerspectiveTransform, rotatePoint } from '../utils/perspective'
 import ContextMenu from './ContextMenu'
-import TechLengthInput from './TechLengthInput'
+import TechInputPanel from './TechInputPanel'
 // Phase 2 18b — Technical Drawing internal scale (24 px = 1 inch per
 // Spec §21). Used by the line-tool dispatch + render. Importing the
 // constant rather than redefining it keeps the canvas in lock-step with
 // the store actions and the parseLength contract.
 import { PX_PER_INCH } from '../store/useAppStore'
+// Phase 2 18c — shared commit helper. Both the click-commit (onMouseDown
+// freehand) and the typed-commit (TechInputPanel Enter shortcut) route
+// through this so the typed-vs-freehand decision is made in one place.
+import { commitTechLine } from '../utils/techLineCommit'
 
 /**
  * CanvasStage — Step 3 substrate + Step 5 drawing tools (Spec §6, §7).
@@ -1099,14 +1103,17 @@ export default function CanvasStage() {
       ctxDynamic.clearRect(0, 0, cvDynamic.width, cvDynamic.height)
       ctxDynamic.scale(dpr, dpr)
 
-      // Phase 2 18a/18b — Technical Drawing dynamic render.
-      // 18b: line-tool rubber-band. When a draft is active (anchor placed),
-      // draw a dashed preview from the anchor to either:
-      //   - the cursor (freehand mode, typedInches null/invalid), or
-      //   - the projection of cursor direction at typed-length distance
-      //     (typed mode — angle follows cursor, length locked to typed).
-      // No other dynamic content under TECHNICAL (no handles, no selection
-      // rings) until those tools land in 18c+.
+      // Phase 2 18a/18b/18c — Technical Drawing dynamic render.
+      // Rubber-band line preview with independent typed-vs-freehand
+      // length and angle. The preview must match the commit math
+      // exactly so the operator sees what they'll get.
+      //
+      //   length: typedInches if set, else cursor distance (rounded 0.5")
+      //   angle:  typedAngleDegrees if set, else cursor direction
+      //
+      // Midpoint label shows both `length" @ angle°` when an angle is
+      // either typed or non-zero from freehand; just `length"` for
+      // horizontal freehand draws so the label stays clean.
       if (state.appMode === 'TECHNICAL') {
         const draft = state.techDraft
         if (draft && draft.a && state.tool === 'tech-line') {
@@ -1117,18 +1124,25 @@ export default function CanvasStage() {
             x: (state.cursorX - techV.panX) / techZoom,
             y: (state.cursorY - techV.panY) / techZoom,
           }
-          const dx = cursorW.x - draft.a.x
-          const dy = cursorW.y - draft.a.y
-          const distW = Math.hypot(dx, dy)
-          const ux = distW > 0 ? dx / distW : 1
-          const uy = distW > 0 ? dy / distW : 0
-          let bW
-          if (typeof draft.typedInches === 'number' && draft.typedInches > 0) {
-            // Typed-length projection: angle from cursor, length locked.
-            const targetPx = draft.typedInches * PX_PER_INCH
-            bW = { x: draft.a.x + ux * targetPx, y: draft.a.y + uy * targetPx }
-          } else {
-            bW = cursorW
+          const dxC = cursorW.x - draft.a.x
+          const dyC = cursorW.y - draft.a.y
+          const cursorDist = Math.hypot(dxC, dyC)
+          const cursorAngleRad = Math.atan2(dyC, dxC)
+          // Effective length: typed if set, else cursor distance rounded.
+          const effInches = (typeof draft.typedInches === 'number' && draft.typedInches > 0)
+            ? draft.typedInches
+            : Math.round((cursorDist / PX_PER_INCH) * 2) / 2
+          // Effective angle: typed if set, else cursor direction. typed
+          // angle is canvas-Y-down degrees so it composes directly with
+          // atan2 without negation.
+          const effAngleRad = (typeof draft.typedAngleDegrees === 'number'
+            && Number.isFinite(draft.typedAngleDegrees))
+            ? (draft.typedAngleDegrees * Math.PI) / 180
+            : cursorAngleRad
+          const pxDistance = effInches * PX_PER_INCH
+          const bW = {
+            x: draft.a.x + Math.cos(effAngleRad) * pxDistance,
+            y: draft.a.y + Math.sin(effAngleRad) * pxDistance,
           }
           // World coords → canvas px.
           const ax = draft.a.x * techZoom + techV.panX
@@ -1145,13 +1159,11 @@ export default function CanvasStage() {
           ctxDynamic.lineTo(bx, by)
           ctxDynamic.stroke()
           ctxDynamic.setLineDash([])
-          // Ghost length label at midpoint with same perpendicular offset
-          // as committed shapes. Live value reflects typedInches when set,
-          // otherwise computed freehand length (rounded to nearest 0.5).
-          const live = (typeof draft.typedInches === 'number' && draft.typedInches > 0)
-            ? draft.typedInches
-            : Math.round((distW / PX_PER_INCH) * 2) / 2
-          if (live > 0) {
+          // Midpoint label with optional angle suffix. Angle shown when
+          // typed (operator's locked intent is worth surfacing) OR when
+          // the freehand angle is non-trivial (>= 1° off horizontal so
+          // the label doesn't clutter horizontal freehand draws).
+          if (effInches > 0) {
             const mx = (ax + bx) / 2
             const my = (ay + by) / 2
             const ddx = bx - ax
@@ -1161,7 +1173,18 @@ export default function CanvasStage() {
             const ny = dC > 0 ?  ddx / dC : -1
             const lx = mx + nx * 8
             const ly = my + ny * 8
-            const label = Number.isInteger(live) ? `${live}"` : `${live.toFixed(1)}"`
+            const lenStr = Number.isInteger(effInches) ? `${effInches}"` : `${effInches.toFixed(1)}"`
+            const angleDeg = (effAngleRad * 180) / Math.PI
+            const showAngle = (typeof draft.typedAngleDegrees === 'number')
+              || Math.abs(angleDeg) >= 1
+            let label
+            if (showAngle) {
+              const angRounded = Math.round(angleDeg * 10) / 10
+              const angStr = Number.isInteger(angRounded) ? `${angRounded}°` : `${angRounded.toFixed(1)}°`
+              label = `${lenStr} @ ${angStr}`
+            } else {
+              label = lenStr
+            }
             ctxDynamic.font = '11px sans-serif'
             ctxDynamic.textAlign = 'center'
             ctxDynamic.textBaseline = 'middle'
@@ -1848,33 +1871,33 @@ export default function CanvasStage() {
           const worldY = (raw.y - techV.panY) / techZoom
           const draft = store.techDraft
           if (!draft || !draft.a) {
-            // First click — capture anchor. The floating length input
+            // First click — capture anchor. The floating input panel
             // mounts on the next render via the techDraftActive subscription.
-            store.setTechDraft({ a: { x: worldX, y: worldY }, typedInches: null })
+            // 18c — initialize both typed fields explicitly so subsequent
+            // partial writes (onLengthChange / onAngleChange) spread cleanly.
+            store.setTechDraft({
+              a: { x: worldX, y: worldY },
+              typedInches: null,
+              typedAngleDegrees: null,
+            })
             dynamicDirty = true
             return
           }
-          // Second click — freehand commit. Length = pixel distance
-          // between anchor and click point, divided by PX_PER_INCH, then
-          // rounded to nearest 0.5" (Spec §21 doesn't specify a rounding
-          // granularity; 0.5" is the shop-drawing convention. Operator-
-          // tunable rounding revisit deferred to 18c+ per build prompt
-          // section 10).
-          const dx = worldX - draft.a.x
-          const dy = worldY - draft.a.y
-          const distW = Math.hypot(dx, dy)
-          const rawInches = distW / PX_PER_INCH
-          const inches = Math.round(rawInches * 2) / 2
-          if (inches > 0) {
-            store.addTechnicalShape({
-              type: 'line',
-              a: draft.a,
-              b: { x: worldX, y: worldY },
-              lengthInches: inches,
-              lengthSource: 'freehand',
-            })
-          }
-          store.setTechDraft(null)
+          // Second click — commit. 18c click-commits-typed: if the
+          // operator typed a length and/or angle in the input panel
+          // (techDraft.typedInches / typedAngleDegrees), use those.
+          // Whatever wasn't typed falls back to the cursor (length =
+          // click distance rounded to 0.5", angle = cursor direction
+          // from anchor). The helper makes the per-axis decision and
+          // calls addTechnicalShape + setTechDraft(null).
+          commitTechLine({
+            anchor: draft.a,
+            cursorWorld: { x: worldX, y: worldY },
+            typedInches: draft.typedInches,
+            typedAngleDegrees: draft.typedAngleDegrees,
+            addTechnicalShape: store.addTechnicalShape,
+            setTechDraft: store.setTechDraft,
+          })
           dynamicDirty = true
           return
         }
@@ -2741,42 +2764,35 @@ export default function CanvasStage() {
     >
       <canvas id="cvStatic" ref={staticCanvasRef} className="cv-static" aria-hidden="true" />
       <canvas id="cvDynamic" ref={dynamicCanvasRef} className="cv-dynamic" aria-hidden="true" />
-      {/* Phase 2 18b — Technical Drawing line-tool length input. Mounts
-          when appMode is TECHNICAL, tool is tech-line, and a draft is
-          active (anchor placed, awaiting end-point). onCommit + onCancel
-          read store state via getState() and mutate via addTechnicalShape
-          + setTechDraft — no closure dependency on the useEffect-internal
-          state machine. The input itself subscribes to cursorX/cursorY
-          for its absolute position. */}
+      {/* Phase 2 18b/18c — Technical Drawing line-tool input panel.
+          Mounts when appMode is TECHNICAL, tool is tech-line, and a
+          draft is active. onCommit (Enter from either field, fires only
+          when BOTH length AND angle are typed) routes through the same
+          commitTechLine helper as the canvas click-commit path so the
+          typed-vs-freehand decision lives in one place. */}
       {appMode === 'TECHNICAL' && tool === 'tech-line' && techDraftActive && (
-        <TechLengthInput
-          onCommit={(parsedInches) => {
+        <TechInputPanel
+          onCommit={({ inches, angleDegrees }) => {
             const s = useAppStore.getState()
             const d = s.techDraft
             if (!d || !d.a) return
             const v = s.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
-            // Convert current cursor (canvas px) → TECHNICAL world coords.
+            // Convert live cursor (canvas px) → TECHNICAL world coords.
+            // The helper uses the cursor only as freehand fallback; with
+            // both typed values present (the Enter-shortcut precondition),
+            // the cursor is effectively ignored.
             const cursorW = {
               x: (s.cursorX - v.panX) / (v.zoom || 1),
               y: (s.cursorY - v.panY) / (v.zoom || 1),
             }
-            const dx = cursorW.x - d.a.x
-            const dy = cursorW.y - d.a.y
-            const dist = Math.hypot(dx, dy)
-            // If cursor is on top of anchor (dist=0) use right-facing
-            // default direction so commit doesn't NaN.
-            const ux = dist > 0 ? dx / dist : 1
-            const uy = dist > 0 ? dy / dist : 0
-            const targetPx = parsedInches * PX_PER_INCH
-            const b = { x: d.a.x + ux * targetPx, y: d.a.y + uy * targetPx }
-            s.addTechnicalShape({
-              type: 'line',
-              a: d.a,
-              b,
-              lengthInches: parsedInches,
-              lengthSource: 'typed',
+            commitTechLine({
+              anchor: d.a,
+              cursorWorld: cursorW,
+              typedInches: inches,
+              typedAngleDegrees: angleDegrees,
+              addTechnicalShape: s.addTechnicalShape,
+              setTechDraft: s.setTechDraft,
             })
-            s.setTechDraft(null)
           }}
           onCancel={() => useAppStore.getState().setTechDraft(null)}
         />
