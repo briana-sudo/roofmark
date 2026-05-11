@@ -76,11 +76,20 @@ const SUPPORTED_IMPORT_VERSIONS = new Set([1, 2, 3])
 // ---- ID generators ---------------------------------------------------------
 let _layerSeq = 0
 let _shapeSeq = 0
+// Phase 2 18b (May 10 2026) — Technical Drawing id counters. Kept in
+// module scope alongside the Field Markup counters so reseedCounters
+// can bump them at hydration / import time and prevent post-load id
+// collisions. Format: `tech-layer-{n}` / `tech-shape-{n}` per Spec §21
+// naming convention. Field Markup's `l{n}` / `sh{n}` ids stay disjoint.
+let _techLayerSeq = 0
+let _techShapeSeq = 0
 let _seqSeq = 0
 let _clineSeq = 0
 let _annoSeq = 0
 const newLayerId = () => `l${++_layerSeq}`
 const newShapeId = () => `sh${++_shapeSeq}`
+const newTechLayerId = () => `tech-layer-${++_techLayerSeq}`
+const newTechShapeId = () => `tech-shape-${++_techShapeSeq}`
 const newSeqId = () => `s${++_seqSeq}`
 const newClineId = () => `cl${++_clineSeq}`
 const newAnnoId = () => `a${++_annoSeq}`
@@ -185,7 +194,21 @@ const PERSIST_KEYS = [
   // so importJSON migrates them in memory to v3 shape before set().
   'appMode', 'technicalLayers', 'specTable',
 ]
-const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE', 'TECHNICAL'])
+// Phase 2 18b (May 10 2026) — Field Markup `mode` slice valid values.
+// Pre-18b the set also included 'TECHNICAL', a stale token left over from
+// a pre-18a iteration where Technical was a Field Markup sub-mode. The
+// appMode split (18a) made that semantically wrong but harmless because
+// no caller passed it. Cleaned up in 18b — setMode rejects 'TECHNICAL'
+// as an invalid Field Markup mode (appMode owns Technical Drawing now).
+const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE'])
+
+// Phase 2 18b — Technical Drawing internal scale. Kickoff Spec §21:
+// "24px = 1 inch" defines the canvas-pixel ↔ real-world-inch mapping.
+// Used by addTechnicalShape / parseLength / drawStatic at render time.
+export const PX_PER_INCH = 24
+// Phase 2 18b — default Technical layer name when auto-created on first
+// shape commit. Operator can rename via the layer-panel UI in 18c+.
+export const TECHNICAL_LAYER_NAME_DEFAULT = 'Layer 1'
 // Step 13 — third tab for the per-annotation editing panel. The tab button
 // only renders in App.jsx when mode === 'SEQUENCE' and activeSeqId is set;
 // `drawerTab === 'annotations'` outside that gate falls back to 'properties'
@@ -361,7 +384,17 @@ const reseedCounters = (data) => {
     const n = parseInt(String(s).replace(/^[a-z]+/, ''), 10)
     if (!isNaN(n) && n > ref.value) ref.value = n
   }
-  const refs = { l: { value: _layerSeq }, sh: { value: _shapeSeq }, s: { value: _seqSeq }, cl: { value: _clineSeq }, a: { value: _annoSeq } }
+  // Phase 2 18b — bumpTech: id format is `tech-layer-{n}` / `tech-shape-{n}`
+  // (multi-segment prefix). The Field Markup `bump` strips a single leading
+  // alphabetic run; for technical ids it would parse the wrong number. Use
+  // a regex anchored on the full pattern instead.
+  const bumpTech = (s, ref) => {
+    const m = String(s).match(/(\d+)$/)
+    if (!m) return
+    const n = parseInt(m[1], 10)
+    if (!isNaN(n) && n > ref.value) ref.value = n
+  }
+  const refs = { l: { value: _layerSeq }, sh: { value: _shapeSeq }, s: { value: _seqSeq }, cl: { value: _clineSeq }, a: { value: _annoSeq }, tl: { value: _techLayerSeq }, tsh: { value: _techShapeSeq } }
   for (const layer of data.layers || []) {
     bump(layer.id || 'l0', refs.l)
     for (const shape of layer.shapes || []) bump(shape.id || 'sh0', refs.sh)
@@ -371,11 +404,18 @@ const reseedCounters = (data) => {
     for (const a of seq.annotations || []) bump(a.id || 'a0', refs.a)
   }
   for (const cl of data.clines || []) bump(cl.id || 'cl0', refs.cl)
+  // Phase 2 18b — technical layers/shapes.
+  for (const tl of data.technicalLayers || []) {
+    bumpTech(tl.id || '', refs.tl)
+    for (const sh of tl.shapes || []) bumpTech(sh.id || '', refs.tsh)
+  }
   _layerSeq = refs.l.value
   _shapeSeq = refs.sh.value
   _seqSeq = refs.s.value
   _clineSeq = refs.cl.value
   _annoSeq = refs.a.value
+  _techLayerSeq = refs.tl.value
+  _techShapeSeq = refs.tsh.value
 }
 
 const hydrated = loadFromStorage()
@@ -408,6 +448,13 @@ const initialState = {
   // unknown modes fall back to DRAW; an activeLayerId pointing at a layer that
   // no longer exists falls back to null.
   mode: (hydrated?.mode && VALID_MODES.has(hydrated.mode)) ? hydrated.mode : 'DRAW',
+  // Phase 2 18b — Tool ids are mode-namespaced: Field Markup uses
+  // 'poly' | 'rect' | 'tri' | 'circ' | 'arc' | 'ellipse' | 'line' |
+  // 'cline' | 'callout' | 'dimline' | 'note'; Technical Drawing uses
+  // 'tech-line' (18b) plus future 'tech-rect' / 'tech-arc' / etc. in
+  // 18c+. Convention-enforced, not type-checked at write time.
+  // setAppMode (18a) clears tool on any FIELD ↔ TECHNICAL switch so
+  // a Field tool never leaks into Technical dispatch and vice-versa.
   tool: null,
   activeLayerId: (
     hydrated?.activeLayerId
@@ -453,6 +500,17 @@ const initialState = {
   // in PERSIST_KEYS (operator's mid-edit state shouldn't survive reload —
   // they re-enter via the Perspective button).
   perspectiveEditMode: false,
+  // Phase 2 18b (May 10 2026) — Technical Drawing line-tool draft state.
+  // Transient. NOT in PERSIST_KEYS. null when no draft in progress.
+  // Active shape:
+  //   { a: { x, y },          // anchor placed by first click
+  //     typedInches: number | null,  // operator-typed length (null = freehand) }
+  // The end-point `b` is NOT stored here — it's the live cursor (when
+  // typedInches is null) or the projection of cursor direction at
+  // (typedInches * PX_PER_INCH) distance (when set). Commit reads
+  // cursor + typedInches at commit time to compute `b`. Cleared on
+  // commit, cancel, tool change, appMode change.
+  techDraft: null,
   snapTolerance: 12,      // 12 mouse / 22 touch (Spec §8 amendment)
   pointerType: 'mouse',
 
@@ -808,6 +866,85 @@ export const useAppStore = create((set, get) => {
           selected: { layerId: toLayerId, shapeId },
         }
       })
+    },
+
+    // ============ Technical Drawing actions (Phase 2 18b, May 10 2026) ======
+    // Per Kickoff Spec §21. technicalLayers[] holds Technical Drawing layers
+    // (separate from Field Markup `layers`). Each technical layer:
+    //   { id: 'tech-layer-{n}', name: string, visible: true, shapes: [] }
+    // 18b ships only the line shape:
+    //   { id: 'tech-shape-{n}', type: 'line', a: {x,y}, b: {x,y},
+    //     lengthInches: number, lengthSource: 'typed' | 'freehand' }
+    // a / b are RAW canvas pixel coords in TECHNICAL viewport space (no
+    // photo to normalize against). Pan/zoom is applied at render time.
+    //
+    // addTechnicalShape auto-creates 'Layer 1' on first commit so the
+    // operator can start drawing without a layer-panel detour. 18c+ adds
+    // a real layer-panel UI for Technical Drawing.
+    addTechnicalLayer: (name) => {
+      pushUndo()
+      const layer = {
+        id: newTechLayerId(),
+        name: typeof name === 'string' && name.length > 0 ? name : TECHNICAL_LAYER_NAME_DEFAULT,
+        visible: true,
+        shapes: [],
+      }
+      set((s) => ({ technicalLayers: [...s.technicalLayers, layer] }))
+      return layer.id
+    },
+
+    addTechnicalShape: (shape) => {
+      pushUndo()
+      const id = shape.id || newTechShapeId()
+      const fullShape = { ...shape, id }
+      set((s) => {
+        // Auto-create Layer 1 if no technical layers exist yet. Operator
+        // didn't visit a layer panel — Spec §21 says the first commit
+        // implicitly creates the default working layer.
+        if (s.technicalLayers.length === 0) {
+          const layer = {
+            id: newTechLayerId(),
+            name: TECHNICAL_LAYER_NAME_DEFAULT,
+            visible: true,
+            shapes: [fullShape],
+          }
+          return { technicalLayers: [layer] }
+        }
+        // Append to the FIRST technical layer (the default working layer).
+        // 18c+ may surface a notion of "active technical layer" for
+        // multi-layer projects; for 18b the first-layer convention is fine.
+        return {
+          technicalLayers: s.technicalLayers.map((tl, i) =>
+            i === 0 ? { ...tl, shapes: [...tl.shapes, fullShape] } : tl
+          ),
+        }
+      })
+      return id
+    },
+
+    // updateTechnicalShape / deleteTechnicalShape — included as stubs so
+    // 18c+ can wire edit + delete UI without another store touch. Both
+    // push undo so the operator's expectation ("Cmd+Z reverses my last
+    // edit") holds when the UI lands.
+    updateTechnicalShape: (layerId, shapeId, patch) => {
+      pushUndo()
+      set((s) => ({
+        technicalLayers: s.technicalLayers.map((tl) =>
+          tl.id !== layerId ? tl : {
+            ...tl,
+            shapes: tl.shapes.map((sh) => sh.id === shapeId ? { ...sh, ...patch } : sh),
+          }
+        ),
+      }))
+    },
+
+    deleteTechnicalShape: (layerId, shapeId) => {
+      pushUndo()
+      set((s) => ({
+        technicalLayers: s.technicalLayers.map((tl) =>
+          tl.id !== layerId ? tl : { ...tl, shapes: tl.shapes.filter((sh) => sh.id !== shapeId) }
+        ),
+      }))
     },
 
     // ============ Sequence actions ==========================================
@@ -1169,6 +1306,11 @@ export const useAppStore = create((set, get) => {
           selected: null,
           selectedAnnotation: null,
           tool: null,
+          // Phase 2 18b — any half-drawn Technical Drawing line is
+          // abandoned on appMode switch (operator left the mode while
+          // mid-draft). Mirrors the `tool: null` clear above so a
+          // returning operator picks the tool back up cleanly.
+          techDraft: null,
         }
       })
     },
@@ -1382,7 +1524,13 @@ export const useAppStore = create((set, get) => {
     clearSelectedAnnotation: () => set({ selectedAnnotation: null }),
 
     // ============ App state actions =========================================
-    setMode: (mode) =>
+    setMode: (mode) => {
+      // Phase 2 18b ride-along cleanup: VALID_MODES guard. Pre-18b setMode
+      // accepted any string. Untyped callers that passed (e.g. the stale
+      // 'TECHNICAL' literal) would silently corrupt the mode slice. With
+      // 18a's appMode split, Technical Drawing is its own top-level mode;
+      // the inner Field Markup mode is strictly DRAW/EDIT/SEQUENCE.
+      if (!VALID_MODES.has(mode)) return
       set((s) => ({
         mode,
         // Mode change clears selection (Spec §9 — DRAW and EDIT mutually
@@ -1394,10 +1542,20 @@ export const useAppStore = create((set, get) => {
         // can no longer see in the (now-hidden) Annotations tab.
         selectedAnnotation: mode === s.mode ? s.selectedAnnotation : null,
         // Mode change also clears any active tool — drawing tools don't
-        // apply outside DRAW mode
-        tool: mode === 'DRAW' || mode === 'TECHNICAL' ? s.tool : null,
-      })),
+        // apply outside DRAW mode. (Ride-along: pre-18b this branch also
+        // preserved tool when `mode === 'TECHNICAL'` — dead path since the
+        // appMode split moved Technical Drawing out of the mode slice
+        // entirely. Dropped in 18b.)
+        tool: mode === 'DRAW' ? s.tool : null,
+      }))
+    },
     setTool: (tool) => set({ tool }),
+    // Phase 2 18b — setTechDraft writes the Technical Drawing line-tool
+    // draft state. Called from CanvasStage onMouseDown (anchor capture)
+    // + TechLengthInput onTypedChange (live projection update) + commit/
+    // cancel paths. Pass null to clear. Subscribed by CanvasStage's
+    // dirty-flag pipeline so changes trigger a dynamic-canvas repaint.
+    setTechDraft: (techDraft) => set({ techDraft }),
     setCursor: (x, y) => set({ cursorX: x, cursorY: y }),
     // (Old setSnapType: (snapType) => set({ snapType }) was vestigial dead
     // code with no callers — setSnap below writes both snapPt + snapType
@@ -1867,6 +2025,9 @@ export const useAppStore = create((set, get) => {
         gridRotation: normalizeGridRotation(obj.gridRotation),
         perspectiveCorners: normalizePerspectiveCorners(obj.perspectiveCorners),
         perspectiveEditMode: false,
+        // Phase 2 18b — transient Technical Drawing draft never restores
+        // from a file (same convention as perspectiveEditMode).
+        techDraft: null,
         pdfOrientation: normalizePdfOrientation(obj.pdfOrientation),
         // P45 (Phase 2 18a, May 10 2026) — Load Project clears the
         // currentFileHandle + currentFileName so the loaded file is
@@ -2101,6 +2262,10 @@ export const useAppStore = create((set, get) => {
         perspectiveCorners: null,
         perspectiveEditMode: false,
         gridRotation: 0,
+        // Phase 2 18b — transient Technical Drawing draft also cleared on
+        // New Project so a half-drawn line from the prior session doesn't
+        // surface mid-input on the cleared canvas.
+        techDraft: null,
         // P45 (Phase 2 18a, May 10 2026) — New Project clears the
         // currentFileHandle + currentFileName so the operator's next
         // Save opens the picker fresh. Matches the Load Project

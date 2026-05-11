@@ -11,6 +11,12 @@ import {
 } from '../utils/canvasRender'
 import { buildPerspectiveTransform, rotatePoint } from '../utils/perspective'
 import ContextMenu from './ContextMenu'
+import TechLengthInput from './TechLengthInput'
+// Phase 2 18b — Technical Drawing internal scale (24 px = 1 inch per
+// Spec §21). Used by the line-tool dispatch + render. Importing the
+// constant rather than redefining it keeps the canvas in lock-step with
+// the store actions and the parseLength contract.
+import { PX_PER_INCH } from '../store/useAppStore'
 
 /**
  * CanvasStage — Step 3 substrate + Step 5 drawing tools (Spec §6, §7).
@@ -520,6 +526,13 @@ export default function CanvasStage() {
   const staticCanvasRef = useRef(null)
   const dynamicCanvasRef = useRef(null)
   const tool = useAppStore((s) => s.tool)
+  // Phase 2 18b — appMode + techDraft drive the TechLengthInput conditional
+  // mount. Subscribed at component-render scope so the input mounts /
+  // unmounts cleanly on mode switch + draft begin / end. techDraftActive
+  // is derived: we only need a boolean for the conditional, not the full
+  // draft payload (TechLengthInput subscribes to the cursor itself).
+  const appMode = useAppStore((s) => s.appMode)
+  const techDraftActive = useAppStore((s) => s.techDraft !== null)
   // Spec §9 — context menu state lives at component-level so the JSX can
   // render <ContextMenu> conditionally. The useEffect captures setCtxMenu
   // (stable across renders) to call from inside the contextmenu handler.
@@ -694,14 +707,57 @@ export default function CanvasStage() {
       ctxStatic.fillStyle = '#0d1117'
       ctxStatic.fillRect(0, 0, cw, ch)
 
-      // Phase 2 18a (May 10 2026) — Technical Drawing mode early-return.
-      // Render an empty dark canvas with no Field Markup content (no
-      // photo, no layers, no clines, no annotations, no perspective
-      // handles). Pan/zoom still works via the viewport state (its own
-      // viewports.TECHNICAL entry); grid drawing is also skipped in
-      // 18a since the operator has no shapes to align to yet. Technical
-      // Drawing render path lands in 18b+.
+      // Phase 2 18a/18b (May 10 2026) — Technical Drawing render path.
+      // 18a left this as an early-return after the dark background fill.
+      // 18b paints any committed line shapes from state.technicalLayers
+      // before returning. Field Markup content (photo, layers, clines,
+      // annotations, perspective handles) is suppressed under TECHNICAL.
+      // Grid drawing skipped — operators have no shapes to align to in
+      // the dimensional-CAD sense (18c+ may add a tech-only grid).
       if (storeState.appMode === 'TECHNICAL') {
+        const techV = storeState.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+        const techZoom = techV.zoom || 1
+        // 18b: render each visible technical layer's line shapes.
+        // Stroke color is a neutral mid-gray for 18b; 18c+ may add
+        // per-layer color and per-shape override.
+        const TECH_STROKE = '#9ca3af'
+        const TECH_LABEL_FONT = '11px sans-serif'
+        ctxStatic.strokeStyle = TECH_STROKE
+        ctxStatic.fillStyle = TECH_STROKE
+        ctxStatic.lineWidth = 2
+        ctxStatic.font = TECH_LABEL_FONT
+        for (const tl of storeState.technicalLayers || []) {
+          if (tl.visible === false) continue
+          for (const sh of tl.shapes || []) {
+            if (sh.type !== 'line') continue
+            // Transform world coords → canvas px via TECHNICAL viewport.
+            const ax = sh.a.x * techZoom + techV.panX
+            const ay = sh.a.y * techZoom + techV.panY
+            const bx = sh.b.x * techZoom + techV.panX
+            const by = sh.b.y * techZoom + techV.panY
+            ctxStatic.beginPath()
+            ctxStatic.moveTo(ax, ay)
+            ctxStatic.lineTo(bx, by)
+            ctxStatic.stroke()
+            // Length label at midpoint, offset perpendicular to the
+            // stroke by 8px so it doesn't overlap the line. Whole inches
+            // render without decimal; non-whole render to one decimal.
+            const mx = (ax + bx) / 2
+            const my = (ay + by) / 2
+            const dx = bx - ax
+            const dy = by - ay
+            const dist = Math.hypot(dx, dy)
+            const nx = dist > 0 ? -dy / dist : 0
+            const ny = dist > 0 ?  dx / dist : -1
+            const lx = mx + nx * 8
+            const ly = my + ny * 8
+            const v = sh.lengthInches
+            const label = Number.isInteger(v) ? `${v}"` : `${v.toFixed(1)}"`
+            ctxStatic.textAlign = 'center'
+            ctxStatic.textBaseline = 'middle'
+            ctxStatic.fillText(label, lx, ly)
+          }
+        }
         ctxStatic.restore()
         return
       }
@@ -1043,10 +1099,76 @@ export default function CanvasStage() {
       ctxDynamic.clearRect(0, 0, cvDynamic.width, cvDynamic.height)
       ctxDynamic.scale(dpr, dpr)
 
-      // Phase 2 18a — Technical Drawing mode early-return. No dynamic
-      // content (no rubber-band drafts, no handles, no selection rings)
-      // until Technical Drawing tools land in 18b+.
+      // Phase 2 18a/18b — Technical Drawing dynamic render.
+      // 18b: line-tool rubber-band. When a draft is active (anchor placed),
+      // draw a dashed preview from the anchor to either:
+      //   - the cursor (freehand mode, typedInches null/invalid), or
+      //   - the projection of cursor direction at typed-length distance
+      //     (typed mode — angle follows cursor, length locked to typed).
+      // No other dynamic content under TECHNICAL (no handles, no selection
+      // rings) until those tools land in 18c+.
       if (state.appMode === 'TECHNICAL') {
+        const draft = state.techDraft
+        if (draft && draft.a && state.tool === 'tech-line') {
+          const techV = state.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+          const techZoom = techV.zoom || 1
+          // Cursor world coords (canvas px → world via TECHNICAL viewport).
+          const cursorW = {
+            x: (state.cursorX - techV.panX) / techZoom,
+            y: (state.cursorY - techV.panY) / techZoom,
+          }
+          const dx = cursorW.x - draft.a.x
+          const dy = cursorW.y - draft.a.y
+          const distW = Math.hypot(dx, dy)
+          const ux = distW > 0 ? dx / distW : 1
+          const uy = distW > 0 ? dy / distW : 0
+          let bW
+          if (typeof draft.typedInches === 'number' && draft.typedInches > 0) {
+            // Typed-length projection: angle from cursor, length locked.
+            const targetPx = draft.typedInches * PX_PER_INCH
+            bW = { x: draft.a.x + ux * targetPx, y: draft.a.y + uy * targetPx }
+          } else {
+            bW = cursorW
+          }
+          // World coords → canvas px.
+          const ax = draft.a.x * techZoom + techV.panX
+          const ay = draft.a.y * techZoom + techV.panY
+          const bx = bW.x * techZoom + techV.panX
+          const by = bW.y * techZoom + techV.panY
+          ctxDynamic.save()
+          ctxDynamic.strokeStyle = '#9ca3af'
+          ctxDynamic.fillStyle = '#9ca3af'
+          ctxDynamic.lineWidth = 2
+          ctxDynamic.setLineDash([6, 4])
+          ctxDynamic.beginPath()
+          ctxDynamic.moveTo(ax, ay)
+          ctxDynamic.lineTo(bx, by)
+          ctxDynamic.stroke()
+          ctxDynamic.setLineDash([])
+          // Ghost length label at midpoint with same perpendicular offset
+          // as committed shapes. Live value reflects typedInches when set,
+          // otherwise computed freehand length (rounded to nearest 0.5).
+          const live = (typeof draft.typedInches === 'number' && draft.typedInches > 0)
+            ? draft.typedInches
+            : Math.round((distW / PX_PER_INCH) * 2) / 2
+          if (live > 0) {
+            const mx = (ax + bx) / 2
+            const my = (ay + by) / 2
+            const ddx = bx - ax
+            const ddy = by - ay
+            const dC = Math.hypot(ddx, ddy)
+            const nx = dC > 0 ? -ddy / dC : 0
+            const ny = dC > 0 ?  ddx / dC : -1
+            const lx = mx + nx * 8
+            const ly = my + ny * 8
+            const label = Number.isInteger(live) ? `${live}"` : `${live.toFixed(1)}"`
+            ctxDynamic.font = '11px sans-serif'
+            ctxDynamic.textAlign = 'center'
+            ctxDynamic.textBaseline = 'middle'
+            ctxDynamic.fillText(label, lx, ly)
+          }
+          ctxDynamic.restore()
+        }
         ctxDynamic.restore()
         return
       }
@@ -1525,6 +1647,23 @@ export default function CanvasStage() {
       const { x, y } = pointFromClient(e.clientX, e.clientY)
       const store = useAppStore.getState()
       store.setCursor(x, y)
+      // Phase 2 18b ride-along cleanup: pointerType recovery. Pre-18b
+      // onTouchStart/onTouchMove wrote 'touch' but no handler wrote
+      // 'mouse' back, so the snap tolerance stayed at the looser touch
+      // value (22 px) forever after the first touch event — even when
+      // the operator picked up a mouse mid-session. Now: if a real mouse
+      // signature shows up (event has numeric movementX / movementY,
+      // which native MouseEvents emit on mousemove and TouchEvent-
+      // synthesised mousemoves don't) and the store still says 'touch',
+      // flip it back to 'mouse' (which also restores the 12 px snap
+      // tolerance via setPointerType's derivation).
+      if (
+        store.pointerType === 'touch'
+        && typeof e.movementX === 'number'
+        && typeof e.movementY === 'number'
+      ) {
+        store.setPointerType('mouse')
+      }
       // Section 7.A.3 — viewport pan update. Apply delta to the original
       // pan baseline so re-entering the canvas mid-drag stays stable.
       if (panDrag) {
@@ -1685,12 +1824,62 @@ export default function CanvasStage() {
         return
       }
 
-      // Phase 2 18a (May 10 2026) — Technical Drawing mode early-return.
+      // Phase 2 18a/18b (May 10 2026) — Technical Drawing dispatch.
       // Pan input (middle-mouse / space+left / two-finger touch) handled
-      // above; all Field Markup hit-testing (perspective corners,
+      // above. All Field Markup hit-testing (perspective corners,
       // annotation handles, shape handles, shape hit-test, draw tools)
-      // is suppressed until Technical Drawing tools land in 18b+.
-      if (store.appMode === 'TECHNICAL') return
+      // remains suppressed under TECHNICAL.
+      // 18b adds the tech-line tool state machine:
+      //   - first click → capture anchor `a` (in TECHNICAL world coords),
+      //                   show the floating length input
+      //   - second click → freehand commit: b = cursor, length rounded
+      //                    to nearest 0.5"
+      //   - (Enter in floating input → typed commit; handled by the
+      //     onCommit prop passed at JSX mount)
+      //   - (Escape → cancel; handled by onCancel prop + keydown below)
+      if (store.appMode === 'TECHNICAL') {
+        if (e.button !== 0) return // only left-click commits
+        const t = store.tool
+        if (t === 'tech-line') {
+          const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+          const techZoom = techV.zoom || 1
+          // Convert click canvas-px → TECHNICAL world coords.
+          const worldX = (raw.x - techV.panX) / techZoom
+          const worldY = (raw.y - techV.panY) / techZoom
+          const draft = store.techDraft
+          if (!draft || !draft.a) {
+            // First click — capture anchor. The floating length input
+            // mounts on the next render via the techDraftActive subscription.
+            store.setTechDraft({ a: { x: worldX, y: worldY }, typedInches: null })
+            dynamicDirty = true
+            return
+          }
+          // Second click — freehand commit. Length = pixel distance
+          // between anchor and click point, divided by PX_PER_INCH, then
+          // rounded to nearest 0.5" (Spec §21 doesn't specify a rounding
+          // granularity; 0.5" is the shop-drawing convention. Operator-
+          // tunable rounding revisit deferred to 18c+ per build prompt
+          // section 10).
+          const dx = worldX - draft.a.x
+          const dy = worldY - draft.a.y
+          const distW = Math.hypot(dx, dy)
+          const rawInches = distW / PX_PER_INCH
+          const inches = Math.round(rawInches * 2) / 2
+          if (inches > 0) {
+            store.addTechnicalShape({
+              type: 'line',
+              a: draft.a,
+              b: { x: worldX, y: worldY },
+              lengthInches: inches,
+              lengthSource: 'freehand',
+            })
+          }
+          store.setTechDraft(null)
+          dynamicDirty = true
+          return
+        }
+        return // no tool selected — nothing to do; Field Markup paths stay suppressed
+      }
 
       // P16 (May 8 2026) — perspective-edit mode hit-test runs BEFORE
       // mode/tool dispatch so the operator can drag corner handles
@@ -2156,6 +2345,17 @@ export default function CanvasStage() {
         // Priority: cancel in-progress draw draft → cancel edit drag →
         // cancel annotation drag → clear selection. Each layer is
         // independent so Escape always unwinds the topmost interaction.
+        // Phase 2 18b — also cancel an in-progress Technical Drawing
+        // line draft when the input isn't focused (TechLengthInput's
+        // onKeyDown handles Escape with stopPropagation when focused,
+        // so this branch only fires when focus is elsewhere — e.g.
+        // operator clicked back onto the canvas mid-draft).
+        const sEscTech = useAppStore.getState()
+        if (sEscTech.appMode === 'TECHNICAL' && sEscTech.techDraft) {
+          sEscTech.setTechDraft(null)
+          dynamicDirty = true
+          return
+        }
         if (draft) {
           draft = null
           isDragging = false
@@ -2371,6 +2571,21 @@ export default function CanvasStage() {
       if (state.layers !== prev.layers || state.clines !== prev.clines) {
         staticDirty = true
       }
+      // Phase 2 18b — Technical Drawing layers + shapes feed drawStatic
+      // under TECHNICAL mode. Any commit (addTechnicalShape) or future
+      // edit (updateTechnicalShape / deleteTechnicalShape) bumps the
+      // technicalLayers array reference; flip staticDirty so the line
+      // appears (or updates) on the next rAF tick.
+      if (state.technicalLayers !== prev.technicalLayers) {
+        staticDirty = true
+      }
+      // 18b — techDraft change repaints the rubber-band on the dynamic
+      // canvas. Fires on first click (draft begin), Enter / freehand
+      // commit / Escape cancel (draft end), and each typedInches update
+      // from TechLengthInput's onTypedChange.
+      if (state.techDraft !== prev.techDraft) {
+        dynamicDirty = true
+      }
       // Spec §9 — selection change repaints both static (selected outline)
       // and dynamic (handles).
       if (state.selected !== prev.selected) {
@@ -2486,6 +2701,13 @@ export default function CanvasStage() {
         isDragging = false
         dynamicDirty = true
       }
+      // Phase 2 18b — tool change also abandons any Technical Drawing
+      // line draft. Mirror of the Field Markup draft clear above. Deferred
+      // via queueMicrotask so the setTechDraft write doesn't re-enter the
+      // subscribe pipeline mid-callback.
+      if (state.tool !== prev.tool && state.techDraft) {
+        queueMicrotask(() => useAppStore.getState().setTechDraft(null))
+      }
     })
 
     return () => {
@@ -2519,6 +2741,46 @@ export default function CanvasStage() {
     >
       <canvas id="cvStatic" ref={staticCanvasRef} className="cv-static" aria-hidden="true" />
       <canvas id="cvDynamic" ref={dynamicCanvasRef} className="cv-dynamic" aria-hidden="true" />
+      {/* Phase 2 18b — Technical Drawing line-tool length input. Mounts
+          when appMode is TECHNICAL, tool is tech-line, and a draft is
+          active (anchor placed, awaiting end-point). onCommit + onCancel
+          read store state via getState() and mutate via addTechnicalShape
+          + setTechDraft — no closure dependency on the useEffect-internal
+          state machine. The input itself subscribes to cursorX/cursorY
+          for its absolute position. */}
+      {appMode === 'TECHNICAL' && tool === 'tech-line' && techDraftActive && (
+        <TechLengthInput
+          onCommit={(parsedInches) => {
+            const s = useAppStore.getState()
+            const d = s.techDraft
+            if (!d || !d.a) return
+            const v = s.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+            // Convert current cursor (canvas px) → TECHNICAL world coords.
+            const cursorW = {
+              x: (s.cursorX - v.panX) / (v.zoom || 1),
+              y: (s.cursorY - v.panY) / (v.zoom || 1),
+            }
+            const dx = cursorW.x - d.a.x
+            const dy = cursorW.y - d.a.y
+            const dist = Math.hypot(dx, dy)
+            // If cursor is on top of anchor (dist=0) use right-facing
+            // default direction so commit doesn't NaN.
+            const ux = dist > 0 ? dx / dist : 1
+            const uy = dist > 0 ? dy / dist : 0
+            const targetPx = parsedInches * PX_PER_INCH
+            const b = { x: d.a.x + ux * targetPx, y: d.a.y + uy * targetPx }
+            s.addTechnicalShape({
+              type: 'line',
+              a: d.a,
+              b,
+              lengthInches: parsedInches,
+              lengthSource: 'typed',
+            })
+            s.setTechDraft(null)
+          }}
+          onCancel={() => useAppStore.getState().setTechDraft(null)}
+        />
+      )}
       {ctxMenu && (
         <ContextMenu
           x={ctxMenu.x}

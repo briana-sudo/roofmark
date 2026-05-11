@@ -1146,6 +1146,58 @@ body {
   background: rgba(248, 81, 73, 0.12);
 }
 
+/* ---- Technical Drawing — tool button + length input (Phase 2 18b) ---- */
+.tool-btn.tech-btn {
+  /* Subtle accent so the technical group reads visually distinct from the
+     viewport/Field Markup buttons. Same sizing as other .tool-btn rules. */
+  border-color: var(--rm-border);
+}
+.tool-btn.tech-btn.active {
+  background: rgba(63, 185, 80, 0.18);
+  border-color: #3fb950;
+  color: #d2f8d8;
+}
+.tech-length-input {
+  position: absolute;
+  z-index: 100;
+  background: var(--rm-panel);
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  padding: 6px 8px;
+  font-family: var(--rm-sans);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: auto;
+}
+.tech-length-label {
+  color: var(--rm-fg-dim);
+  font-size: 11px;
+  user-select: none;
+}
+.tech-length-field {
+  width: 110px;
+  padding: 4px 6px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  color: var(--rm-fg);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.tech-length-field:focus {
+  border-color: #3fb950;
+}
+.tech-length-field.invalid {
+  border-color: var(--rm-red);
+}
+.tech-length-field.invalid:focus {
+  border-color: var(--rm-red);
+}
+
 /* ---- Context menu (Step 9) ---- */
 .context-menu {
   position: absolute;

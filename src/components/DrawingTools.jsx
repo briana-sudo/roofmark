@@ -463,6 +463,32 @@ export default function DrawingTools() {
       </>
       )}
 
+      {/* Phase 2 18b (May 10 2026) — Technical Drawing tool group.
+          Renders only under appMode === 'TECHNICAL'. 18b ships the line
+          tool; 18c+ adds rect / arc / callout / etc. Tool ids use the
+          `tech-` prefix to stay disjoint from Field Markup tool ids
+          (poly / rect / etc.) — the dispatch sites in CanvasStage rely
+          on this discipline to route correctly. */}
+      {appMode === 'TECHNICAL' && (
+      <>
+      <div className="tool-group" data-tool-group="technical">
+        <button
+          type="button"
+          className={tool === 'tech-line' ? 'tool-btn tech-btn active' : 'tool-btn tech-btn'}
+          onClick={() => onSelect('tech-line', appMode !== 'TECHNICAL')}
+          disabled={appMode !== 'TECHNICAL'}
+          title="Line — click anchor, type length (or click end). Enter commits typed; click commits freehand."
+          aria-pressed={tool === 'tech-line'}
+          data-tool="tech-line"
+        >
+          <span className="tool-icon" aria-hidden="true">╱</span>
+          <span className="tool-name">Line</span>
+        </button>
+      </div>
+      <span className="tool-divider" aria-hidden="true" />
+      </>
+      )}
+
       {/* Group 5: Viewport controls.
           Section 7.A.5 — viewport controls. Visible always (Rule 28); cyan
           tint differentiates them from drawing / annotation tools. Status
