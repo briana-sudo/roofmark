@@ -296,10 +296,19 @@ export function findTechSnapTarget(cursorWorld, contextShapes, allTechnicalLayer
  * math. Returns a NEW shape (origin shape unchanged) — caller writes
  * via updateTechnicalShapeNoUndo.
  *
+ * For move/copy: payload = {dx, dy} in CANVAS PIXELS (already converted
+ * from any operator-typed inches by the caller; typically by
+ * commitMoveCommand / commitCopyCommand at the store boundary, OR by
+ * the CanvasStage mousemove live-preview which uses cursor pixel
+ * deltas directly). Adding raw inches here would produce 1/24 of
+ * expected motion — see 18d-edit boundary-fix May 11 2026.
+ *
+ * For rotate: payload = {angleDegrees} — unitless.
+ *
  * @param {'rotate' | 'move' | 'copy'} command
  * @param {Object} originShape - pre-command shape (deep clone)
- * @param {{x, y}} basePoint - command base point in world coords
- * @param {Object} payload - {angleDegrees} for rotate; {dx, dy} for move/copy
+ * @param {{x, y}} basePoint - command base point in world coords (pixels)
+ * @param {Object} payload - {angleDegrees} for rotate; {dx, dy} in PIXELS for move/copy
  * @returns {Object} transformed shape
  */
 export function applyCommandTransform(command, originShape, basePoint, payload) {

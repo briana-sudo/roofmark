@@ -22,23 +22,34 @@ const fs = require('fs')
 // --------------------------------------------------------------------
 // Shim-load three pure modules.
 // --------------------------------------------------------------------
-function loadModule(relpath, returnNames) {
+function loadModule(relpath, returnNames, preamble) {
   const src = fs.readFileSync(
     path.join(__dirname, '..', relpath),
     'utf-8'
   )
-  // Strip `export ` from `export function` / `export const` so the
-  // declarations live in module scope when eval'd.
+  // Strip `import` lines (18d-edit follow-on May 11 2026 hoisted
+  // PX_PER_INCH to a shared techConstants module — techLineCommit
+  // now imports it instead of defining inline). Strip `export ` from
+  // `export function` / `export const` so the declarations live in
+  // module scope when eval'd.
   const transformed = src
+    .replace(/^import[^\n]+\n/gm, '')
     .replace(/export\s+function/g, 'function')
     .replace(/export\s+const/g, 'const')
-  const factory = new Function(`${transformed}\nreturn { ${returnNames.join(', ')} }`)
+  const body = (preamble || '') + '\n' + transformed
+  const factory = new Function(`${body}\nreturn { ${returnNames.join(', ')} }`)
   return factory()
 }
 
 const { parseLength } = loadModule('src/utils/parseLength.js', ['parseLength'])
 const { parseAngle } = loadModule('src/utils/parseAngle.js', ['parseAngle'])
-const { commitTechLine } = loadModule('src/utils/techLineCommit.js', ['commitTechLine'])
+const { commitTechLine } = loadModule(
+  'src/utils/techLineCommit.js',
+  ['commitTechLine'],
+  // 18d-edit follow-on (May 11 2026) — PX_PER_INCH was hoisted to a
+  // separate techConstants module. Seed it for the eval-shim.
+  'const PX_PER_INCH = 24',
+)
 
 const tests = []
 function pass(name, ok, extra) {

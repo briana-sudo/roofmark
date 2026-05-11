@@ -5,6 +5,12 @@ import { parseAngle } from '../utils/parseAngle'
 import { parseMoveInput } from '../utils/parseMoveInput'
 import { commitTechLine } from '../utils/techLineCommit'
 import { techShapeCentroid } from '../utils/techGeometry'
+// 18d-edit boundary fix (May 11 2026) — operator-typed grip-edit delta
+// is in INCHES; shape coords are canvas PIXELS. Convert at this caller
+// (the store's commitGripEditCommand receives newPoint already in
+// pixels). Imported from shared techConstants to match the convention
+// used by commitMoveCommand / commitCopyCommand in the store.
+import { PX_PER_INCH } from '../utils/techConstants'
 
 /**
  * TechInputPanel — Phase 2 sub-step 18d-edit (May 11 2026).
@@ -271,9 +277,15 @@ export default function TechInputPanel() {
     if (!techGripEdit) return
     const delta = parseMoveInput(rawGripInput)
     if (!delta) return
+    // 18d-edit boundary fix (May 11 2026) — parseMoveInput returns
+    // operator-typed INCHES. techGripEdit.originPoint is in canvas
+    // PIXELS (read from the live shape's a or b field at grip-pick
+    // time). Multiply at this boundary before adding to the origin.
+    const dxPx = delta.dx * PX_PER_INCH
+    const dyPx = delta.dy * PX_PER_INCH
     const newPoint = {
-      x: techGripEdit.originPoint.x + delta.dx,
-      y: techGripEdit.originPoint.y + delta.dy,
+      x: techGripEdit.originPoint.x + dxPx,
+      y: techGripEdit.originPoint.y + dyPx,
     }
     // Use store action for consistency with click-commit path AND for
     // testability (the Node test runner calls commitGripEditCommand

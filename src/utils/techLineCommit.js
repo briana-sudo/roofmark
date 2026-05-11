@@ -30,7 +30,9 @@
 // the caller (so the test runner can mock them).
 // ============================================================================
 
-const PX_PER_INCH = 24
+// 18d-edit follow-on (May 11 2026) — PX_PER_INCH hoisted to
+// src/utils/techConstants.js as the single source of truth.
+import { PX_PER_INCH } from './techConstants'
 
 export function commitTechLine({
   anchor,             // {x, y} world coords

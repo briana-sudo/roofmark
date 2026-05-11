@@ -1085,6 +1085,192 @@ function makeUndoStore() {
 }
 
 // ============================================================================
+// BOUNDARY-CROSSING tests (55–67) — Phase 2 18d-edit follow-on
+// (operator-reported May 11 2026 on live build `ACDM_-uv`).
+//
+// parseMoveInput returns OPERATOR-TYPED INCHES. Conversion to canvas
+// pixels (× PX_PER_INCH = 24) happens at the store-action boundary
+// (commitMoveCommand, commitCopyCommand) and at the TechInputPanel
+// grip-edit boundary. These tests route operator strings through the
+// FULL chain (raw string → parseMoveInput → conversion → commit) and
+// assert final pixel positions match raw-inches × PX_PER_INCH.
+//
+// Pre-fix the parseMoveInput tests AND commit-action tests both
+// passed individually but never together — false-positive coverage
+// that hid the inches-vs-pixels unit mismatch. These tests close that
+// gap by exercising both layers in one assertion.
+// ============================================================================
+
+const PX_PER_INCH_TEST = 24
+
+// Production-mirror commit functions that wrap inputs THROUGH the
+// inches→pixels conversion. These mirror the post-fix store actions
+// (commitMoveCommand, commitCopyCommand) and the post-fix
+// TechInputPanel.commitTypedGripEdit. Mock state is bare-bones
+// technicalLayers; preSnap pushing is verified separately in the
+// existing undo tests (41-54) so these helpers focus on the math.
+function moveOriginByTypedInches(origin, rawInput) {
+  const delta = parseMoveInput(rawInput)
+  if (!delta) return null
+  return {
+    ...origin,
+    a: { x: origin.a.x + delta.dx * PX_PER_INCH_TEST, y: origin.a.y + delta.dy * PX_PER_INCH_TEST },
+    b: { x: origin.b.x + delta.dx * PX_PER_INCH_TEST, y: origin.b.y + delta.dy * PX_PER_INCH_TEST },
+  }
+}
+function copyOriginByTypedInches(origin, rawInput, newId) {
+  const delta = parseMoveInput(rawInput)
+  if (!delta) return null
+  return {
+    ...origin,
+    id: newId,
+    a: { x: origin.a.x + delta.dx * PX_PER_INCH_TEST, y: origin.a.y + delta.dy * PX_PER_INCH_TEST },
+    b: { x: origin.b.x + delta.dx * PX_PER_INCH_TEST, y: origin.b.y + delta.dy * PX_PER_INCH_TEST },
+  }
+}
+function gripEditByTypedInches(originPoint, rawInput) {
+  const delta = parseMoveInput(rawInput)
+  if (!delta) return null
+  return {
+    x: originPoint.x + delta.dx * PX_PER_INCH_TEST,
+    y: originPoint.y + delta.dy * PX_PER_INCH_TEST,
+  }
+}
+
+// 55. Move "24, 0" — 24 inches × 24 = 576 px right.
+{
+  const origin = { type: 'line', a: { x: 0, y: 0 }, b: { x: 96, y: 0 } }
+  const moved = moveOriginByTypedInches(origin, '24, 0')
+  pass('55a. Move "24, 0" → a.x = 576 (24 inches × 24)',
+    moved.a.x === 576 && moved.a.y === 0)
+  pass('55b. Move "24, 0" → b.x = 672 (96 + 576)',
+    moved.b.x === 672 && moved.b.y === 0)
+}
+
+// 56. Move "0, 12" — 12 inches × 24 = 288 px down.
+{
+  const origin = { type: 'line', a: { x: 100, y: 100 }, b: { x: 196, y: 100 } }
+  const moved = moveOriginByTypedInches(origin, '0, 12')
+  pass('56a. Move "0, 12" → a.y = 388 (100 + 12×24)',
+    moved.a.x === 100 && moved.a.y === 388)
+  pass('56b. Move "0, 12" → b.y = 388', moved.b.y === 388)
+}
+
+// 57. Move "24 @ 0" — 24 inches at 0° = (576, 0).
+{
+  const origin = { type: 'line', a: { x: 0, y: 0 }, b: { x: 96, y: 0 } }
+  const moved = moveOriginByTypedInches(origin, '24 @ 0')
+  pass('57a. Move "24 @ 0" → a.x = 576 (cos 0° = 1)',
+    near(moved.a.x, 576) && near(moved.a.y, 0))
+  pass('57b. Move "24 @ 0" → b.x = 672', near(moved.b.x, 672))
+}
+
+// 58. Move "24 @ 90" — 24 inches × 24 = 576 px DOWN in canvas Y-down.
+{
+  const origin = { type: 'line', a: { x: 0, y: 0 }, b: { x: 96, y: 0 } }
+  const moved = moveOriginByTypedInches(origin, '24 @ 90')
+  pass('58a. Move "24 @ 90" → a.x ≈ 0 (cos 90° = 0)', near(moved.a.x, 0))
+  pass('58b. Move "24 @ 90" → a.y ≈ 576 (sin 90° = 1, × 24 px/in × 24 in)',
+    near(moved.a.y, 576))
+}
+
+// 59. Move "24 @ 45" — 24 inches × 24 px/in = 576 px at 45° =
+//     (576 * cos 45°, 576 * sin 45°) ≈ (407.29, 407.29).
+{
+  const origin = { type: 'line', a: { x: 0, y: 0 }, b: { x: 96, y: 0 } }
+  const moved = moveOriginByTypedInches(origin, '24 @ 45')
+  const expected = 576 / Math.sqrt(2)
+  pass('59a. Move "24 @ 45" → a.x ≈ 407.29', near(moved.a.x, expected, 0.01))
+  pass('59b. Move "24 @ 45" → a.y ≈ 407.29', near(moved.a.y, expected, 0.01))
+}
+
+// 60. Move "1'6, 0" — 18 inches × 24 = 432 px right.
+{
+  const origin = { type: 'line', a: { x: 0, y: 0 }, b: { x: 96, y: 0 } }
+  const moved = moveOriginByTypedInches(origin, "1'6, 0")
+  pass('60a. Move "1\'6, 0" → a.x = 432 (18 inches × 24)', moved.a.x === 432)
+  pass('60b. Move "1\'6, 0" → b.x = 528', moved.b.x === 528)
+}
+
+// 61. Copy "24, 0" — clone at +576 px, original unchanged.
+{
+  const origin = { id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 96, y: 0 } }
+  const clone = copyOriginByTypedInches(origin, '24, 0', 'sh2')
+  pass('61a. Copy clone at a.x = 576', clone.a.x === 576 && clone.b.x === 672)
+  pass('61b. Copy clone has new ID', clone.id === 'sh2')
+  pass('61c. Copy original UNCHANGED',
+    origin.a.x === 0 && origin.b.x === 96)
+}
+
+// 62. Copy "1'6 @ 4/12" — 18 inches × 24 = 432 px at pitch 4/12 (~18.43°).
+//     dx = 432 * cos(18.43°), dy = 432 * sin(18.43°).
+{
+  const origin = { id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 96, y: 0 } }
+  const clone = copyOriginByTypedInches(origin, "1'6 @ 4/12", 'sh2')
+  const angle = Math.atan(4 / 12)
+  pass('62a. Copy "1\'6 @ 4/12" → clone a.x ≈ 409.67',
+    near(clone.a.x, 432 * Math.cos(angle), 0.05))
+  pass('62b. Copy "1\'6 @ 4/12" → clone a.y ≈ 136.56',
+    near(clone.a.y, 432 * Math.sin(angle), 0.05))
+}
+
+// 63. Grip-edit typed "12, 0" — endpoint at origin (50, 50). 12 in × 24 = 288.
+{
+  const origin = { x: 50, y: 50 }
+  const newPoint = gripEditByTypedInches(origin, '12, 0')
+  pass('63a. Grip-edit "12, 0" → new endpoint.x = 338',
+    newPoint.x === 338 && newPoint.y === 50)
+}
+
+// 64. Grip-edit typed "12 @ 45" — endpoint at (50, 50). 12 in × 24 = 288 px
+//     at 45° = (288 * cos 45°, 288 * sin 45°) ≈ (203.65, 203.65). Final
+//     endpoint ≈ (253.65, 253.65).
+{
+  const origin = { x: 50, y: 50 }
+  const newPoint = gripEditByTypedInches(origin, '12 @ 45')
+  const expected = 50 + (288 / Math.sqrt(2))
+  pass('64a. Grip-edit "12 @ 45" → new endpoint.x ≈ 253.65',
+    near(newPoint.x, expected, 0.01))
+  pass('64b. Grip-edit "12 @ 45" → new endpoint.y ≈ 253.65',
+    near(newPoint.y, expected, 0.01))
+}
+
+// 65. Zero-delta Move: shape unchanged, no boundary-conversion drift.
+{
+  const origin = { type: 'line', a: { x: 17, y: 23 }, b: { x: 89, y: 31 } }
+  const moved = moveOriginByTypedInches(origin, '0, 0')
+  pass('65a. Zero-delta Move: a unchanged',
+    moved.a.x === 17 && moved.a.y === 23)
+  pass('65b. Zero-delta Move: b unchanged',
+    moved.b.x === 89 && moved.b.y === 31)
+}
+
+// 66. Multi-shape Copy with typed "24, 0" — all 3 clones at +576 px.
+{
+  const origins = [
+    { id: 'a', type: 'line', a: { x: 0, y: 0 }, b: { x: 10, y: 0 } },
+    { id: 'b', type: 'line', a: { x: 0, y: 50 }, b: { x: 10, y: 50 } },
+    { id: 'c', type: 'line', a: { x: 0, y: 100 }, b: { x: 10, y: 100 } },
+  ]
+  const clones = origins.map((o, i) => copyOriginByTypedInches(o, '24, 0', `${o.id}-c${i}`))
+  pass('66a. Clone 1 at a.x = 576', clones[0].a.x === 576 && clones[0].b.x === 586)
+  pass('66b. Clone 2 at a.x = 576', clones[1].a.x === 576 && clones[1].a.y === 50)
+  pass('66c. Clone 3 at a.x = 576', clones[2].a.x === 576 && clones[2].a.y === 100)
+}
+
+// 67. Sequential typed commits: Move "24, 0" then Move "0, 12".
+//     Final position = original + (576, 288).
+{
+  let shape = { type: 'line', a: { x: 100, y: 50 }, b: { x: 124, y: 50 } }
+  shape = moveOriginByTypedInches(shape, '24, 0')   // +576 x
+  shape = moveOriginByTypedInches(shape, '0, 12')   // +288 y
+  pass('67a. Sequential moves: final a.x = 676 (100 + 576)',
+    shape.a.x === 676 && shape.a.y === 338)
+  pass('67b. Sequential moves: final b.x = 700 (124 + 576)',
+    shape.b.x === 700 && shape.b.y === 338)
+}
+
+// ============================================================================
 // SUMMARY
 // ============================================================================
 const passCount = tests.filter((t) => t.ok).length

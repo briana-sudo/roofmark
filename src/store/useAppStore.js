@@ -205,7 +205,11 @@ const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE'])
 // Phase 2 18b — Technical Drawing internal scale. Kickoff Spec §21:
 // "24px = 1 inch" defines the canvas-pixel ↔ real-world-inch mapping.
 // Used by addTechnicalShape / parseLength / drawStatic at render time.
-export const PX_PER_INCH = 24
+// 18d-edit follow-on (May 11 2026) — hoisted into src/utils/techConstants.js
+// as the single source of truth. Re-exported here for backward
+// compatibility with existing imports (CanvasStage etc.).
+import { PX_PER_INCH as PX_PER_INCH_CONST } from '../utils/techConstants'
+export const PX_PER_INCH = PX_PER_INCH_CONST
 // Phase 2 18b — default Technical layer name when auto-created on first
 // shape commit. Operator can rename via the layer-panel UI in 18c+.
 export const TECHNICAL_LAYER_NAME_DEFAULT = 'Layer 1'
@@ -1862,18 +1866,28 @@ export const useAppStore = create((set, get) => {
       }
     },
 
-    // Move commit: translate every origin shape by (dx, dy), write
-    // live, push preSnap.
+    // Move commit: translate every origin shape by (dx, dy) inches,
+    // write live, push preSnap. Operator-facing units bug fix (May 11
+    // 2026): delta comes from parseMoveInput which returns operator-
+    // typed INCHES (e.g., `"24, 0"` → {dx: 24, dy: 0} inches). Shape
+    // coords (a.x, a.y, b.x, b.y) are stored in canvas PIXELS at
+    // zoom=1. Multiply by PX_PER_INCH at this boundary. Pre-fix
+    // operator saw 1/24 of expected motion. Tests 55-67 verify the
+    // boundary contract by routing operator strings through parser
+    // + commit together (pre-fix tests checked the layers in
+    // isolation and missed the cross-layer bug).
     commitMoveCommand: (origins, delta, preSnap) => {
       if (!Array.isArray(origins) || origins.length === 0 || !delta) return
+      const dxPx = delta.dx * PX_PER_INCH_CONST
+      const dyPx = delta.dy * PX_PER_INCH_CONST
       set((s) => {
         let nextLayers = s.technicalLayers
         for (const orig of origins) {
           if (!orig || orig.type !== 'line' || !orig.a || !orig.b) continue
           const moved = {
             ...orig,
-            a: { x: orig.a.x + delta.dx, y: orig.a.y + delta.dy },
-            b: { x: orig.b.x + delta.dx, y: orig.b.y + delta.dy },
+            a: { x: orig.a.x + dxPx, y: orig.a.y + dyPx },
+            b: { x: orig.b.x + dxPx, y: orig.b.y + dyPx },
           }
           nextLayers = nextLayers.map((l) => ({
             ...l,
@@ -1921,7 +1935,12 @@ export const useAppStore = create((set, get) => {
     // addTechnicalShape / deleteTechnicalShape per shape, each of which
     // pushes its own snapshot).
     commitCopyCommand: (origins, delta, preSnap) => {
-      if (!Array.isArray(origins) || origins.length === 0) return
+      if (!Array.isArray(origins) || origins.length === 0 || !delta) return
+      // 18d-edit boundary fix (May 11 2026) — delta is operator-typed
+      // INCHES; shape coords are canvas PIXELS. Multiply by
+      // PX_PER_INCH here, same as commitMoveCommand.
+      const dxPx = delta.dx * PX_PER_INCH_CONST
+      const dyPx = delta.dy * PX_PER_INCH_CONST
       set((s) => {
         let nextLayers = s.technicalLayers
         for (const orig of origins) {
@@ -1933,8 +1952,8 @@ export const useAppStore = create((set, get) => {
           const newShape = {
             ...orig,
             id: newTechShapeId(),
-            a: { x: orig.a.x + delta.dx, y: orig.a.y + delta.dy },
-            b: { x: orig.b.x + delta.dx, y: orig.b.y + delta.dy },
+            a: { x: orig.a.x + dxPx, y: orig.a.y + dyPx },
+            b: { x: orig.b.x + dxPx, y: orig.b.y + dyPx },
           }
           nextLayers = nextLayers.map((l, i) =>
             i === layerIdx ? { ...l, shapes: [...l.shapes, newShape] } : l
