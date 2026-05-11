@@ -1247,38 +1247,56 @@ body {
   user-select: none;
 }
 
-/* Phase 2 18d-pivot (May 11 2026) — Set Pivot button. Three states:
-   default (no border highlight), picking (orange-filled + pulse), locked
-   (cyan-filled, matches the rotation grip color on canvas). Lives inline
-   in the rotation input row, right of the Rotate input. */
-.tech-input-panel .tech-pivot-btn {
-  padding: 2px 10px;
+/* Phase 2 18d-edit (May 11 2026) — AutoCAD command bar. Replaces the
+   18d-pivot Set Pivot button. Three render variants in TechInputPanel:
+     - command-button bar: [Rotate] [Move] [Copy] [Delete]
+     - active-command prompt: prompt text + input + Cancel
+     - grip-edit prompt: prompt + input (no Cancel — Escape exits) */
+.tech-input-panel .cmd-btn {
+  padding: 4px 10px;
   font-size: 11px;
   background: var(--rm-panel-2);
   border: 1px solid var(--rm-border);
   border-radius: 3px;
-  color: var(--rm-fg-dim);
+  color: var(--rm-fg);
   cursor: pointer;
   white-space: nowrap;
   font-family: inherit;
+  margin-right: 4px;
 }
-.tech-input-panel .tech-pivot-btn:hover {
-  color: var(--rm-fg);
+.tech-input-panel .cmd-btn:hover {
+  background: var(--rm-panel);
+  border-color: #3fb950;
 }
-.tech-input-panel .tech-pivot-btn.picking {
-  background: #e8531a;
+.tech-input-panel .cmd-btn.cmd-danger {
+  color: var(--rm-red);
+  border-color: var(--rm-border);
+}
+.tech-input-panel .cmd-btn.cmd-danger:hover {
+  background: var(--rm-red);
   color: white;
-  border-color: #e8531a;
-  animation: tech-pivot-pulse 1.2s ease-in-out infinite;
+  border-color: var(--rm-red);
 }
-.tech-input-panel .tech-pivot-btn.locked {
-  background: #06b6d4;
-  color: white;
-  border-color: #06b6d4;
+.tech-input-panel .cmd-prompt {
+  font-size: 11px;
+  color: var(--rm-fg-dim);
+  margin-right: 8px;
+  white-space: nowrap;
+  user-select: none;
 }
-@keyframes tech-pivot-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.65; }
+.tech-input-panel .cmd-cancel {
+  padding: 2px 10px;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid var(--rm-border);
+  border-radius: 3px;
+  cursor: pointer;
+  color: var(--rm-fg-dim);
+  font-family: inherit;
+}
+.tech-input-panel .cmd-cancel:hover {
+  color: var(--rm-red);
+  border-color: var(--rm-red);
 }
 
 /* ---- Context menu (Step 9) ---- */

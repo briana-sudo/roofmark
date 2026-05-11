@@ -508,44 +508,35 @@ const initialState = {
   // 'tech-select', clearAll, importJSON, and Escape when no rotation
   // drag is in progress.
   techSelected: [],
-  // Phase 2 18d — operator's typed rotation value in degrees while
-  // selection is active. null = no typed value (rubber-band-equivalent
-  // for rotation = drag handle only). Transient.
-  techRotationInput: null,
-  // Phase 2 18d-pivot (May 11 2026) — operator-chosen rotation pivot,
-  // mirrors AutoCAD's ROTATE base-point workflow. All three transient.
-  // NOT in PERSIST_KEYS. NOT in dataSnapshot. The rotation MUTATIONS
-  // to shape geometry persist via technicalLayers; the pivot itself is
-  // UI state that resets to centroid after each commit per operator
-  // decision (May 11 2026).
-  //   techPivot: {x, y} | null   — locked pivot in TECHNICAL world coords.
-  //                                null = use centroid (single-select)
-  //                                or bbox centroid (multi-select).
-  //   techPivotPickMode: boolean — true while operator is hovering canvas
-  //                                to pick a pivot via "Set pivot" button.
-  //                                Click locks the hovered pivot.
-  //   techPivotHover: {x, y, type} | null
-  //                              — current snap target under cursor while
-  //                                in pick mode. type is 'endpoint' or
-  //                                'midpoint'. Read by drawDynamic for
-  //                                the diamond snap indicator.
-  techPivot: null,
-  techPivotPickMode: false,
-  techPivotHover: null,
-  // Phase 2 18d-pivot live-rotation (operator-reported May 11 2026 on
-  // `76039e2`) — when pivot locks, capture every selected shape's
-  // pre-rotation geometry + one undo snapshot. These let:
-  //   - mousemove live-rotate from the originShapes baseline (so the
-  //     line follows the cursor instead of accumulating per-tick
-  //     rotation — operator sees a clean "where my cursor is = where
-  //     the line points"),
-  //   - Escape / Pivot ↺ revert shapes to pre-pivot orientation,
-  //   - typed-Enter rotation use originShapes as the absolute baseline
-  //     (so "Rotate 45°" always means 45° from the pre-pivot state).
-  // null when no pivot is locked. Cleared at every existing pivot
-  // clear site.
-  techPivotOriginShapes: null,
-  techPivotPreChangeSnap: null,
+  // Phase 2 18d-edit (May 11 2026) — AutoCAD command pattern. Replaces
+  // the 18d-pivot rotation-only state shape with a per-command state
+  // machine that handles Rotate / Move / Copy / Delete + endpoint
+  // grip edits. All transient. NOT in PERSIST_KEYS. NOT in dataSnapshot.
+  //
+  //   techActiveCommand: 'rotate' | 'move' | 'copy' | null
+  //   techCommandBasePoint: {x, y} | null    — base point in world coords
+  //                                            once operator clicked it
+  //   techCommandOriginShapes: Array<shape>  — deep clones at base-point
+  //                                            click (live preview source,
+  //                                            revert target on Escape)
+  //   techCommandPreSnap: string | null      — captured undo snapshot
+  //                                            for one-undo-per-command
+  //   techCommandInput: number | {dx,dy} | null
+  //                                          — parsed typed-input value:
+  //                                            number for rotate degrees,
+  //                                            {dx,dy} for move/copy
+  //   techCommandHover: {x, y, type} | null  — snap target while picking
+  //                                            base point or while grip
+  //                                            editing
+  //   techGripEdit: {layerId, shapeId, pointKey: 'a'|'b', originPoint,
+  //                  preSnap} | null         — active endpoint grip edit
+  techActiveCommand: null,
+  techCommandBasePoint: null,
+  techCommandOriginShapes: null,
+  techCommandPreSnap: null,
+  techCommandInput: null,
+  techCommandHover: null,
+  techGripEdit: null,
   // Phase 2 18b/18c — Technical Drawing line-tool draft state.
   // Transient. NOT in PERSIST_KEYS. null when no draft in progress.
   // Active shape:
@@ -1456,16 +1447,16 @@ export const useAppStore = create((set, get) => {
           techDraft: null,
           // Phase 2 18d — selection is mode-scoped; entering FIELD
           // shouldn't leave TECHNICAL shapes "selected" in the back-
-          // ground. Same goes for the transient typed rotation value.
+          // ground. 18d-edit (May 11 2026) — also wipe all command +
+          // grip-edit state.
           techSelected: [],
-          techRotationInput: null,
-          // 18d-pivot — pivot state is selection-scoped; mode change
-          // wipes all three (locked pivot, pick-mode flag, hover snap).
-          techPivot: null,
-          techPivotPickMode: false,
-          techPivotHover: null,
-          techPivotOriginShapes: null,
-          techPivotPreChangeSnap: null,
+          techActiveCommand: null,
+          techCommandBasePoint: null,
+          techCommandOriginShapes: null,
+          techCommandPreSnap: null,
+          techCommandInput: null,
+          techCommandHover: null,
+          techGripEdit: null,
         }
       })
     },
@@ -1713,14 +1704,15 @@ export const useAppStore = create((set, get) => {
         return {
           tool,
           techSelected: [],
-          techRotationInput: null,
-          // 18d-pivot — pivot state is tied to the Select tool;
-          // switching away wipes it.
-          techPivot: null,
-          techPivotPickMode: false,
-          techPivotHover: null,
-          techPivotOriginShapes: null,
-          techPivotPreChangeSnap: null,
+          // 18d-edit — selection + all command/grip state is tied to
+          // the Select tool; switching away wipes it.
+          techActiveCommand: null,
+          techCommandBasePoint: null,
+          techCommandOriginShapes: null,
+          techCommandPreSnap: null,
+          techCommandInput: null,
+          techCommandHover: null,
+          techGripEdit: null,
         }
       }
       return { tool }
@@ -1792,31 +1784,83 @@ export const useAppStore = create((set, get) => {
 
     clearTechSelection: () => set({
       techSelected: [],
-      // 18d-pivot — selection cleared means there's no shape to rotate
-      // around. Reset all pivot state so a returning operator doesn't
-      // inherit a stale pivot from a different selection.
-      techPivot: null,
-      techPivotPickMode: false,
-      techPivotHover: null,
-      techPivotOriginShapes: null,
-      techPivotPreChangeSnap: null,
+      // 18d-edit — selection cleared means there's no shape to operate
+      // on. Reset all command/grip state so a returning operator
+      // doesn't inherit a stale command from a different selection.
+      techActiveCommand: null,
+      techCommandBasePoint: null,
+      techCommandOriginShapes: null,
+      techCommandPreSnap: null,
+      techCommandInput: null,
+      techCommandHover: null,
+      techGripEdit: null,
     }),
 
-    // 18d — Transient typed rotation value. Cleared on selection clear,
-    // on rotation commit, and on Escape.
-    setTechRotationInput: (value) => set({ techRotationInput: value }),
+    // 18d-edit (May 11 2026) — AutoCAD command-state setters. Simple
+    // pass-throughs; no validation. Canvas dispatch + TechInputPanel
+    // call paths ensure well-formed values.
+    setTechActiveCommand: (cmd) => set({ techActiveCommand: cmd }),
+    setTechCommandBasePoint: (point) => set({ techCommandBasePoint: point }),
+    setTechCommandOriginShapes: (arr) => set({ techCommandOriginShapes: arr }),
+    setTechCommandPreSnap: (snap) => set({ techCommandPreSnap: snap }),
+    setTechCommandInput: (value) => set({ techCommandInput: value }),
+    setTechCommandHover: (target) => set({ techCommandHover: target }),
+    setTechGripEdit: (obj) => set({ techGripEdit: obj }),
 
-    // 18d-pivot (May 11 2026) — operator-chosen rotation pivot. Three
-    // setters mirror the state-field naming. No validation beyond shape
-    // (the resolveTechPivot helper in techGeometry.js handles null
-    // gracefully; the canvas dispatch / TechInputPanel call paths
-    // ensure only well-formed values get written).
-    setTechPivot: (point) => set({ techPivot: point }),
-    setTechPivotPickMode: (active) => set({ techPivotPickMode: !!active }),
-    setTechPivotHover: (target) => set({ techPivotHover: target }),
-    // 18d-pivot live-rotation — origin-shape snapshot + pre-change undo snap.
-    setTechPivotOriginShapes: (arr) => set({ techPivotOriginShapes: arr }),
-    setTechPivotPreChangeSnap: (snap) => set({ techPivotPreChangeSnap: snap }),
+    // 18d-edit Copy + Delete with single-snapshot undo. Both commands
+    // mutate technicalLayers in a single set() call so an N-shape Copy
+    // or Delete is one undo entry (vs. N entries when calling
+    // addTechnicalShape / deleteTechnicalShape per shape, each of which
+    // pushes its own snapshot).
+    commitCopyCommand: (origins, delta, preSnap) => {
+      if (!Array.isArray(origins) || origins.length === 0) return
+      set((s) => {
+        let nextLayers = s.technicalLayers
+        for (const orig of origins) {
+          const layerIdx = nextLayers.findIndex((l) =>
+            (l.shapes || []).some((sh) => sh.id === orig.id)
+          )
+          if (layerIdx < 0) continue
+          if (orig.type !== 'line') continue
+          const newShape = {
+            ...orig,
+            id: newTechShapeId(),
+            a: { x: orig.a.x + delta.dx, y: orig.a.y + delta.dy },
+            b: { x: orig.b.x + delta.dx, y: orig.b.y + delta.dy },
+          }
+          nextLayers = nextLayers.map((l, i) =>
+            i === layerIdx ? { ...l, shapes: [...l.shapes, newShape] } : l
+          )
+        }
+        return { technicalLayers: nextLayers }
+      })
+      if (typeof preSnap === 'string') {
+        set((s) => {
+          const next = [...s.undoStack, preSnap]
+          if (next.length > UNDO_LIMIT) next.shift()
+          return { undoStack: next, redoStack: [] }
+        })
+      }
+    },
+
+    commitDeleteCommand: (sel, preSnap) => {
+      if (!Array.isArray(sel) || sel.length === 0) return
+      set((s) => {
+        const selSet = new Set(sel.map((e) => e && e.shapeId).filter(Boolean))
+        const nextLayers = s.technicalLayers.map((l) => ({
+          ...l,
+          shapes: (l.shapes || []).filter((sh) => !selSet.has(sh.id)),
+        }))
+        return { technicalLayers: nextLayers }
+      })
+      if (typeof preSnap === 'string') {
+        set((s) => {
+          const next = [...s.undoStack, preSnap]
+          if (next.length > UNDO_LIMIT) next.shift()
+          return { undoStack: next, redoStack: [] }
+        })
+      }
+    },
 
     // 18d — Per-mousemove rotation drag mutator. Mirrors
     // updateTechnicalShape (same set() shape) but DOES NOT call pushUndo.
@@ -2305,17 +2349,16 @@ export const useAppStore = create((set, get) => {
         // Phase 2 18b — transient Technical Drawing draft never restores
         // from a file (same convention as perspectiveEditMode).
         techDraft: null,
-        // Phase 2 18d — selection + typed rotation are session-scoped UI
-        // state. Loaded projects start with no selection (operator picks
-        // shapes again in the freshly-loaded canvas).
+        // Phase 2 18d/18d-edit — selection + all command/grip state is
+        // session-scoped UI state. Loaded projects start clean.
         techSelected: [],
-        techRotationInput: null,
-        // 18d-pivot — pivot is session-scoped UI state. Never persisted.
-        techPivot: null,
-        techPivotPickMode: false,
-        techPivotHover: null,
-        techPivotOriginShapes: null,
-        techPivotPreChangeSnap: null,
+        techActiveCommand: null,
+        techCommandBasePoint: null,
+        techCommandOriginShapes: null,
+        techCommandPreSnap: null,
+        techCommandInput: null,
+        techCommandHover: null,
+        techGripEdit: null,
         pdfOrientation: normalizePdfOrientation(obj.pdfOrientation),
         // P45 (Phase 2 18a, May 10 2026) — Load Project clears the
         // currentFileHandle + currentFileName so the loaded file is
@@ -2568,16 +2611,16 @@ export const useAppStore = create((set, get) => {
         // New Project so a half-drawn line from the prior session doesn't
         // surface mid-input on the cleared canvas.
         techDraft: null,
-        // Phase 2 18d — selection + typed rotation cleared on New Project
-        // (same convention as `selected` for Field Markup above).
+        // Phase 2 18d/18d-edit — selection + all command/grip state
+        // cleared on New Project.
         techSelected: [],
-        techRotationInput: null,
-        // 18d-pivot — pivot cleared too.
-        techPivot: null,
-        techPivotPickMode: false,
-        techPivotHover: null,
-        techPivotOriginShapes: null,
-        techPivotPreChangeSnap: null,
+        techActiveCommand: null,
+        techCommandBasePoint: null,
+        techCommandOriginShapes: null,
+        techCommandPreSnap: null,
+        techCommandInput: null,
+        techCommandHover: null,
+        techGripEdit: null,
         // P45 (Phase 2 18a, May 10 2026) — New Project clears the
         // currentFileHandle + currentFileName so the operator's next
         // Save opens the picker fresh. Matches the Load Project

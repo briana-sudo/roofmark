@@ -183,49 +183,68 @@ export function resolveTechPivot(techPivot, selectedShapes) {
 }
 
 /**
- * Find the closest snap candidate to the cursor for pivot picking.
+ * Find the closest snap candidate to the cursor for context-aware snap
+ * (rename of 18d-pivot's findPivotSnapTarget — 18d-edit (May 11 2026)
+ * repurposes it for command base-point picking AND endpoint grip edits).
  *
  * Priority order (lower number = higher priority):
- *   1. Endpoints of currently-selected lines (operator most likely
- *      wants these — they're rotating around their own line's end).
- *   2. Midpoints of currently-selected lines.
- *   3. Endpoints of non-selected visible technical lines (snap to
- *      neighbour geometry — common CAD pattern).
+ *   1. Endpoints of `contextShapes` (currently-selected shapes for base-
+ *      point pick, or [] for grip edit — operator most likely wants
+ *      these).
+ *   2. Midpoints of `contextShapes`.
+ *   3. Endpoints of non-context, non-excluded visible technical lines
+ *      (snap to neighbour geometry — common CAD pattern).
+ *
+ * `excludeShapeIds` is the grip-edit affordance: pass the originating
+ * shape's id so the dragged endpoint can't snap to its own line
+ * (which would collapse the shape).
  *
  * Within the same priority, ties break by canvas-px distance. Returns
  * null when no candidate is within tolPx canvas-pixels — caller uses
- * the raw cursor world position as the free pivot.
+ * the raw cursor world position as the free target.
  *
- * @param {{x, y}} cursorWorld - cursor in TECHNICAL world coords (px @ zoom=1)
- * @param {Array} selectedShapes - shapes currently in techSelected
+ * @param {{x, y}} cursorWorld - cursor in TECHNICAL world coords
+ * @param {Array} contextShapes - shapes whose endpoints/midpoints get
+ *                                priority-1 / priority-2 weight (e.g.,
+ *                                currently selected shapes during a
+ *                                command base-point pick)
  * @param {Array} allTechnicalLayers - full technicalLayers array
  * @param {{panX, panY, zoom}} techViewport
  * @param {number} [tolPx=7]
+ * @param {Set|Array} [excludeShapeIds] - shape ids whose endpoints
+ *                                        should be SKIPPED entirely
+ *                                        (grip edit excludes its own
+ *                                        shape's other endpoint)
  * @returns {{x, y, type: 'endpoint' | 'midpoint'} | null}
  */
-export function findPivotSnapTarget(cursorWorld, selectedShapes, allTechnicalLayers, techViewport, tolPx) {
+export function findTechSnapTarget(cursorWorld, contextShapes, allTechnicalLayers, techViewport, tolPx, excludeShapeIds) {
   const tol = typeof tolPx === 'number' ? tolPx : 7
   const zoom = (techViewport && techViewport.zoom) || 1
   const panX = (techViewport && techViewport.panX) || 0
   const panY = (techViewport && techViewport.panY) || 0
-  // Cursor in canvas-px for distance compare.
   const cursorCanvasX = cursorWorld.x * zoom + panX
   const cursorCanvasY = cursorWorld.y * zoom + panY
 
-  // Collect candidates with explicit priority numbers.
-  const candidates = []
-  const sel = Array.isArray(selectedShapes) ? selectedShapes : []
+  // Normalize excludeShapeIds to a Set for O(1) lookups.
+  const exclude = excludeShapeIds instanceof Set
+    ? excludeShapeIds
+    : new Set(Array.isArray(excludeShapeIds) ? excludeShapeIds : [])
 
-  // Priority 1: selected line endpoints.
-  for (const sh of sel) {
+  const candidates = []
+  const ctx = Array.isArray(contextShapes) ? contextShapes : []
+
+  // Priority 1: context shape endpoints (excludes any in `exclude`).
+  for (const sh of ctx) {
     if (!sh || sh.type !== 'line' || !sh.a || !sh.b) continue
+    if (exclude.has(sh.id)) continue
     candidates.push({ worldX: sh.a.x, worldY: sh.a.y, type: 'endpoint', priority: 1 })
     candidates.push({ worldX: sh.b.x, worldY: sh.b.y, type: 'endpoint', priority: 1 })
   }
 
-  // Priority 2: selected line midpoints.
-  for (const sh of sel) {
+  // Priority 2: context shape midpoints (excludes any in `exclude`).
+  for (const sh of ctx) {
     if (!sh || sh.type !== 'line' || !sh.a || !sh.b) continue
+    if (exclude.has(sh.id)) continue
     candidates.push({
       worldX: (sh.a.x + sh.b.x) / 2,
       worldY: (sh.a.y + sh.b.y) / 2,
@@ -234,22 +253,21 @@ export function findPivotSnapTarget(cursorWorld, selectedShapes, allTechnicalLay
     })
   }
 
-  // Priority 3: non-selected visible line endpoints.
-  const selectedIds = new Set(sel.map((s) => s && s.id).filter(Boolean))
+  // Priority 3: non-context, non-excluded visible line endpoints.
+  const contextIds = new Set(ctx.map((s) => s && s.id).filter(Boolean))
   if (Array.isArray(allTechnicalLayers)) {
     for (const layer of allTechnicalLayers) {
       if (!layer || layer.visible === false) continue
       for (const sh of layer.shapes || []) {
         if (!sh || sh.type !== 'line' || !sh.a || !sh.b) continue
-        if (selectedIds.has(sh.id)) continue
+        if (contextIds.has(sh.id)) continue
+        if (exclude.has(sh.id)) continue
         candidates.push({ worldX: sh.a.x, worldY: sh.a.y, type: 'endpoint', priority: 3 })
         candidates.push({ worldX: sh.b.x, worldY: sh.b.y, type: 'endpoint', priority: 3 })
       }
     }
   }
 
-  // Single pass: pick the best candidate within tolerance, breaking ties
-  // by priority first (lower number wins), then distance.
   const tolSq = tol * tol
   let best = null
   let bestDistSq = Infinity
@@ -270,4 +288,35 @@ export function findPivotSnapTarget(cursorWorld, selectedShapes, allTechnicalLay
   }
 
   return best ? { x: best.worldX, y: best.worldY, type: best.type } : null
+}
+
+/**
+ * Apply a command transform to a shape. Single switch on command type
+ * so live preview, click commit, and typed commit all use the same
+ * math. Returns a NEW shape (origin shape unchanged) — caller writes
+ * via updateTechnicalShapeNoUndo.
+ *
+ * @param {'rotate' | 'move' | 'copy'} command
+ * @param {Object} originShape - pre-command shape (deep clone)
+ * @param {{x, y}} basePoint - command base point in world coords
+ * @param {Object} payload - {angleDegrees} for rotate; {dx, dy} for move/copy
+ * @returns {Object} transformed shape
+ */
+export function applyCommandTransform(command, originShape, basePoint, payload) {
+  if (!originShape || !payload) return originShape
+  if (command === 'rotate') {
+    if (typeof payload.angleDegrees !== 'number') return originShape
+    return rotateTechShape(originShape, basePoint, payload.angleDegrees)
+  }
+  if (command === 'move' || command === 'copy') {
+    if (typeof payload.dx !== 'number' || typeof payload.dy !== 'number') return originShape
+    if (originShape.type === 'line' && originShape.a && originShape.b) {
+      return {
+        ...originShape,
+        a: { x: originShape.a.x + payload.dx, y: originShape.a.y + payload.dy },
+        b: { x: originShape.b.x + payload.dx, y: originShape.b.y + payload.dy },
+      }
+    }
+  }
+  return originShape
 }

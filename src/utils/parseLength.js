@@ -44,7 +44,12 @@ export function parseLength(input) {
 
   // Pattern A: feet + optional inches.
   //   `1'6"`, `1' 6 "`, `1.5'`, `1' 6 in`, `1'`
-  let m = s.match(/^([0-9]+(?:\.[0-9]+)?)\s*'\s*(?:([0-9]+(?:\.[0-9]+)?)\s*(?:"|in|″))?$/i)
+  //   18d-edit (May 11 2026): also accept `1'6` (inches without trailing
+  //   unit symbol) — common when typing into a comma-form move delta
+  //   like `1'6, 0`. Inches unit symbol is now fully optional after
+  //   the feet apostrophe; the regex below makes the `"|in|″` group
+  //   itself optional.
+  let m = s.match(/^([0-9]+(?:\.[0-9]+)?)\s*'\s*(?:([0-9]+(?:\.[0-9]+)?)\s*(?:"|in|″)?)?$/i)
   if (m) {
     const feet = parseFloat(m[1])
     const inches = m[2] ? parseFloat(m[2]) : 0
