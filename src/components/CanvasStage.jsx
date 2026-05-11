@@ -30,7 +30,9 @@ import {
   // rotation-drag start handler (replaces the inline centroid calls
   // that 18d had at those sites); findPivotSnapTarget feeds the
   // hover-while-picking branch in onMouseMove.
-  resolveTechPivot, findPivotSnapTarget,
+  // techShapeCentroid is the baseline-angle reference for the
+  // 18d-pivot live-rotation handler.
+  resolveTechPivot, findPivotSnapTarget, techShapeCentroid,
 } from '../utils/techGeometry'
 
 /**
@@ -1889,6 +1891,58 @@ export default function CanvasStage() {
         return
       }
 
+      // Phase 2 18d-pivot live-rotation preview (operator-reported May 11
+      // 2026 on `76039e2`). When a pivot is locked AND origin shapes
+      // were captured, every mousemove rotates the origin shapes around
+      // the pivot so the line live-follows the cursor. Mirrors AutoCAD
+      // ROTATE: cursor IS the angle handle once pivot is set.
+      //
+      // Baseline strategy: angle from pivot to FIRST origin shape's
+      // centroid. Cursor at that same angle → no rotation. Cursor at a
+      // different angle → line rotates so its first-shape centroid is
+      // in the cursor's direction from the pivot. Operator's "rotate
+      // by hovering" mental model maps directly to this.
+      if (
+        store.techPivot
+        && store.techPivotOriginShapes
+        && store.tool === 'tech-select'
+        && !techRotateDrag
+      ) {
+        const techVPv = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+        const techZoomPv = techVPv.zoom || 1
+        const pivotCanvasX = store.techPivot.x * techZoomPv + techVPv.panX
+        const pivotCanvasY = store.techPivot.y * techZoomPv + techVPv.panY
+        // Cursor angle from pivot (in canvas-px is fine — angle is
+        // scale-invariant, so the canvas-vs-world distinction doesn't
+        // matter for atan2).
+        const cursorAngle = Math.atan2(y - pivotCanvasY, x - pivotCanvasX)
+        // Baseline: pivot → first origin centroid (world coords).
+        const firstOrig = store.techPivotOriginShapes[0]
+        const firstCentroid = firstOrig ? techShapeCentroid(firstOrig) : null
+        if (firstCentroid) {
+          const baselineAngle = Math.atan2(
+            firstCentroid.y - store.techPivot.y,
+            firstCentroid.x - store.techPivot.x,
+          )
+          const deltaRad = cursorAngle - baselineAngle
+          const deltaDeg = (deltaRad * 180) / Math.PI
+          // Rotate every origin shape around pivot by deltaDeg, write
+          // back via no-undo mutator. One undo snapshot was captured
+          // at pivot-lock time (techPivotPreChangeSnap); pushed at
+          // commit (mousedown handler 0.5 above) if anything changed.
+          for (const origShape of store.techPivotOriginShapes) {
+            const rotated = rotateTechShape(origShape, store.techPivot, deltaDeg)
+            const selEntry = store.techSelected.find((s) => s.shapeId === origShape.id)
+            if (selEntry) {
+              store.updateTechnicalShapeNoUndo(selEntry.layerId, origShape.id, rotated)
+            }
+          }
+          staticDirty = true
+          dynamicDirty = true
+        }
+        return
+      }
+
       // Phase 2 18d — Technical Drawing rotation drag. Runs BEFORE
       // Field Markup editDrag so rotation in TECHNICAL doesn't fall
       // through to FM editDrag handling (which references state that
@@ -2044,6 +2098,12 @@ export default function CanvasStage() {
           // pivot. Intercepts ALL clicks regardless of what's under the
           // cursor (snap target or empty canvas). When no snap target
           // is hovered, the click locks at the raw cursor world coords.
+          //
+          // Live-rotation fix (May 11 2026, operator-reported on
+          // `76039e2`): also capture originShapes + pre-change undo
+          // snap NOW so subsequent mousemove drives the AutoCAD-pattern
+          // live-rotation preview. Revert paths (Escape, Pivot ↺,
+          // typed-Enter) read these to restore the pre-pivot orientation.
           if (store.techPivotPickMode) {
             const hover = store.techPivotHover
             const pivot = hover
@@ -2052,20 +2112,62 @@ export default function CanvasStage() {
                   x: (raw.x - techV.panX) / (techV.zoom || 1),
                   y: (raw.y - techV.panY) / (techV.zoom || 1),
                 }
+            const selectedShapesNow = getSelectedTechShapes(store.technicalLayers, store.techSelected)
+            const originShapes = selectedShapesNow.map((sh) => JSON.parse(JSON.stringify(sh)))
+            const preChangeSnap = useAppStore.getState().captureUndoSnapshot()
             store.setTechPivot(pivot)
             store.setTechPivotPickMode(false)
             store.setTechPivotHover(null)
+            store.setTechPivotOriginShapes(originShapes)
+            store.setTechPivotPreChangeSnap(preChangeSnap)
             dynamicDirty = true
             return
           }
 
-          // 1. Rotation grip hit.
-          if (store.techSelected.length > 0) {
+          // 0.5. Phase 2 18d-pivot live-rotation commit. With a locked
+          // pivot AND captured origin shapes (mousemove may or may not
+          // have rotated yet — both cases handled below), any click on
+          // the canvas commits the current orientation. Mirrors AutoCAD
+          // ROTATE: click commits at current cursor angle.
+          if (store.techPivot && store.techPivotOriginShapes) {
+            const origShapes = store.techPivotOriginShapes
+            let changed = false
+            const liveLayers = useAppStore.getState().technicalLayers
+            for (const origShape of origShapes) {
+              let cur = null
+              for (const tl of liveLayers) {
+                const found = (tl.shapes || []).find((sh) => sh.id === origShape.id)
+                if (found) { cur = found; break }
+              }
+              if (cur && JSON.stringify(cur) !== JSON.stringify(origShape)) {
+                changed = true
+                break
+              }
+            }
+            if (changed && typeof store.techPivotPreChangeSnap === 'string') {
+              useAppStore.getState().pushCapturedSnapshot(store.techPivotPreChangeSnap)
+            }
+            // Pivot resets to centroid after every commit (operator
+            // decision May 11 2026). Clear the rest of the live-rotation
+            // state too.
+            store.setTechPivot(null)
+            store.setTechPivotOriginShapes(null)
+            store.setTechPivotPreChangeSnap(null)
+            staticDirty = true
+            dynamicDirty = true
+            return
+          }
+
+          // 1. Rotation grip hit — ONLY when techPivot is null. With
+          //    a pivot locked, the live-rotation commit above (0.5)
+          //    handles clicks; the cyan grip becomes a visual indicator
+          //    only, not a drag handle. The orange centroid grip
+          //    retains drag-to-rotate behavior for the no-pivot case.
+          if (store.techPivot === null && store.techSelected.length > 0) {
             const selectedShapes = getSelectedTechShapes(store.technicalLayers, store.techSelected)
-            // 18d-pivot — resolveTechPivot handles the operator-locked
-            // pivot OR centroid fallback in one call. Drag captures
-            // this value into originCenter and is pivot-source-agnostic
-            // for the rest of the drag.
+            // resolveTechPivot still used here for the centroid fallback.
+            // techPivot is null in this branch so it always returns the
+            // centroid; kept for symmetry with the render path.
             const center = resolveTechPivot(store.techPivot, selectedShapes)
             if (center) {
               const handleX = center.x * techV.zoom + techV.panX
@@ -2668,7 +2770,23 @@ export default function CanvasStage() {
             return
           }
           if (sEscTech.techPivot) {
+            // 18d-pivot live-rotation revert (May 11 2026): if origin
+            // shapes were captured at pivot-lock time, restore each
+            // selected shape to its pre-pivot orientation before
+            // clearing the pivot. No undo pushed (we never committed).
+            const origShapes = sEscTech.techPivotOriginShapes
+            if (Array.isArray(origShapes)) {
+              for (const origShape of origShapes) {
+                const selEntry = sEscTech.techSelected.find((s) => s.shapeId === origShape.id)
+                if (selEntry) {
+                  sEscTech.updateTechnicalShapeNoUndo(selEntry.layerId, origShape.id, origShape)
+                }
+              }
+              sEscTech.setTechPivotOriginShapes(null)
+              sEscTech.setTechPivotPreChangeSnap(null)
+            }
             sEscTech.setTechPivot(null)
+            staticDirty = true
             dynamicDirty = true
             return
           }
@@ -2935,6 +3053,10 @@ export default function CanvasStage() {
         state.techPivot !== prev.techPivot
         || state.techPivotPickMode !== prev.techPivotPickMode
         || state.techPivotHover !== prev.techPivotHover
+        // 18d-pivot live-rotation — origin shapes change AT pivot-lock
+        // time and again on revert/commit. Flipping dynamic catches the
+        // grip-color transition cleanly.
+        || state.techPivotOriginShapes !== prev.techPivotOriginShapes
       ) {
         dynamicDirty = true
       }

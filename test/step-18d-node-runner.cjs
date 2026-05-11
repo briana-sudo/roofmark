@@ -778,6 +778,241 @@ const ID_VIEWPORT = { panX: 0, panY: 0, zoom: 1 }
 }
 
 // ============================================================================
+// LIVE-ROTATION (52–59) — Phase 2 18d-pivot bug fix (May 11 2026,
+// operator-reported on `76039e2`). After locking pivot, mousemove
+// drives live rotation around the pivot via the AutoCAD ROTATE
+// pattern: cursor IS the angle handle. Click commits at current
+// cursor angle; Escape / Pivot ↺ reverts to pre-pivot orientation;
+// typed-Enter rebases from origin and applies absolute rotation.
+// ============================================================================
+
+// Replica of the production live-rotation math. Mirrors the mousemove
+// branch in CanvasStage.onMouseMove. Keep field-for-field in sync.
+function computeLiveRotation(pivot, originShape, cursorCanvasX, cursorCanvasY, techViewport) {
+  const techZoom = (techViewport && techViewport.zoom) || 1
+  const panX = (techViewport && techViewport.panX) || 0
+  const panY = (techViewport && techViewport.panY) || 0
+  const pivotCanvasX = pivot.x * techZoom + panX
+  const pivotCanvasY = pivot.y * techZoom + panY
+  const cursorAngle = Math.atan2(cursorCanvasY - pivotCanvasY, cursorCanvasX - pivotCanvasX)
+  const firstCentroid = techShapeCentroid(originShape)
+  if (!firstCentroid) return null
+  const baselineAngle = Math.atan2(firstCentroid.y - pivot.y, firstCentroid.x - pivot.x)
+  const deltaRad = cursorAngle - baselineAngle
+  const deltaDeg = (deltaRad * 180) / Math.PI
+  return rotateTechShape(originShape, pivot, deltaDeg)
+}
+
+// 52. Lock pivot at endpoint (0, 0). Origin shape: line (0,0)→(24,0).
+//     Cursor at (0, 24) canvas (directly below pivot at canvas (0,0)
+//     with identity viewport). Cursor angle = π/2 = 90°. Baseline
+//     angle = direction from (0,0) to (12, 0) midpoint = 0°. Delta =
+//     90°. Line rotates 90° around (0,0): b should land at (0, 24).
+{
+  const pivot = { x: 0, y: 0 }
+  const orig = { type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } }
+  const vp = { panX: 0, panY: 0, zoom: 1 }
+  const rotated = computeLiveRotation(pivot, orig, 0, 24, vp)
+  pass('52a. cursor 90° below pivot → b.x ≈ 0', near(rotated.b.x, 0))
+  pass('52b. cursor 90° below pivot → b.y ≈ 24', near(rotated.b.y, 24))
+  pass('52c. a stays at pivot (endpoint stays fixed)',
+    near(rotated.a.x, 0) && near(rotated.a.y, 0))
+}
+
+// 53. Lock pivot at midpoint of a line. Cursor at 90° → line spins
+//     around its own midpoint, both endpoints move.
+{
+  const pivot = { x: 12, y: 0 }  // midpoint of line (0,0)→(24,0)
+  const orig = { type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } }
+  const vp = { panX: 0, panY: 0, zoom: 1 }
+  // Cursor at (12, 12) canvas — directly below the pivot.
+  // cursorAngle = atan2(12 - 0, 12 - 12) = atan2(12, 0) = π/2 = 90°.
+  // Baseline: pivot to centroid. Centroid is at midpoint (12, 0).
+  // baselineAngle = atan2(0 - 0, 12 - 12) = atan2(0, 0) = 0.
+  // Delta = 90° → rotate line 90° around (12, 0).
+  // (0, 0): dx=-12, dy=0 → (12 - 12*0 - 0*1, 0 + (-12)*1 + 0*0) = (12, -12)
+  // Wait — rotatePoint with deltaDeg=90:
+  //   cos(90°)=0, sin(90°)=1
+  //   x' = cx + dx*cos - dy*sin = 12 + (-12)*0 - 0*1 = 12
+  //   y' = cy + dx*sin + dy*cos = 0 + (-12)*1 + 0*0 = -12
+  // (24, 0): dx=12, dy=0
+  //   x' = 12 + 12*0 - 0*1 = 12
+  //   y' = 0 + 12*1 + 0*0 = 12
+  const rotated = computeLiveRotation(pivot, orig, 12, 12, vp)
+  pass('53a. midpoint-pivot rotation: a at (12, -12)',
+    near(rotated.a.x, 12) && near(rotated.a.y, -12))
+  pass('53b. midpoint-pivot rotation: b at (12, 12)',
+    near(rotated.b.x, 12) && near(rotated.b.y, 12))
+}
+
+// 54. Click-commit branch — pure-logic mock. With pivot locked and origin
+//     shapes captured, any click commits: push undo snapshot if shapes
+//     changed, then clear pivot state.
+{
+  // Mock the commit flow.
+  const state = {
+    techPivot: { x: 0, y: 0 },
+    techPivotOriginShapes: [{ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } }],
+    techPivotPreChangeSnap: 'fake-snap-string',
+    technicalLayers: [{
+      id: 'L1', visible: true,
+      shapes: [{ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 0, y: 24 } }],  // rotated 90°
+    }],
+    undoStack: [],
+  }
+  // Commit logic mirror:
+  let changed = false
+  for (const origShape of state.techPivotOriginShapes) {
+    let cur = null
+    for (const tl of state.technicalLayers) {
+      const found = (tl.shapes || []).find((sh) => sh.id === origShape.id)
+      if (found) { cur = found; break }
+    }
+    if (cur && JSON.stringify(cur) !== JSON.stringify(origShape)) {
+      changed = true
+      break
+    }
+  }
+  if (changed && typeof state.techPivotPreChangeSnap === 'string') {
+    state.undoStack.push(state.techPivotPreChangeSnap)
+  }
+  state.techPivot = null
+  state.techPivotOriginShapes = null
+  state.techPivotPreChangeSnap = null
+
+  pass('54a. shape change detected → push undo snapshot',
+    state.undoStack.length === 1 && state.undoStack[0] === 'fake-snap-string')
+  pass('54b. commit clears techPivot', state.techPivot === null)
+  pass('54c. commit clears techPivotOriginShapes', state.techPivotOriginShapes === null)
+}
+
+// 55. Click-commit when shapes did NOT change (operator locked pivot
+//     and clicked again without mousemove): no undo snapshot pushed,
+//     but pivot state still clears.
+{
+  const orig = { id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } }
+  const state = {
+    techPivot: { x: 0, y: 0 },
+    techPivotOriginShapes: [orig],
+    techPivotPreChangeSnap: 'snap',
+    technicalLayers: [{ id: 'L1', visible: true, shapes: [orig] }],
+    undoStack: [],
+  }
+  let changed = false
+  for (const origShape of state.techPivotOriginShapes) {
+    let cur = null
+    for (const tl of state.technicalLayers) {
+      const found = (tl.shapes || []).find((sh) => sh.id === origShape.id)
+      if (found) { cur = found; break }
+    }
+    if (cur && JSON.stringify(cur) !== JSON.stringify(origShape)) {
+      changed = true
+      break
+    }
+  }
+  if (changed) state.undoStack.push(state.techPivotPreChangeSnap)
+  state.techPivot = null
+  state.techPivotOriginShapes = null
+  state.techPivotPreChangeSnap = null
+
+  pass('55a. unchanged shapes → no undo snapshot pushed', state.undoStack.length === 0)
+  pass('55b. unchanged commit still clears techPivot', state.techPivot === null)
+}
+
+// 56. Escape revert: shapes restored to originShapes, no undo pushed.
+{
+  const orig = { id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } }
+  // Live state has the shape rotated 90°.
+  const liveShape = { id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 0, y: 24 } }
+  const state = {
+    techPivot: { x: 0, y: 0 },
+    techPivotOriginShapes: [orig],
+    techPivotPreChangeSnap: 'snap',
+    technicalLayers: [{ id: 'L1', visible: true, shapes: [liveShape] }],
+    techSelected: [{ layerId: 'L1', shapeId: 'sh1' }],
+    undoStack: [],
+  }
+  // Escape revert logic mirror.
+  for (const origShape of state.techPivotOriginShapes) {
+    const selEntry = state.techSelected.find((s) => s.shapeId === origShape.id)
+    if (selEntry) {
+      state.technicalLayers = state.technicalLayers.map((tl) =>
+        tl.id !== selEntry.layerId ? tl : {
+          ...tl,
+          shapes: tl.shapes.map((sh) => sh.id === origShape.id ? { ...sh, ...origShape } : sh),
+        }
+      )
+    }
+  }
+  state.techPivot = null
+  state.techPivotOriginShapes = null
+  state.techPivotPreChangeSnap = null
+
+  const restored = state.technicalLayers[0].shapes[0]
+  pass('56a. Escape restores a.x', restored.a.x === 0)
+  pass('56b. Escape restores a.y', restored.a.y === 0)
+  pass('56c. Escape restores b.x to 24', restored.b.x === 24)
+  pass('56d. Escape restores b.y to 0', restored.b.y === 0)
+  pass('56e. Escape revert does NOT push undo', state.undoStack.length === 0)
+}
+
+// 57. Typed-Enter rebases from origin orientation (NOT from live-preview).
+//     Origin line (0,0)→(24,0) at angle 0. Live preview rotated to 30°.
+//     Operator types `45`. Result: line at 45° from origin (0°), NOT
+//     45° from preview (30°). Final orientation: 45°.
+{
+  const pivot = { x: 0, y: 0 }
+  const orig = { type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } }
+  // Compute current angle from ORIGIN, not preview.
+  const currAngleDeg = (Math.atan2(orig.b.y - orig.a.y, orig.b.x - orig.a.x) * 180) / Math.PI
+  pass('57a. origin angle = 0°', currAngleDeg === 0)
+  const typed = 45
+  const deltaDeg = typed - currAngleDeg
+  const rotated = rotateTechShape(orig, pivot, deltaDeg)
+  const newAngle = (Math.atan2(rotated.b.y - rotated.a.y, rotated.b.x - rotated.a.x) * 180) / Math.PI
+  pass('57b. typed 45° from origin → final angle 45°', near(newAngle, 45, 0.001))
+}
+
+// 58. Cyan-grip-drag gated to techPivot === null (regression):
+//     when pivot is locked, the grip is NOT a draggable handle.
+{
+  // Pure-logic mock of the gate.
+  function shouldStartGripDrag(techPivot, techSelectedLen) {
+    return techPivot === null && techSelectedLen > 0
+  }
+  pass('58a. centroid case (pivot null + selection) → grip drag enabled',
+    shouldStartGripDrag(null, 1) === true)
+  pass('58b. locked pivot → grip drag disabled (click commits instead)',
+    shouldStartGripDrag({ x: 0, y: 0 }, 1) === false)
+  pass('58c. no selection → grip drag disabled',
+    shouldStartGripDrag(null, 0) === false)
+}
+
+// 59. State clearing — all five pivot fields wiped in concert.
+{
+  const state = {
+    techPivot: { x: 1, y: 2 },
+    techPivotPickMode: true,
+    techPivotHover: { x: 3, y: 4, type: 'endpoint' },
+    techPivotOriginShapes: [{ id: 'sh1' }],
+    techPivotPreChangeSnap: 'snap',
+  }
+  const clearAllPivot = () => {
+    state.techPivot = null
+    state.techPivotPickMode = false
+    state.techPivotHover = null
+    state.techPivotOriginShapes = null
+    state.techPivotPreChangeSnap = null
+  }
+  clearAllPivot()
+  pass('59a. clearAllPivot wipes techPivot', state.techPivot === null)
+  pass('59b. clearAllPivot wipes pickMode', state.techPivotPickMode === false)
+  pass('59c. clearAllPivot wipes hover', state.techPivotHover === null)
+  pass('59d. clearAllPivot wipes originShapes', state.techPivotOriginShapes === null)
+  pass('59e. clearAllPivot wipes preChangeSnap', state.techPivotPreChangeSnap === null)
+}
+
+// ============================================================================
 // SUMMARY
 // ============================================================================
 const passCount = tests.filter((t) => t.ok).length

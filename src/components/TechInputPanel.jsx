@@ -61,6 +61,12 @@ export default function TechInputPanel() {
   const setTechPivot = useAppStore((s) => s.setTechPivot)
   const setTechPivotPickMode = useAppStore((s) => s.setTechPivotPickMode)
   const setTechPivotHover = useAppStore((s) => s.setTechPivotHover)
+  // 18d-pivot live-rotation (May 11 2026) — captured origin shapes for
+  // the revert path (Pivot ↺ reset, Escape, typed-Enter rebase).
+  const techPivotOriginShapes = useAppStore((s) => s.techPivotOriginShapes)
+  const setTechPivotOriginShapes = useAppStore((s) => s.setTechPivotOriginShapes)
+  const setTechPivotPreChangeSnap = useAppStore((s) => s.setTechPivotPreChangeSnap)
+  const updateTechnicalShapeNoUndo = useAppStore((s) => s.updateTechnicalShapeNoUndo)
   // Total tech-shape count across all technical layers — the trigger
   // signal for clearing line inputs after a successful tech-line commit.
   const totalShapes = useAppStore((s) =>
@@ -212,48 +218,84 @@ export default function TechInputPanel() {
 
   const handleRotationEnter = () => {
     // Commit rotation: rotate all selected shapes so that the FIRST
-    // selected shape ends up at the typed absolute angle. Delta is
-    // computed against the first shape's current orientation; all
-    // shapes rotate by the same delta around the combined pivot.
+    // selected shape ends up at the typed absolute angle.
+    //
+    // 18d-pivot live-rotation rebase (May 11 2026): if pivot is locked
+    // AND origin shapes were captured, use the ORIGIN orientation as
+    // the absolute baseline. Without this rebase, typed `45°` would
+    // mean "45° from whatever the live-rotation preview ended up at"
+    // (which the operator may have wiggled the cursor through 90° or
+    // more), making typed values feel non-deterministic.
+    //
+    // When pivot is null (centroid path), the existing behavior holds:
+    // delta = typed - currentOrientation, rotate around centroid.
     if (parsedRotation === null) return
-    const shapes = getSelectedTechShapes(technicalLayers, techSelected)
-    if (shapes.length === 0) return
-    const first = shapes[0]
+
+    const useLocked = !!(techPivot && Array.isArray(techPivotOriginShapes) && techPivotOriginShapes.length > 0)
+
+    // Source shapes for the rotation: origin snapshot when pivot is
+    // locked (rebase from pre-pivot state); current selection otherwise.
+    const sourceShapes = useLocked
+      ? techPivotOriginShapes
+      : getSelectedTechShapes(technicalLayers, techSelected)
+    if (sourceShapes.length === 0) return
+    const first = sourceShapes[0]
     if (first.type !== 'line') return
+
     const currAngleDeg = (Math.atan2(first.b.y - first.a.y, first.b.x - first.a.x) * 180) / Math.PI
     const deltaDeg = parsedRotation - currAngleDeg
-    const pivot = techSelected.length === 1
-      ? techShapeCentroid(first)
-      : techMultiShapeCentroid(shapes)
+    const pivot = useLocked
+      ? techPivot
+      : (techSelected.length === 1
+          ? techShapeCentroid(first)
+          : techMultiShapeCentroid(sourceShapes))
     if (!pivot) return
-    // Apply rotation. updateTechnicalShape (with pushUndo) is called
-    // once per shape; the first call pushes the undo snapshot, the
-    // rest are batched into the same logical edit at the React-render
-    // level. Operator's Cmd+Z undoes the entire multi-shape rotation
-    // as one entry IF we push only one snapshot — but each call to
-    // updateTechnicalShape pushes a fresh snapshot. To keep "one undo
-    // per rotation commit," we use the capture+push pattern.
-    const snap = useAppStore.getState().captureUndoSnapshot()
-    for (let i = 0; i < shapes.length; i++) {
-      const sh = shapes[i]
+
+    // Undo plumbing. When pivot is locked we already captured a snapshot
+    // at pivot-lock time (techPivotPreChangeSnap); reuse it so the typed
+    // commit fits into the same single undo entry as the live-rotation
+    // preview. When pivot is null, capture a fresh snapshot here.
+    const snap = useLocked
+      ? useAppStore.getState().techPivotPreChangeSnap
+      : useAppStore.getState().captureUndoSnapshot()
+
+    for (let i = 0; i < sourceShapes.length; i++) {
+      const sh = sourceShapes[i]
+      // techSelected entries align with sourceShapes by index when
+      // pivot is locked (originShapes captured from the same selection
+      // order); same convention for the centroid path.
       const entry = techSelected[i]
       if (!entry) continue
       const rotated = rotateTechShape(sh, pivot, deltaDeg)
-      // No-undo mutator — we own the undo lifecycle via the captured snapshot.
       useAppStore.getState().updateTechnicalShapeNoUndo(entry.layerId, entry.shapeId, rotated)
     }
-    // Push one snapshot for the entire rotation commit.
-    useAppStore.getState().pushCapturedSnapshot(snap)
+    if (typeof snap === 'string') {
+      useAppStore.getState().pushCapturedSnapshot(snap)
+    }
+
     setRawRotation('')
     setTechRotationInput(null)
-    // Phase 2 18d-pivot — pivot resets to centroid after each rotation
-    // commit (operator decision May 11 2026 — pivot is a single-action
-    // tool, not a sticky preference). Mirrors the same reset in
-    // CanvasStage's drag-end path.
+    // Pivot resets to centroid after each rotation commit (operator
+    // decision May 11 2026). Clear live-rotation state too.
     setTechPivot(null)
+    setTechPivotOriginShapes(null)
+    setTechPivotPreChangeSnap(null)
   }
 
   const handleRotationEscape = () => {
+    // 18d-pivot live-rotation revert (May 11 2026): if pivot is locked
+    // and origin shapes were captured (live-rotation preview active),
+    // restore each shape to its pre-pivot orientation BEFORE clearing
+    // the selection. No undo pushed (we never committed). Without this
+    // revert, Escape-with-focus-on-input would leave shapes rotated.
+    if (techPivot && Array.isArray(techPivotOriginShapes)) {
+      for (const origShape of techPivotOriginShapes) {
+        const selEntry = techSelected.find((s) => s.shapeId === origShape.id)
+        if (selEntry) {
+          updateTechnicalShapeNoUndo(selEntry.layerId, origShape.id, origShape)
+        }
+      }
+    }
     useAppStore.getState().clearTechSelection()
     setTechRotationInput(null)
     setRawRotation('')
@@ -295,9 +337,25 @@ export default function TechInputPanel() {
   }
   const handlePivotClick = () => {
     if (techPivotPickMode) {
+      // Cancel pick mode.
       setTechPivotPickMode(false)
       setTechPivotHover(null)
     } else if (techPivot) {
+      // 18d-pivot live-rotation revert (May 11 2026): if origin shapes
+      // were captured at pivot-lock time, restore each selected shape
+      // to its pre-pivot orientation before clearing the pivot. No undo
+      // pushed (we never committed). Mirrors the Escape revert in
+      // CanvasStage's keydown handler.
+      if (Array.isArray(techPivotOriginShapes)) {
+        for (const origShape of techPivotOriginShapes) {
+          const selEntry = techSelected.find((s) => s.shapeId === origShape.id)
+          if (selEntry) {
+            updateTechnicalShapeNoUndo(selEntry.layerId, origShape.id, origShape)
+          }
+        }
+        setTechPivotOriginShapes(null)
+        setTechPivotPreChangeSnap(null)
+      }
       setTechPivot(null)
     } else {
       setTechPivotPickMode(true)

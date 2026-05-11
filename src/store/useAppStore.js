@@ -532,6 +532,20 @@ const initialState = {
   techPivot: null,
   techPivotPickMode: false,
   techPivotHover: null,
+  // Phase 2 18d-pivot live-rotation (operator-reported May 11 2026 on
+  // `76039e2`) — when pivot locks, capture every selected shape's
+  // pre-rotation geometry + one undo snapshot. These let:
+  //   - mousemove live-rotate from the originShapes baseline (so the
+  //     line follows the cursor instead of accumulating per-tick
+  //     rotation — operator sees a clean "where my cursor is = where
+  //     the line points"),
+  //   - Escape / Pivot ↺ revert shapes to pre-pivot orientation,
+  //   - typed-Enter rotation use originShapes as the absolute baseline
+  //     (so "Rotate 45°" always means 45° from the pre-pivot state).
+  // null when no pivot is locked. Cleared at every existing pivot
+  // clear site.
+  techPivotOriginShapes: null,
+  techPivotPreChangeSnap: null,
   // Phase 2 18b/18c — Technical Drawing line-tool draft state.
   // Transient. NOT in PERSIST_KEYS. null when no draft in progress.
   // Active shape:
@@ -1450,6 +1464,8 @@ export const useAppStore = create((set, get) => {
           techPivot: null,
           techPivotPickMode: false,
           techPivotHover: null,
+          techPivotOriginShapes: null,
+          techPivotPreChangeSnap: null,
         }
       })
     },
@@ -1703,6 +1719,8 @@ export const useAppStore = create((set, get) => {
           techPivot: null,
           techPivotPickMode: false,
           techPivotHover: null,
+          techPivotOriginShapes: null,
+          techPivotPreChangeSnap: null,
         }
       }
       return { tool }
@@ -1780,6 +1798,8 @@ export const useAppStore = create((set, get) => {
       techPivot: null,
       techPivotPickMode: false,
       techPivotHover: null,
+      techPivotOriginShapes: null,
+      techPivotPreChangeSnap: null,
     }),
 
     // 18d — Transient typed rotation value. Cleared on selection clear,
@@ -1794,6 +1814,9 @@ export const useAppStore = create((set, get) => {
     setTechPivot: (point) => set({ techPivot: point }),
     setTechPivotPickMode: (active) => set({ techPivotPickMode: !!active }),
     setTechPivotHover: (target) => set({ techPivotHover: target }),
+    // 18d-pivot live-rotation — origin-shape snapshot + pre-change undo snap.
+    setTechPivotOriginShapes: (arr) => set({ techPivotOriginShapes: arr }),
+    setTechPivotPreChangeSnap: (snap) => set({ techPivotPreChangeSnap: snap }),
 
     // 18d — Per-mousemove rotation drag mutator. Mirrors
     // updateTechnicalShape (same set() shape) but DOES NOT call pushUndo.
@@ -2291,6 +2314,8 @@ export const useAppStore = create((set, get) => {
         techPivot: null,
         techPivotPickMode: false,
         techPivotHover: null,
+        techPivotOriginShapes: null,
+        techPivotPreChangeSnap: null,
         pdfOrientation: normalizePdfOrientation(obj.pdfOrientation),
         // P45 (Phase 2 18a, May 10 2026) — Load Project clears the
         // currentFileHandle + currentFileName so the loaded file is
@@ -2551,6 +2576,8 @@ export const useAppStore = create((set, get) => {
         techPivot: null,
         techPivotPickMode: false,
         techPivotHover: null,
+        techPivotOriginShapes: null,
+        techPivotPreChangeSnap: null,
         // P45 (Phase 2 18a, May 10 2026) — New Project clears the
         // currentFileHandle + currentFileName so the operator's next
         // Save opens the picker fresh. Matches the Load Project
