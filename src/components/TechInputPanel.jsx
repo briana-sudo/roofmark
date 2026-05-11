@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { parseLength } from '../utils/parseLength'
 import { parseAngle } from '../utils/parseAngle'
+import { shouldStopHijackedKey } from '../utils/techPanelKeyHandling'
 
 /**
  * TechInputPanel — Phase 2 sub-step 18c (May 11 2026).
@@ -83,10 +84,35 @@ export default function TechInputPanel({ onCommit, onCancel }) {
   // 18b native capture-phase keydown stopper on the wrapper — prevents
   // CanvasStage's document-level zoom-key shortcuts (`+`/`-`/`0`/`1`)
   // from hijacking keystrokes meant for the inputs.
+  //
+  // 18c Escape regression fix (operator-reported on `af1f3c8`):
+  //   The original 18b implementation called stopPropagation()
+  //   UNCONDITIONALLY for every key. That silently consumed Escape and
+  //   Enter at the wrapper before they could reach the input's React
+  //   onKeyDown handler (cancel + commit paths). Typing characters
+  //   appeared to work because text input uses a separate `input` event
+  //   path, not blocked by the keydown listener.
+  //
+  // Fix: stop propagation ONLY for keys the document handler would
+  // hijack. Everything else (Enter, Escape, printable chars, Tab,
+  // arrows, modifiers) flows through to the input's React handler.
+  //
+  // The set below mirrors CanvasStage.onKeyDown's zoom/space branches
+  // (CanvasStage.jsx ~lines 2348-2365). Keep in sync if those shortcuts
+  // change.
   useEffect(() => {
     const wrapper = wrapperRef.current
     if (!wrapper) return
-    const stop = (e) => { e.stopPropagation() }
+    const stop = (e) => {
+      if (shouldStopHijackedKey(e)) {
+        e.stopPropagation()
+        if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
+          console.log(`[TechInputPanel wrapper captured (hijack)] key=${e.key}`)
+        }
+      } else if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
+        console.log(`[TechInputPanel wrapper passed-through] key=${e.key}`)
+      }
+    }
     wrapper.addEventListener('keydown', stop, true)
     return () => wrapper.removeEventListener('keydown', stop, true)
   }, [])

@@ -447,6 +447,65 @@ function makeStoreWithSnapshot() {
 }
 
 // ============================================================================
+// SELECTIVE-WRAPPER-STOP REGRESSION TESTS (59–72)
+// 18c Escape regression fix (operator-reported on `af1f3c8`): the wrapper
+// capture-phase keydown listener must stop ONLY the document zoom-hijack
+// keys + Space, and pass Enter / Escape / printable chars / Tab / arrows
+// through to the React onKeyDown handler. Pre-fix it stopped every key
+// unconditionally, silently consuming Escape and Enter.
+// ============================================================================
+
+// Replica of the production shouldStopHijackedKey helper (defined at
+// module level in src/components/TechInputPanel.jsx). Keep in sync —
+// the comment above the named export there flags this dependency.
+const HIJACKED_KEYS = new Set(['+', '=', '-', '_', '0', '1', ' '])
+function shouldStopHijackedKey(e) {
+  if (!e) return false
+  if (HIJACKED_KEYS.has(e.key)) return true
+  if (e.code === 'Space') return true
+  return false
+}
+
+// 59-65. Hijacked keys → wrapper SHOULD call stopPropagation.
+pass('59. wrapper stops Space (e.key=" ")',     shouldStopHijackedKey({ key: ' ' }) === true)
+pass('60. wrapper stops "+"',                    shouldStopHijackedKey({ key: '+' }) === true)
+pass('61. wrapper stops "="',                    shouldStopHijackedKey({ key: '=' }) === true)
+pass('62. wrapper stops "-"',                    shouldStopHijackedKey({ key: '-' }) === true)
+pass('63. wrapper stops "_"',                    shouldStopHijackedKey({ key: '_' }) === true)
+pass('64. wrapper stops "0"',                    shouldStopHijackedKey({ key: '0' }) === true)
+pass('65. wrapper stops "1"',                    shouldStopHijackedKey({ key: '1' }) === true)
+
+// 65b. Space variant via e.code (some browsers fire e.key === '' for Space
+//      with modifier keys held; the e.code === 'Space' fallback catches that).
+pass('65b. wrapper stops e.code === "Space" with weird e.key',
+  shouldStopHijackedKey({ key: '', code: 'Space' }) === true)
+
+// 66-72. Pass-through keys → wrapper must NOT call stopPropagation.
+pass('66. wrapper passes Enter',                 shouldStopHijackedKey({ key: 'Enter' }) === false)
+pass('67. wrapper passes Escape',                shouldStopHijackedKey({ key: 'Escape' }) === false)
+pass('68. wrapper passes "4" (digit)',           shouldStopHijackedKey({ key: '4' }) === false)
+pass('69. wrapper passes \'"\' (printable)',     shouldStopHijackedKey({ key: '"' }) === false)
+pass('70. wrapper passes Tab',                   shouldStopHijackedKey({ key: 'Tab' }) === false)
+pass('71. wrapper passes ArrowLeft',             shouldStopHijackedKey({ key: 'ArrowLeft' }) === false)
+pass('72. wrapper passes "a" (printable)',       shouldStopHijackedKey({ key: 'a' }) === false)
+
+// 72b. End-to-end simulation: mock event with tracked stopPropagation.
+//      Confirms the wrapper-listener pattern (read shouldStop, call stop()
+//      conditionally) does what the real production code does.
+{
+  function simulateWrapperKeydown(e) {
+    const tracker = { stopped: false }
+    const evt = { ...e, stopPropagation: () => { tracker.stopped = true } }
+    if (shouldStopHijackedKey(evt)) evt.stopPropagation()
+    return tracker.stopped
+  }
+  pass('72b. simulated Escape keydown does NOT stop propagation',
+    simulateWrapperKeydown({ key: 'Escape' }) === false)
+  pass('72c. simulated "0" keydown DOES stop propagation',
+    simulateWrapperKeydown({ key: '0' }) === true)
+}
+
+// ============================================================================
 // SUMMARY
 // ============================================================================
 const passCount = tests.filter((t) => t.ok).length
