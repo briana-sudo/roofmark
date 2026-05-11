@@ -157,6 +157,55 @@ body {
   color: #fff;
 }
 
+/* ---- App mode toggle — Phase 2 18a (May 10 2026) ----
+   Top-level [Field Markup] [Technical Drawing] switch. Sits above the
+   DRAW/EDIT/SEQUENCE mode-pill row. Higher visual prominence than .mode-
+   toggle to read as a level-up switch — slightly larger pills, more
+   pronounced active state, but uses existing CSS variables only (no
+   new color tokens). */
+.app-mode-toggle {
+  display: inline-flex;
+  background: var(--rm-panel-2);
+  border: 1px solid var(--rm-border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.app-mode-pill {
+  padding: 5px 14px;
+  background: transparent;
+  color: var(--rm-fg-dim);
+  border: none;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+}
+
+.app-mode-pill:hover { color: var(--rm-fg); }
+
+.app-mode-pill.active {
+  background: var(--rm-accent);
+  color: #fff;
+  box-shadow: 0 0 0 1px var(--rm-accent) inset;
+}
+
+/* ---- P45 (Phase 2 18a, May 10 2026) — current save target filename in
+   header. Small, muted, truncates with ellipsis at ~30 chars so a long
+   path doesn't push the kebab off-screen. */
+.hdr-filename {
+  font-size: 11px;
+  color: var(--rm-fg-dim);
+  font-family: var(--rm-mono);
+  max-width: 30ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: middle;
+}
+
 .hdr-save {
   font-weight: 600;
   font-size: 11px;

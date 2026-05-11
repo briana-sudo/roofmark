@@ -56,6 +56,11 @@ export default function DrawingTools() {
   const activeLayerId = useAppStore((s) => s.activeLayerId)
   // Step 12 — annotation tools require SEQUENCE mode + an active sequence.
   const mode = useAppStore((s) => s.mode)
+  // Phase 2 18a (May 10 2026) — top-level app mode gates which tool groups
+  // render. Under TECHNICAL only the viewport group (Zoom in / Zoom out /
+  // Fit) renders; all Field Markup tool groups are hidden entirely (Rule 28
+  // inverse: undiscoverable tools are functionally absent).
+  const appMode = useAppStore((s) => s.appMode)
   const activeSeqId = useAppStore((s) => s.activeSeqId)
   // Section 7.A — viewport state drives the toolbar zoom buttons.
   const viewport = useAppStore((s) => s.viewport)
@@ -236,6 +241,16 @@ export default function DrawingTools() {
         narrows. Dividers sit between groups as bare children of
         `.drawing-tools` so they collapse cleanly at wrap boundaries.
       */}
+      {/*
+        Phase 2 18a (May 10 2026) — appMode gating. Under FIELD, all
+        6 tool groups render (existing Phase 1 behavior). Under TECHNICAL,
+        ONLY the viewport group (Zoom in / Zoom out / Fit) renders; Field
+        Markup tool groups (shape / cline / annotation / snap-grid /
+        photo) are hidden entirely. Technical Drawing's own tools land
+        in sub-steps 18b+.
+      */}
+      {appMode === 'FIELD' && (
+      <>
       {/* Group 1: Shape tools (Poly / Rect / Tri / Circ / Line) */}
       <div className="tool-group" data-tool-group="shape">
         {SHAPE_TOOLS.map((t) => (
@@ -445,11 +460,17 @@ export default function DrawingTools() {
       </div>
 
       <span className="tool-divider" aria-hidden="true" />
+      </>
+      )}
 
       {/* Group 5: Viewport controls.
           Section 7.A.5 — viewport controls. Visible always (Rule 28); cyan
           tint differentiates them from drawing / annotation tools. Status
-          bar carries the live zoom readout for verification. */}
+          bar carries the live zoom readout for verification.
+          Phase 2 18a — viewport group renders under BOTH appModes (FIELD
+          and TECHNICAL). Operators need pan/zoom in Technical Drawing
+          mode too; each mode has its own viewports[mode] entry so pan/
+          zoom are independent. */}
       <div className="tool-group" data-tool-group="viewport">
         <button
           type="button"
@@ -481,10 +502,13 @@ export default function DrawingTools() {
         </button>
       </div>
 
-      <span className="tool-divider" aria-hidden="true" />
-
       {/* Group 6: Photo (load + clear). The hidden file input lives inside
-          the group so it stays mounted alongside the photo button. */}
+          the group so it stays mounted alongside the photo button.
+          Phase 2 18a — hidden under TECHNICAL alongside other Field Markup
+          tool groups (background photo is a Field Markup concept). */}
+      {appMode === 'FIELD' && (
+      <>
+      <span className="tool-divider" aria-hidden="true" />
       <div className="tool-group" data-tool-group="photo">
         <button
           type="button"
@@ -516,8 +540,10 @@ export default function DrawingTools() {
           data-testid="photo-file-input"
         />
       </div>
+      </>
+      )}
 
-      {shapeDisabled && <span className="tool-hint">Select a layer to draw shapes</span>}
+      {appMode === 'FIELD' && shapeDisabled && <span className="tool-hint">Select a layer to draw shapes</span>}
       {pendingSource && (
         <PhotoCropModal
           sourceDataURL={pendingSource.dataURL}

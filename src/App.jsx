@@ -4,6 +4,7 @@ import CanvasStage from './components/CanvasStage'
 import LayerPanel from './components/LayerPanel'
 import DrawingTools from './components/DrawingTools'
 import ModeToggle from './components/ModeToggle'
+import AppModeToggle from './components/AppModeToggle'
 import PropertiesPanel from './components/PropertiesPanel'
 import SequencePanel from './components/SequencePanel'
 import AnnotationPanel from './components/AnnotationPanel'
@@ -13,6 +14,13 @@ import HeaderMenu from './components/HeaderMenu'
 import './App.css'
 
 export default function App() {
+  // Phase 2 18a (May 10 2026) — top-level app mode. Gates several UI
+  // surfaces: ModeToggle (DRAW/EDIT/SEQUENCE pills hidden under
+  // TECHNICAL), Properties drawer (not rendered under TECHNICAL),
+  // DrawingTools tool groups (collapsed to viewport-only under TECHNICAL).
+  const appMode = useAppStore((s) => s.appMode)
+  // P45 — current save target filename indicator in header.
+  const currentFileName = useAppStore((s) => s.currentFileName)
   const mode = useAppStore((s) => s.mode)
   const saveState = useAppStore((s) => s.saveState)
   const rightDrawerOpen = useAppStore((s) => s.rightDrawerOpen)
@@ -57,35 +65,19 @@ export default function App() {
 
   const shapeCount = layers.reduce((n, l) => n + (l.shapes?.length || 0), 0)
 
-  // Step 17 — manual save handler. Generates the JSON export payload,
-  // creates a Blob, and triggers a download with a sensible filename.
-  // Same handler is bound to the visible Save button + Cmd+S/Ctrl+S
-  // keyboard shortcut. Per Spec §15: "Saves immediately to localStorage
-  // [via the existing autosave subscription] + Updates save indicator
-  // to ● saved" — `saveNow()` does both atomically; the JSON export
-  // happens after, so a download interrupted mid-flow still leaves the
-  // localStorage save in place.
-  //
-  // Async (Step 17 partial-completion fix, Failure 2): exportJSON now
-  // awaits IndexedDB reads to embed both photo slots inline. Typical
-  // file is 5–9 MB; the download fires after the IDB reads resolve
-  // (sub-second on local browsers).
+  // Step 17 + P45 (Phase 2 18a, May 10 2026) — manual save handler.
+  // Delegates to store.saveProject which routes through either:
+  //   (a) writeToHandle (Chrome/Edge, silent re-save when handle exists), or
+  //   (b) saveProjectAs (first save / no handle / native picker), or
+  //   (c) legacy Blob + <a download> fallback (Safari/Firefox).
+  // Filename composition + Blob + URL.createObjectURL plumbing all moved
+  // into the store actions (saveProject / saveProjectAs). App.jsx just
+  // fires the action and lets the store handle the saveState / lastSavedAt
+  // updates + IDB persistence of the FileSystemFileHandle.
   const handleSave = async () => {
     try {
       useAppStore.getState().saveNow()
-      const json = await useAppStore.getState().exportJSON()
-      const blob = new Blob([json], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-      const d = new Date()
-      const pad2 = (n) => String(n).padStart(2, '0')
-      const filename = `roofmark-project-${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}.json`
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      await useAppStore.getState().saveProject()
     } catch (err) {
       const msg = err?.message || String(err)
       window.alert(`Save failed: ${msg}`)
@@ -133,7 +125,15 @@ export default function App() {
           <span className="hdr-value">{jobContext?.scope ?? '—'}</span>
         </span>
         <span className="hdr-spacer" />
-        <ModeToggle />
+        {/*
+          Phase 2 18a — top-level app mode toggle [Field Markup] [Technical
+          Drawing]. Sits above the existing DRAW/EDIT/SEQUENCE mode pill row.
+          ModeToggle (DRAW/EDIT/SEQUENCE) renders only when appMode === FIELD;
+          under TECHNICAL the inner sub-mode row is hidden entirely because
+          Technical Drawing has its own mode semantics (tools land in 18b+).
+        */}
+        <AppModeToggle />
+        {appMode === 'FIELD' && <ModeToggle />}
         <button
           type="button"
           className={rightDrawerOpen ? 'btn-drawer-toggle active' : 'btn-drawer-toggle'}
@@ -189,6 +189,20 @@ export default function App() {
         >
           ⤓ Save
         </button>
+        {/*
+          P45 (Phase 2 18a, May 10 2026) — current save target filename.
+          Renders the operator's last picked filename so they know where
+          subsequent Save will write (no picker needed). Shows "(unsaved)"
+          when no handle is captured. Truncates with ellipsis at ~30 chars.
+        */}
+        <span
+          className="hdr-filename"
+          data-slot="filename"
+          title={currentFileName || 'No save target yet — Save will open a picker'}
+          data-testid="hdr-filename"
+        >
+          {currentFileName ?? '(unsaved)'}
+        </span>
         <span className={`hdr-save state-${saveState}`} data-slot="save">
           ● {saveState}
         </span>
@@ -245,7 +259,12 @@ export default function App() {
           the drawer (Rule 28: every new affordance must be operator-discoverable
           via natural UI exploration). Drawer wrapper + tab strip live here so
           the body can swap content without re-mounting the wrapper.
+          Phase 2 18a — gated under appMode === 'FIELD'. Under TECHNICAL the
+          drawer infrastructure remains in code; it just doesn't render. The
+          rightDrawerOpen state persists across mode switches, so toggling
+          back to FIELD restores the prior drawer open/closed state.
         */}
+        {appMode === 'FIELD' && (
         <aside
           className="panel-right"
           aria-label="Properties / Sequences drawer"
@@ -308,6 +327,7 @@ export default function App() {
               : <PropertiesPanel />}
           </div>
         </aside>
+        )}
       </div>
 
       <footer className="status-bar" role="status">

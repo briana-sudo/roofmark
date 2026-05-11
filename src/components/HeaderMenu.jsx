@@ -134,6 +134,18 @@ export default function HeaderMenu() {
     setImportError('')
     fileInputRef.current?.click()
   }
+
+  // P45 (Phase 2 18a, May 10 2026) — Save As… menu item. Always opens the
+  // native picker (or legacy download on Safari/Firefox) and captures a
+  // new save target. Distinct from the header's ⤓ Save button which
+  // writes silently to the existing handle when one is present.
+  const onSaveAs = () => {
+    setOpen(false)
+    useAppStore.getState().saveProjectAs().catch((err) => {
+      const msg = err?.message || String(err)
+      window.alert(`Save As failed: ${msg}`)
+    })
+  }
   // Step 17 partial-completion fix (Failure 2): importJSON is async to
   // restore embedded photos to IndexedDB before flipping store state.
   // The FileReader.onload handler is itself async so a v2 file's photo
@@ -184,6 +196,22 @@ export default function HeaderMenu() {
           aria-label="Project menu"
           data-testid="header-menu-dropdown"
         >
+          {/* P45 (Phase 2 18a, May 10 2026) — Save As… opens the native
+              file picker (or legacy download on Safari/Firefox). Captures
+              a new save target so subsequent ⤓ Save writes silently to
+              that location. Sits above Load / New so the file-management
+              cluster reads top-down: Save As / Load / New. */}
+          <button
+            type="button"
+            role="menuitem"
+            className="header-menu-item"
+            onClick={onSaveAs}
+            data-testid="menu-save-as"
+          >
+            <span className="menu-icon" aria-hidden="true">⤓</span>
+            Save As…
+            <span className="menu-hint">Pick a new file location for this project</span>
+          </button>
           {/* Step 17 — Load Project (JSON import). File picker triggered
               by the hidden input below. Sits above New Project because
               loading is non-destructive (just replaces state from a

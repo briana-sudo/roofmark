@@ -1,5 +1,8 @@
 import { create } from 'zustand'
-import { loadPhoto, savePhoto, clearPhoto } from './photoIDB'
+import {
+  loadPhoto, savePhoto, clearPhoto,
+  saveFileHandle, loadFileHandle, clearFileHandle,
+} from './photoIDB'
 import { computeFitViewport } from './viewport'
 import {
   reprojectShape,
@@ -8,6 +11,12 @@ import {
   reprojectPerspectiveCorners,
   countOutOfBounds,
 } from '../utils/reprojectShapes'
+import {
+  isFileSystemAccessSupported,
+  pickSaveFile,
+  writeToHandle,
+  verifyHandlePermission,
+} from '../utils/fileSystemAccess'
 
 // ============================================================================
 // RoofMark application store — Step 2 of Kickoff Spec Section 16
@@ -50,8 +59,19 @@ const UNDO_LIMIT = 50
 //                        as data-URL strings so a project file is
 //                        self-contained. v1 imports continue to work
 //                        (photo absent — operator re-uploads via 📷).
-const SCHEMA_VERSION = 2
-const SUPPORTED_IMPORT_VERSIONS = new Set([1, 2])
+// v3 (Phase 2 sub-step 18a, May 10 2026) — Technical Drawing mode
+//                        skeleton. Adds `appMode` ('FIELD' | 'TECHNICAL'),
+//                        `technicalLayers`, `specTable`, and replaces
+//                        the single `viewport` field with a `viewports`
+//                        object keyed by appMode. v1 + v2 imports migrate
+//                        in memory to v3 shape via importJSON's set()
+//                        block. TEMP v3 compat — exportJSON also writes
+//                        the legacy top-level `viewport` field equal to
+//                        viewports.FIELD so a future rollback can read
+//                        v3 files in degraded mode. Remove after Phase 2
+//                        ships.
+const SCHEMA_VERSION = 3
+const SUPPORTED_IMPORT_VERSIONS = new Set([1, 2, 3])
 
 // ---- ID generators ---------------------------------------------------------
 let _layerSeq = 0
@@ -141,7 +161,14 @@ const PERSIST_KEYS = [
   'layers', 'sequences', 'clines', 'jobContext',
   'gridSize', 'rightDrawerOpen', 'drawerTab',
   'mode', 'activeLayerId', 'activeSeqId',
-  'viewport', 'photoMeta', 'cropMeta',
+  // Phase 2 18a (May 10 2026) — viewport storage moves from a single
+  // top-level `viewport` field to a `viewports` object keyed by appMode
+  // ('FIELD' | 'TECHNICAL'). Pan/zoom is per-mode so switching modes
+  // restores each mode's prior position. The runtime `viewport` field
+  // (state.viewport) is kept as a derived mirror of viewports[appMode]
+  // so the 37+ existing read sites in CanvasStage continue to work
+  // unchanged — only the persistence shape changed.
+  'viewports', 'photoMeta', 'cropMeta',
   // P2 + P19 (May 7 2026) — per-snap-type gates + grid opacity persist
   // alongside other UI flags so operator settings survive reload.
   'snapTypes', 'gridOpacity',
@@ -152,6 +179,11 @@ const PERSIST_KEYS = [
   // 4 normalized points TL/TR/BR/BL) + single-angle grid rotation (degrees,
   // [-180, 180]). Pre-this-batch hydration falls back to null + 0.
   'gridRotation', 'perspectiveCorners',
+  // Phase 2 18a (May 10 2026) — top-level app mode + Technical Drawing
+  // mode's per-layer geometry + spec table. technicalLayers default [];
+  // specTable default {}. Pre-Phase-2 v2 JSON files have neither field,
+  // so importJSON migrates them in memory to v3 shape before set().
+  'appMode', 'technicalLayers', 'specTable',
 ]
 const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE', 'TECHNICAL'])
 // Step 13 — third tab for the per-annotation editing panel. The tab button
@@ -178,6 +210,41 @@ const normalizeViewport = (v) => {
   const zRaw = Number.isFinite(v.zoom) && v.zoom > 0 ? v.zoom : 1
   const zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN_CAP, zRaw))
   return { panX, panY, zoom }
+}
+
+// Phase 2 18a (May 10 2026) — top-level app mode. 'FIELD' = Phase 1 Field
+// Markup behavior (DRAW/EDIT/SEQUENCE sub-modes live in `state.mode`).
+// 'TECHNICAL' = Phase 2 Technical Drawing mode (sub-modes added in 18b+).
+const VALID_APP_MODES = new Set(['FIELD', 'TECHNICAL'])
+const normalizeAppMode = (v) =>
+  (typeof v === 'string' && VALID_APP_MODES.has(v)) ? v : 'FIELD'
+
+// Phase 2 18a — per-mode viewport storage. Both modes start at the default
+// {panX:0, panY:0, zoom:1}; each mode's viewport is independently mutated
+// by setViewport/setZoom/setPan/fitToViewport based on the active appMode.
+// Migration from v2 (single top-level `viewport`) places that value at
+// viewports.FIELD; viewports.TECHNICAL starts at default.
+const normalizeViewports = (vps, legacySingle) => {
+  if (vps && typeof vps === 'object') {
+    return {
+      FIELD: normalizeViewport(vps.FIELD),
+      TECHNICAL: normalizeViewport(vps.TECHNICAL),
+    }
+  }
+  // v1/v2 migration: legacy single `viewport` becomes FIELD; TECHNICAL = default
+  return {
+    FIELD: normalizeViewport(legacySingle),
+    TECHNICAL: { ...DEFAULT_VIEWPORT },
+  }
+}
+
+// Selector helper — returns the active viewport based on appMode. Public
+// API for read sites in components; the runtime mirror at state.viewport
+// is a back-compat shim for the 37+ existing CanvasStage read sites.
+export const getActiveViewport = (s) => {
+  if (!s) return { ...DEFAULT_VIEWPORT }
+  const am = (s.appMode === 'TECHNICAL') ? 'TECHNICAL' : 'FIELD'
+  return s.viewports?.[am] || { ...DEFAULT_VIEWPORT }
 }
 
 const normalizePhotoMeta = (m) => {
@@ -314,12 +381,26 @@ const reseedCounters = (data) => {
 const hydrated = loadFromStorage()
 reseedCounters(hydrated)
 
+// Phase 2 18a (May 10 2026) — viewports hydration:
+//   - If hydrated.viewports exists (v3 saved state) → use it directly
+//   - Else if hydrated.viewport exists (legacy v1/v2 saved state in
+//     localStorage) → migrate: FIELD = legacy single, TECHNICAL = default
+//   - Else → both modes default
+const _hydratedViewports = normalizeViewports(hydrated?.viewports, hydrated?.viewport)
+const _hydratedAppMode = normalizeAppMode(hydrated?.appMode)
+
 const initialState = {
   // ---- data (persisted) ----
   layers: hydrated?.layers || [],
   sequences: (hydrated?.sequences || []).map(normalizeSequence),
   clines: hydrated?.clines || [],
   jobContext: hydrated?.jobContext || null,
+  // Phase 2 18a — Technical Drawing mode's per-layer geometry array +
+  // spec table. Schema for these objects is OUT OF SCOPE for 18a (18b+
+  // builds the tools that populate them). Initial state is empty for
+  // both; v1/v2 migration adds them via importJSON's set() block.
+  technicalLayers: hydrated?.technicalLayers || [],
+  specTable: hydrated?.specTable || {},
 
   // ---- UI / app ----
   // `mode` and `activeLayerId` are persisted (Step 10 partial-completion fix)
@@ -395,11 +476,21 @@ const initialState = {
   // the selected annotation.
   selectedAnnotation: null,
 
-  // Section 7.A — viewport state (canvas-as-viewport-onto-photo). Persists
-  // so refresh restores the operator's pan/zoom. Default zoom of 1.0 is
-  // overridden by fit-to-viewport when a photo loads (deferred until after
-  // canvas dimensions are known).
-  viewport: normalizeViewport(hydrated?.viewport),
+  // Phase 2 18a (May 10 2026) — top-level app mode. 'FIELD' (Phase 1
+  // Field Markup behavior) or 'TECHNICAL' (Phase 2 Technical Drawing
+  // mode skeleton; sub-mode tools land in 18b+). Persisted across reload.
+  appMode: _hydratedAppMode,
+  // Section 7.A — viewport state (canvas-as-viewport-onto-photo). Phase 2
+  // 18a — per-mode viewport storage. `viewports` is the source of truth;
+  // `viewport` (below) is a runtime mirror of viewports[appMode] kept for
+  // back-compat with 37+ existing read sites (CanvasStage / DrawingTools /
+  // App.jsx). All setViewport/setZoom/setPan/fitToViewport updates write
+  // to BOTH viewports[appMode] AND the viewport mirror in one atomic set.
+  // PERSIST_KEYS persists viewports (not viewport) so the mirror is
+  // automatically rebuilt from viewports[appMode] on hydration.
+  viewports: _hydratedViewports,
+  // viewport — DERIVED MIRROR of viewports[appMode]. NOT in PERSIST_KEYS.
+  viewport: _hydratedViewports[_hydratedAppMode],
   // P37 (May 7 2026) — session-scoped flag that gates auto-fit on canvas
   // size changes (window resize, toolbar wrap). False by default;
   // markViewportTouched sets it true on user-initiated pan/zoom;
@@ -444,6 +535,19 @@ const initialState = {
 
   saveState: 'saved',     // 'saved' | 'unsaved' | 'saving'
   lastSavedAt: null,
+
+  // P45 (Phase 2 18a, May 10 2026) — File System Access API: persistent
+  // FileSystemFileHandle to the operator's last Save target. NOT in
+  // PERSIST_KEYS (the handle object is stored separately in IndexedDB
+  // via photoIDB.saveFileHandle; the handle itself isn't JSON-
+  // serializable). Loaded asynchronously after store creation via the
+  // post-init bootstrap (see end of this file).
+  //   currentFileHandle: FileSystemFileHandle | null
+  //   currentFileName: string | null  (mirrors handle.name when handle is set;
+  //                                    OR the filename used by the legacy
+  //                                    download fallback path)
+  currentFileHandle: null,
+  currentFileName: null,
 
   undoStack: [],
   redoStack: [],
@@ -974,13 +1078,36 @@ export const useAppStore = create((set, get) => {
     // call. Internal call sites (resize clamp, fit, undo restore)
     // don't, so the flag accurately tracks "did the operator do
     // something deliberate."
-    setViewport: (v) => set({ viewport: normalizeViewport(v) }),
-    setZoom: (zoom) => set((s) => ({
-      viewport: normalizeViewport({ ...s.viewport, zoom }),
-    })),
-    setPan: (panX, panY) => set((s) => ({
-      viewport: normalizeViewport({ ...s.viewport, panX, panY }),
-    })),
+    // Phase 2 18a (May 10 2026) — viewport actions write to BOTH the
+    // per-mode `viewports[appMode]` AND the `viewport` runtime mirror in
+    // a single atomic set. The mirror lets the 37+ existing CanvasStage
+    // read sites continue to work via `state.viewport`; the per-mode
+    // storage gives the operator independent pan/zoom in FIELD vs
+    // TECHNICAL modes.
+    setViewport: (v) => set((s) => {
+      const normalized = normalizeViewport(v)
+      const am = s.appMode === 'TECHNICAL' ? 'TECHNICAL' : 'FIELD'
+      return {
+        viewports: { ...s.viewports, [am]: normalized },
+        viewport: normalized,
+      }
+    }),
+    setZoom: (zoom) => set((s) => {
+      const normalized = normalizeViewport({ ...s.viewport, zoom })
+      const am = s.appMode === 'TECHNICAL' ? 'TECHNICAL' : 'FIELD'
+      return {
+        viewports: { ...s.viewports, [am]: normalized },
+        viewport: normalized,
+      }
+    }),
+    setPan: (panX, panY) => set((s) => {
+      const normalized = normalizeViewport({ ...s.viewport, panX, panY })
+      const am = s.appMode === 'TECHNICAL' ? 'TECHNICAL' : 'FIELD'
+      return {
+        viewports: { ...s.viewports, [am]: normalized },
+        viewport: normalized,
+      }
+    }),
 
     // P37 (May 7 2026) — flag lifecycle helpers.
     //
@@ -1009,9 +1136,40 @@ export const useAppStore = create((set, get) => {
         return
       }
       const fit = computeFitViewport(s.photoMeta, canvasW, canvasH)
+      // Phase 2 18a — write to BOTH per-mode viewports[appMode] AND the
+      // viewport runtime mirror in one atomic set.
+      const normalized = normalizeViewport(fit)
+      const am = s.appMode === 'TECHNICAL' ? 'TECHNICAL' : 'FIELD'
       set({
-        viewport: normalizeViewport(fit),
+        viewports: { ...s.viewports, [am]: normalized },
+        viewport: normalized,
         viewportTouchedSinceFit: false,
+      })
+    },
+
+    // Phase 2 18a (May 10 2026) — top-level app mode setter. Validates
+    // input (rejects unknown modes — no-op, no throw, log warning so a
+    // bad call site surfaces without crashing the app). On switch:
+    //   - clear transient selection state (selected, selectedAnnotation, tool)
+    //   - DO NOT clear undo/redo (cross-mode undo stays unified)
+    //   - DO NOT mutate layers or technicalLayers
+    //   - update the `viewport` runtime mirror to point at the new mode's
+    //     viewports[next] entry so CanvasStage read sites see the right
+    //     viewport for the new mode immediately
+    setAppMode: (next) => {
+      if (!VALID_APP_MODES.has(next)) {
+        console.warn('setAppMode: invalid mode', next)
+        return
+      }
+      set((s) => {
+        if (s.appMode === next) return {}  // no-op if already in this mode
+        return {
+          appMode: next,
+          viewport: s.viewports?.[next] || { ...DEFAULT_VIEWPORT },
+          selected: null,
+          selectedAnnotation: null,
+          tool: null,
+        }
       })
     },
 
@@ -1381,6 +1539,129 @@ export const useAppStore = create((set, get) => {
       set({ saveState: 'saved', lastSavedAt: Date.now() })
     },
 
+    // ============ P45 — File System Access API (May 10 2026) ================
+    // Phase 2 18a — Save As Dialog via File System Access API. Persistent
+    // FileSystemFileHandle lives in IndexedDB ('fileHandles' object store,
+    // key 'projectSave'), loaded asynchronously at boot via the post-init
+    // bootstrap at the bottom of this file. saveProject writes through the
+    // handle (silent re-save, no picker); saveProjectAs always opens the
+    // picker. On Safari / Firefox where the API is unavailable, both
+    // actions fall back to the legacy Blob + <a download> path.
+    //
+    // Filename suggestion uses the existing Step 17 pattern:
+    //   roofmark-project-YYYY-MM-DD-HHMM.json
+    //
+    // Error handling per spec:
+    //   - User cancels picker → no state change, no throw
+    //   - Permission lost mid-write → clear handle, fall through to Save As
+    //   - File deleted externally → clear handle, fall through to Save As
+    //   - Permission denied after re-request → friendly alert, no corrupt state
+    saveProject: async () => {
+      const s = get()
+      if (s.currentFileHandle) {
+        try {
+          const json = await get().exportJSON()
+          await writeToHandle(s.currentFileHandle, json)
+          set({ saveState: 'saved', lastSavedAt: Date.now() })
+          return
+        } catch (err) {
+          const msg = err?.message || ''
+          if (msg === 'FILE_HANDLE_LOST'
+            || msg === 'FILE_HANDLE_REVOKED'
+            || msg === 'FILE_HANDLE_PERMISSION_DENIED') {
+            // Handle is no longer usable — clear in-memory + IDB and
+            // fall through to Save As. Operator picks a new save target.
+            set({ currentFileHandle: null, currentFileName: null })
+            clearFileHandle().catch(() => {})
+            // Fall through to saveProjectAs below
+          } else {
+            // Unknown error — surface to operator + don't corrupt state.
+            if (typeof window !== 'undefined') {
+              window.alert(`Save failed: ${msg || String(err)}`)
+            }
+            return
+          }
+        }
+      }
+      // No handle (or fell through from lost handle): invoke Save As flow.
+      return get().saveProjectAs()
+    },
+
+    saveProjectAs: async () => {
+      // Build the standard filename suggestion. Same pattern as Step 17's
+      // inline App.jsx filename composition (consolidated into the store
+      // per P45 spec).
+      const d = new Date()
+      const pad2 = (n) => String(n).padStart(2, '0')
+      const suggestedName = `roofmark-project-${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}.json`
+
+      let json
+      try {
+        json = await get().exportJSON()
+      } catch (err) {
+        if (typeof window !== 'undefined') {
+          window.alert(`Save failed (export): ${err?.message || String(err)}`)
+        }
+        return
+      }
+
+      if (!isFileSystemAccessSupported()) {
+        // Legacy fallback — Blob + <a download> + revoke. Safari / Firefox
+        // operators take this path. No persistent handle is captured,
+        // so subsequent Save also takes the legacy path (each Save
+        // re-downloads to the operator's default Downloads folder).
+        try {
+          const blob = new Blob([json], { type: 'application/json' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = suggestedName
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+          setTimeout(() => URL.revokeObjectURL(url), 1000)
+          set({
+            currentFileName: suggestedName,
+            // currentFileHandle stays null — no native handle in legacy path
+            saveState: 'saved',
+            lastSavedAt: Date.now(),
+          })
+        } catch (err) {
+          if (typeof window !== 'undefined') {
+            window.alert(`Save failed: ${err?.message || String(err)}`)
+          }
+        }
+        return
+      }
+
+      // Native picker path
+      let handle
+      try {
+        handle = await pickSaveFile({ suggestedName })
+      } catch (err) {
+        if (typeof window !== 'undefined') {
+          window.alert(`Save As failed: ${err?.message || String(err)}`)
+        }
+        return
+      }
+      if (!handle) return  // user cancelled — no state change
+
+      try {
+        await writeToHandle(handle, json)
+        await saveFileHandle(handle).catch((e) => console.warn('Failed to persist file handle:', e))
+        set({
+          currentFileHandle: handle,
+          currentFileName: handle.name || suggestedName,
+          saveState: 'saved',
+          lastSavedAt: Date.now(),
+        })
+      } catch (err) {
+        if (typeof window !== 'undefined') {
+          window.alert(`Save As failed (write): ${err?.message || String(err)}`)
+        }
+      }
+    },
+
     // ============ Import / Export (Step 17, Spec §15) =======================
     // Step 17 — `exportJSON` returns a Promise<string> carrying the FULL
     // PERSIST_KEYS set + a schemaVersion + exportedAt timestamp + (in v2)
@@ -1407,6 +1688,12 @@ export const useAppStore = create((set, get) => {
         exportedAt: new Date().toISOString(),
         ...slice,
       }
+      // TEMP v3 compat — also write the legacy top-level `viewport` field
+      // equal to viewports.FIELD so a future rollback (Phase 2 → Phase 1
+      // emergency revert) can degrade-read v3 files. Remove after Phase 2
+      // ships and the rollback window closes. Tracked: see SCHEMA_VERSION
+      // doc block above.
+      payload.viewport = s.viewports?.FIELD || { ...DEFAULT_VIEWPORT }
       // Read both IDB slots in parallel; treat read failures as "no photo
       // available" rather than failing the whole export.
       const [croppedURL, sourceURL] = await Promise.all([
@@ -1439,7 +1726,7 @@ export const useAppStore = create((set, get) => {
         throw new Error('Missing schemaVersion field — file is not a RoofMark export.')
       }
       if (!SUPPORTED_IMPORT_VERSIONS.has(obj.schemaVersion)) {
-        throw new Error(`Schema version mismatch: file is v${obj.schemaVersion}, app supports v1, v2.`)
+        throw new Error(`Schema version mismatch: file is v${obj.schemaVersion}, app supports v1, v2, v3.`)
       }
       // Step 17 partial-completion #3 (Bug A) — capture pre-import
       // snapshot so Cmd+Z can undo the Load (operator-friendly: "I
@@ -1509,6 +1796,23 @@ export const useAppStore = create((set, get) => {
         hasSourcePhoto = !!sourceURL
       }
 
+      // Phase 2 18a (May 10 2026) — v1/v2/v3 → v3 migration in memory.
+      // v1 and v2 files don't carry `appMode`, `technicalLayers`,
+      // `specTable`, or `viewports` — apply defaults via the same
+      // normalizers used at hydration. v3 files load their fields
+      // directly. The migrated state is what gets written back on the
+      // next exportJSON / autosave (so localStorage + next Save catch
+      // up to v3 schema automatically without operator action).
+      const migratedAppMode = (obj.schemaVersion >= 3)
+        ? normalizeAppMode(obj.appMode) : 'FIELD'
+      const migratedViewports = (obj.schemaVersion >= 3 && obj.viewports)
+        ? normalizeViewports(obj.viewports, null)
+        : normalizeViewports(null, obj.viewport)  // v1/v2: legacy single → FIELD
+      const migratedTechnicalLayers = Array.isArray(obj.technicalLayers)
+        ? obj.technicalLayers : []
+      const migratedSpecTable = (obj.specTable && typeof obj.specTable === 'object')
+        ? obj.specTable : {}
+
       set({
         layers,
         sequences,
@@ -1520,7 +1824,14 @@ export const useAppStore = create((set, get) => {
         mode,
         activeLayerId,
         activeSeqId,
-        viewport: normalizeViewport(obj.viewport),
+        // Phase 2 18a — viewports is the source of truth; viewport mirror
+        // tracks viewports[appMode]. v1/v2 files migrate via the legacy
+        // `obj.viewport` field; v3 files use `obj.viewports` directly.
+        appMode: migratedAppMode,
+        viewports: migratedViewports,
+        viewport: migratedViewports[migratedAppMode],
+        technicalLayers: migratedTechnicalLayers,
+        specTable: migratedSpecTable,
         photoMeta: normalizePhotoMeta(obj.photoMeta),
         cropMeta: obj.cropMeta || null,
         backgroundImage,
@@ -1549,6 +1860,14 @@ export const useAppStore = create((set, get) => {
         perspectiveCorners: normalizePerspectiveCorners(obj.perspectiveCorners),
         perspectiveEditMode: false,
         pdfOrientation: normalizePdfOrientation(obj.pdfOrientation),
+        // P45 (Phase 2 18a, May 10 2026) — Load Project clears the
+        // currentFileHandle + currentFileName so the loaded file is
+        // read-only until the operator explicitly Save As. This matches
+        // operator expectation: a loaded file is "someone else's save
+        // target," not the operator's destination. Their next Save
+        // opens the picker fresh.
+        currentFileHandle: null,
+        currentFileName: null,
         // Bug A — single-entry undoStack with the pre-import snapshot.
         // Cmd+Z restores pre-import state; second Cmd+Z is a no-op
         // (button disables). Prior history is intentionally dropped to
@@ -1558,6 +1877,9 @@ export const useAppStore = create((set, get) => {
         undoStack: [preImportSnapshot],
         redoStack: [],
       })
+      // Fire-and-forget IDB clear of the file handle entry. Mirrors
+      // the photo IDB wipe pattern in clearAll.
+      clearFileHandle().catch(() => {})
     },
 
     // ============ Caller-controlled undo snapshots (Step 17 partial fix) ====
@@ -1744,7 +2066,7 @@ export const useAppStore = create((set, get) => {
     // contract. Operators who want to recover prior work use Save +
     // Load JSON instead.
     clearAll: () => {
-      set({
+      set((s) => ({
         layers: [],
         sequences: [],
         clines: [],
@@ -1756,29 +2078,51 @@ export const useAppStore = create((set, get) => {
         photoMeta: null,
         cropMeta: null,
         hasSourcePhoto: false,
-        viewport: { panX: 0, panY: 0, zoom: 1 },
+        // Phase 2 18a — reset both per-mode viewports + the viewport
+        // mirror to defaults. appMode itself is NOT changed by New
+        // Project (operator stays in whichever mode they were in).
+        viewports: { FIELD: { ...DEFAULT_VIEWPORT }, TECHNICAL: { ...DEFAULT_VIEWPORT } },
+        viewport: { ...DEFAULT_VIEWPORT },
+        // Phase 2 18a — wipe Technical Drawing geometry + spec table
+        // alongside Field Markup data. Both belong to the prior project.
+        technicalLayers: [],
+        specTable: {},
         // P16 + P38 mini-step (May 8 2026) — wipe perspective grid +
         // rotation alongside the rest of the project state. They're
         // photo-anchored geometry, so they don't survive a New Project.
         perspectiveCorners: null,
         perspectiveEditMode: false,
         gridRotation: 0,
+        // P45 (Phase 2 18a, May 10 2026) — New Project clears the
+        // currentFileHandle + currentFileName so the operator's next
+        // Save opens the picker fresh. Matches the Load Project
+        // convention (the prior project's save target is no longer
+        // meaningful for the new project).
+        currentFileHandle: null,
+        currentFileName: null,
         // HARD boundary — wipe undo/redo history so the prior project's
         // snapshots (and their embedded photo binaries) can't bleed
         // into the cleared project via Cmd+Z.
         undoStack: [],
         redoStack: [],
-      })
+        // appMode intentionally NOT cleared — operator stays in the
+        // mode they were working in. Reference s.appMode read above
+        // so the shape stays consistent if a future field adds
+        // dependencies on the prior appMode.
+        appMode: s.appMode,
+      }))
       // Wipe persisted photos from IndexedDB so refresh doesn't bring
       // them back. Fire-and-forget — the render pipeline already
       // reflects the in-memory clear. Also wipe _undo slots so a
       // stale backup from the prior project doesn't survive the boundary.
+      // P45 — clear the file handle IDB entry too.
       if (typeof window !== 'undefined') {
         clearPhoto('cropped').catch(() => {})
         clearPhoto('source').catch(() => {})
         clearPhoto('background').catch(() => {})
         clearPhoto('cropped_undo').catch(() => {})
         clearPhoto('source_undo').catch(() => {})
+        clearFileHandle().catch(() => {})
       }
     },
   }
@@ -1813,13 +2157,23 @@ useAppStore.subscribe((state, prev) => {
     state.activeSeqId !== prev.activeSeqId ||
     // Section 7.A — viewport / photo metadata persist alongside the
     // operator's working context.
+    // Phase 2 18a — `viewports` is the source of truth for persistence;
+    // `viewport` mirror tracks it lockstep so subscribing to either
+    // detects the same changes. Subscribing to `viewports` is the
+    // canonical signal post-Phase-2.
+    state.viewports !== prev.viewports ||
     state.viewport !== prev.viewport ||
     state.photoMeta !== prev.photoMeta ||
     state.cropMeta !== prev.cropMeta ||
     // P2 + P19 (May 7 2026) — per-snap-type gates + grid opacity persist
     // alongside the existing UI flags so operator settings survive reload.
     state.snapTypes !== prev.snapTypes ||
-    state.gridOpacity !== prev.gridOpacity
+    state.gridOpacity !== prev.gridOpacity ||
+    // Phase 2 18a — top-level app mode persists across reload.
+    state.appMode !== prev.appMode ||
+    // Phase 2 18a — Technical Drawing data persists (geometry + spec table).
+    state.technicalLayers !== prev.technicalLayers ||
+    state.specTable !== prev.specTable
   )
   if (!dataChanged && !uiFlagChanged) return
 
@@ -1855,6 +2209,35 @@ useAppStore.subscribe((state, prev) => {
 // ============================================================================
 if (typeof window !== 'undefined') {
   window.__appStore = useAppStore
+}
+
+// ============================================================================
+// P45 POST-INIT BOOTSTRAP (Phase 2 18a, May 10 2026)
+// Restore the persistent FileSystemFileHandle from IndexedDB on app boot.
+// The handle is stored separately from PERSIST_KEYS (localStorage can't
+// carry the handle object; IDB can via structured clone). If a handle is
+// found AND permission is still granted, set it on the store so the next
+// Save writes to the operator's prior save target silently. If permission
+// is no longer granted OR no handle stored, the store stays with
+// currentFileHandle: null and the next Save opens the picker fresh.
+// Fire-and-forget; failures are silent (operator just gets the picker).
+// ============================================================================
+if (typeof window !== 'undefined') {
+  loadFileHandle()
+    .then(async (handle) => {
+      if (!handle) return
+      const ok = await verifyHandlePermission(handle)
+      if (ok) {
+        useAppStore.setState({
+          currentFileHandle: handle,
+          currentFileName: handle.name || null,
+        })
+      } else {
+        // Permission was revoked between sessions — clear stale entry.
+        await clearFileHandle().catch(() => {})
+      }
+    })
+    .catch(() => {})
 }
 
 // ============================================================================

@@ -694,6 +694,18 @@ export default function CanvasStage() {
       ctxStatic.fillStyle = '#0d1117'
       ctxStatic.fillRect(0, 0, cw, ch)
 
+      // Phase 2 18a (May 10 2026) — Technical Drawing mode early-return.
+      // Render an empty dark canvas with no Field Markup content (no
+      // photo, no layers, no clines, no annotations, no perspective
+      // handles). Pan/zoom still works via the viewport state (its own
+      // viewports.TECHNICAL entry); grid drawing is also skipped in
+      // 18a since the operator has no shapes to align to yet. Technical
+      // Drawing render path lands in 18b+.
+      if (storeState.appMode === 'TECHNICAL') {
+        ctxStatic.restore()
+        return
+      }
+
       if (bg && bg.complete && bg.naturalWidth > 0) {
         // Section 7.A.2 — photo at viewport coordinates. drawImage clamps
         // outside the canvas naturally; no manual clipping needed.
@@ -1030,6 +1042,14 @@ export default function CanvasStage() {
       ctxDynamic.setTransform(1, 0, 0, 1, 0, 0)
       ctxDynamic.clearRect(0, 0, cvDynamic.width, cvDynamic.height)
       ctxDynamic.scale(dpr, dpr)
+
+      // Phase 2 18a — Technical Drawing mode early-return. No dynamic
+      // content (no rubber-band drafts, no handles, no selection rings)
+      // until Technical Drawing tools land in 18b+.
+      if (state.appMode === 'TECHNICAL') {
+        ctxDynamic.restore()
+        return
+      }
 
       // Rubber-band preview from draft state
       if (draft) {
@@ -1665,6 +1685,13 @@ export default function CanvasStage() {
         return
       }
 
+      // Phase 2 18a (May 10 2026) — Technical Drawing mode early-return.
+      // Pan input (middle-mouse / space+left / two-finger touch) handled
+      // above; all Field Markup hit-testing (perspective corners,
+      // annotation handles, shape handles, shape hit-test, draw tools)
+      // is suppressed until Technical Drawing tools land in 18b+.
+      if (store.appMode === 'TECHNICAL') return
+
       // P16 (May 8 2026) — perspective-edit mode hit-test runs BEFORE
       // mode/tool dispatch so the operator can drag corner handles
       // regardless of DRAW/EDIT/SEQUENCE mode (perspective is a grid
@@ -2297,6 +2324,8 @@ export default function CanvasStage() {
     // candidate (P9 keyboard / mobile audit at Step 18).
     const onContextMenu = (e) => {
       const store = useAppStore.getState()
+      // Phase 2 18a — context menu is a Field Markup affordance only.
+      if (store.appMode === 'TECHNICAL') return
       if (store.mode !== 'EDIT') return
       e.preventDefault()
       const cw = container.clientWidth
@@ -2369,6 +2398,17 @@ export default function CanvasStage() {
             queueMicrotask(() => useAppStore.getState().setTool(null))
           }
         }
+      }
+      // Phase 2 18a — top-level app mode change flips both dirty flags so
+      // the canvas repaints with TECHNICAL's empty view (or FIELD's photo+
+      // shapes+annotations). Also clears any in-progress draft so a
+      // half-drawn shape doesn't survive the mode switch. Context menu is
+      // closed too.
+      if (state.appMode !== prev.appMode) {
+        staticDirty = true
+        dynamicDirty = true
+        setCtxMenu(null)
+        if (draft) draft = null
       }
       // Step 11 — sequence-array change OR active sequence change updates
       // the SEQUENCE-mode layer filter so the canvas reflects the new
