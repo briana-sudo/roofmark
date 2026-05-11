@@ -1828,6 +1828,14 @@ export default function CanvasStage() {
     }
 
     const onMouseDown = (e) => {
+      // DEBUG: log every mousedown on cvDynamic. Gated.
+      if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
+        const ts = `${new Date().toISOString().slice(11, 23)}`
+        const ae = document.activeElement?.tagName
+        const aeId = document.activeElement?.id || '(no-id)'
+        const isPan = e.button === 1 || (e.button === 0 && (typeof spaceHeld !== 'undefined' && spaceHeld))
+        console.log(`[${ts}] [cvDynamic mousedown] button=${e.button} active=${ae}#${aeId} isPanInput=${isPan} willPreventDefault=${isPan}`)
+      }
       const store = useAppStore.getState()
       const cw = container.clientWidth
       const ch = container.clientHeight
@@ -2337,11 +2345,27 @@ export default function CanvasStage() {
     }
 
     const onKeyDown = (e) => {
+      // DEBUG: log every keydown reaching this document-level handler.
+      // Gated by window.__rmDebugFocus. Operator flips the flag in
+      // DevTools to trace the keystroke path during Escape regression.
+      if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
+        const ts = `${new Date().toISOString().slice(11, 23)}`
+        const t = e.target?.tagName
+        const tid = e.target?.id || '(no-id)'
+        const ae = document.activeElement?.tagName
+        const aeId = document.activeElement?.id || '(no-id)'
+        console.log(`[${ts}] [doc keydown] key=${e.key} code=${e.code} target=${t}#${tid} active=${ae}#${aeId}`)
+      }
       // Don't intercept while the user is typing in inputs/textareas
       // (layer rename, future annotation textareas, etc.).
       const tag = (e.target?.tagName || '').toUpperCase()
       const editable = tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable
-      if (editable) return
+      if (editable) {
+        if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
+          console.log(`[doc keydown] editable bailout — target is ${tag}`)
+        }
+        return
+      }
 
       // Section 7.A.6 — Space (held) = hand tool. Track the held state
       // for the pan-input gate in onMouseDown.

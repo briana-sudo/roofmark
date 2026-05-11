@@ -351,6 +351,11 @@ export default function App() {
         <span className="status-cell status-build" title="Loaded build commit (short SHA)" data-testid="status-build">
           Build: {typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev'}
         </span>
+        {/* DEBUG branch marker — visible so operator confirms they're on
+            the instrumented build. Removed before merge to main. */}
+        <span className="status-cell" style={{ color: '#f5a623', fontWeight: 600 }}>
+          DEBUG-18c-escape
+        </span>
       </footer>
     </div>
   )

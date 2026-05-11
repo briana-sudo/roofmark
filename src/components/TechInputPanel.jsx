@@ -104,14 +104,14 @@ export default function TechInputPanel({ onCommit, onCancel }) {
     const wrapper = wrapperRef.current
     if (!wrapper) return
     const stop = (e) => {
-      if (shouldStopHijackedKey(e)) {
-        e.stopPropagation()
-        if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
-          console.log(`[TechInputPanel wrapper captured (hijack)] key=${e.key}`)
-        }
-      } else if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
-        console.log(`[TechInputPanel wrapper passed-through] key=${e.key}`)
+      const stopIt = shouldStopHijackedKey(e)
+      if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
+        const t = `${new Date().toISOString().slice(11, 23)}`
+        const tag = `${e.target?.tagName}#${e.target?.id || '(no-id)'}`
+        const active = `${document.activeElement?.tagName}#${document.activeElement?.id || '(no-id)'}`
+        console.log(`[${t}] [wrapper capture] key=${e.key} code=${e.code} target=${tag} active=${active} willStop=${stopIt}`)
       }
+      if (stopIt) e.stopPropagation()
     }
     wrapper.addEventListener('keydown', stop, true)
     return () => wrapper.removeEventListener('keydown', stop, true)
@@ -119,23 +119,73 @@ export default function TechInputPanel({ onCommit, onCancel }) {
 
   // 18c Escape-after-typing fix — document-level focusin listener that
   // restores focus to the length input whenever it escapes the panel.
-  // Operator-reported symptom: after typing in length, then in angle,
-  // Escape sometimes failed to dismiss the panel. Root cause hypothesis:
-  // focus drifted to document.body between state-update React-render
-  // cycles; the document Escape handler in CanvasStage saw the keystroke
-  // but did fire setTechDraft(null) cleanly — yet the panel appeared to
-  // linger because the rubber-band repaint missed a frame. Forcing focus
-  // to stay inside the panel sidesteps the race entirely.
+  // (See header comment for full backstory.)
   useEffect(() => {
     const handleFocusIn = (e) => {
       const wrapper = wrapperRef.current
       if (!wrapper) return
+      if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
+        const t = `${new Date().toISOString().slice(11, 23)}`
+        const inside = wrapper.contains(e.target)
+        console.log(`[${t}] [focusin] target=${e.target?.tagName}#${e.target?.id || '(no-id)'} wrapperContains=${inside}`)
+      }
       if (!wrapper.contains(e.target) && lengthInputRef.current) {
         lengthInputRef.current.focus()
       }
     }
     document.addEventListener('focusin', handleFocusIn)
     return () => document.removeEventListener('focusin', handleFocusIn)
+  }, [])
+
+  // DEBUG branch: additional focus-trace listeners gated behind the
+  // window.__rmDebugFocus flag. focusout, plus direct focus/blur on
+  // each input element. Production-default off; zero overhead until
+  // operator flips the flag in DevTools.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const ts = () => `${new Date().toISOString().slice(11, 23)}`
+    const onFocusOut = (e) => {
+      if (window.__rmDebugFocus !== true) return
+      console.log(`[${ts()}] [focusout] target=${e.target?.tagName}#${e.target?.id || '(no-id)'} relatedTarget=${e.relatedTarget?.tagName || 'null'}#${e.relatedTarget?.id || ''}`)
+    }
+    const onLenFocus = () => {
+      if (window.__rmDebugFocus !== true) return
+      console.log(`[${ts()}] [length-input focus]`)
+    }
+    const onLenBlur = (e) => {
+      if (window.__rmDebugFocus !== true) return
+      console.log(`[${ts()}] [length-input blur] relatedTarget=${e.relatedTarget?.tagName || 'null'}#${e.relatedTarget?.id || ''}`)
+    }
+    const onAngFocus = () => {
+      if (window.__rmDebugFocus !== true) return
+      console.log(`[${ts()}] [angle-input focus]`)
+    }
+    const onAngBlur = (e) => {
+      if (window.__rmDebugFocus !== true) return
+      console.log(`[${ts()}] [angle-input blur] relatedTarget=${e.relatedTarget?.tagName || 'null'}#${e.relatedTarget?.id || ''}`)
+    }
+    document.addEventListener('focusout', onFocusOut, true)
+    const lenEl = lengthInputRef.current
+    const angEl = angleInputRef.current
+    if (lenEl) {
+      lenEl.addEventListener('focus', onLenFocus)
+      lenEl.addEventListener('blur', onLenBlur)
+    }
+    if (angEl) {
+      angEl.addEventListener('focus', onAngFocus)
+      angEl.addEventListener('blur', onAngBlur)
+    }
+    return () => {
+      document.removeEventListener('focusout', onFocusOut, true)
+      if (lenEl) {
+        lenEl.removeEventListener('focus', onLenFocus)
+        lenEl.removeEventListener('blur', onLenBlur)
+      }
+      if (angEl) {
+        angEl.removeEventListener('focus', onAngFocus)
+        angEl.removeEventListener('blur', onAngBlur)
+      }
+    }
   }, [])
 
   // Re-focus the length input on any wrapper-margin click (clicking the
@@ -193,6 +243,11 @@ export default function TechInputPanel({ onCommit, onCancel }) {
   }
 
   const onKeyDown = (e) => {
+    if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
+      const t = `${new Date().toISOString().slice(11, 23)}`
+      const tag = `${e.target?.tagName}#${e.target?.id || '(no-id)'}`
+      console.log(`[${t}] [react onKeyDown] key=${e.key} target=${tag}`)
+    }
     e.stopPropagation()
     if (e.key === 'Enter') {
       handleEnter(e)
