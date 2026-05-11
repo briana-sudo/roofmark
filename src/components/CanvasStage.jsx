@@ -21,6 +21,12 @@ import { PX_PER_INCH } from '../store/useAppStore'
 // panel, mounted by App.jsx since 18c docked pivot May 11 2026) and
 // imports commitTechLine directly from the same module.
 import { commitTechLine } from '../utils/techLineCommit'
+// Phase 2 18d (May 11 2026) — pure tech geometry helpers for
+// selection hit-test, centroid math (single + multi), shape rotation.
+import {
+  techShapeCentroid, techMultiShapeCentroid,
+  techHitTest, rotateTechShape, getSelectedTechShapes,
+} from '../utils/techGeometry'
 
 /**
  * CanvasStage — Step 3 substrate + Step 5 drawing tools (Spec §6, §7).
@@ -611,6 +617,18 @@ export default function CanvasStage() {
     //   originPan:    {panX, panY} at pan start
     //   trigger:      'middle' | 'space' | 'touch' (informational)
     let panDrag = null
+
+    // Phase 2 18d (May 11 2026) — Technical Drawing rotation drag state.
+    // Closure-scoped (same convention as editDrag, panDrag, etc.). Set on
+    // tech-select mousedown when the cursor hits the rotation grip; per-
+    // mousemove rotates the originShapes around originCenter and writes
+    // back via updateTechnicalShapeNoUndo (no per-pixel undo); cleared
+    // on mouseup with one preDragSnap pushed if anything changed.
+    //   originShapes: array of deep-cloned selected shapes at drag start
+    //   originCenter: pivot point in TECHNICAL world coords
+    //   originCursor: cursor canvas-px at drag start (for delta-angle)
+    //   preDragSnap:  dataSnapshot string captured at drag start
+    let techRotateDrag = null
     // Section 7.A — `Space` (held) acts as a hand tool. `space+leftclick
     // drag` pans the canvas. The flag prevents accidental drawing while
     // the hand tool is engaged.
@@ -718,15 +736,25 @@ export default function CanvasStage() {
         // Stroke color is a neutral mid-gray for 18b; 18c+ may add
         // per-layer color and per-shape override.
         const TECH_STROKE = '#9ca3af'
+        // Phase 2 18d — selected shapes render in KCC orange (matches
+        // --rm-orange in App.css) so selection state is unambiguous at
+        // a glance. Stroke color flips per-shape inside the inner loop;
+        // unselected shapes keep the neutral mid-gray.
+        const TECH_STROKE_SELECTED = '#e8531a'
         const TECH_LABEL_FONT = '11px sans-serif'
-        ctxStatic.strokeStyle = TECH_STROKE
-        ctxStatic.fillStyle = TECH_STROKE
         ctxStatic.lineWidth = 2
         ctxStatic.font = TECH_LABEL_FONT
+        const techSel = storeState.techSelected || []
         for (const tl of storeState.technicalLayers || []) {
           if (tl.visible === false) continue
           for (const sh of tl.shapes || []) {
             if (sh.type !== 'line') continue
+            const isSelected = techSel.some(
+              (s) => s.layerId === tl.id && s.shapeId === sh.id
+            )
+            const strokeColor = isSelected ? TECH_STROKE_SELECTED : TECH_STROKE
+            ctxStatic.strokeStyle = strokeColor
+            ctxStatic.fillStyle = strokeColor
             // Transform world coords → canvas px via TECHNICAL viewport.
             const ax = sh.a.x * techZoom + techV.panX
             const ay = sh.a.y * techZoom + techV.panY
@@ -1185,6 +1213,50 @@ export default function CanvasStage() {
           }
           ctxDynamic.restore()
         }
+
+        // Phase 2 18d — rotation grip render. Independent of the tech-line
+        // rubber-band above. Fires whenever selection is non-empty
+        // (regardless of active tool — operator can switch from
+        // tech-select to tech-line and the grip stays visible until
+        // selection clears, which is intentional: the grip is a
+        // selection-state affordance, not a tool affordance). Renders
+        // at the centroid (single-select) or bbox centroid (multi).
+        // KCC orange filled ring + white border + small black crosshair
+        // inside so the operator can see the exact pivot point.
+        const techSelDraw = state.techSelected || []
+        if (techSelDraw.length > 0) {
+          const techVD = state.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+          const techZoomD = techVD.zoom || 1
+          const shapesD = getSelectedTechShapes(state.technicalLayers, techSelDraw)
+          if (shapesD.length > 0) {
+            const centerD = techSelDraw.length === 1
+              ? techShapeCentroid(shapesD[0])
+              : techMultiShapeCentroid(shapesD)
+            if (centerD) {
+              const cxD = centerD.x * techZoomD + techVD.panX
+              const cyD = centerD.y * techZoomD + techVD.panY
+              ctxDynamic.save()
+              ctxDynamic.fillStyle = '#e8531a'
+              ctxDynamic.strokeStyle = '#ffffff'
+              ctxDynamic.lineWidth = 1.5
+              ctxDynamic.beginPath()
+              ctxDynamic.arc(cxD, cyD, 8, 0, Math.PI * 2)
+              ctxDynamic.fill()
+              ctxDynamic.stroke()
+              // Inner crosshair (white on orange) for precise pivot reading.
+              ctxDynamic.strokeStyle = '#ffffff'
+              ctxDynamic.lineWidth = 1
+              ctxDynamic.beginPath()
+              ctxDynamic.moveTo(cxD - 4, cyD + 0.5)
+              ctxDynamic.lineTo(cxD + 4, cyD + 0.5)
+              ctxDynamic.moveTo(cxD + 0.5, cyD - 4)
+              ctxDynamic.lineTo(cxD + 0.5, cyD + 4)
+              ctxDynamic.stroke()
+              ctxDynamic.restore()
+            }
+          }
+        }
+
         ctxDynamic.restore()
         return
       }
@@ -1748,6 +1820,40 @@ export default function CanvasStage() {
       // Spec §9 — edit-mode handle drag. Section 7.A — viewport-aware
       // movePoint / moveBody convert canvas-px deltas to photo-normalized
       // mutations so handles track the cursor 1:1 regardless of zoom.
+      // Phase 2 18d — Technical Drawing rotation drag. Runs BEFORE
+      // Field Markup editDrag so rotation in TECHNICAL doesn't fall
+      // through to FM editDrag handling (which references state that
+      // doesn't apply: photoSize, shape.pts, etc.). Each mousemove
+      // computes the angle delta between the original cursor position
+      // and the current cursor (both relative to the pivot center, in
+      // canvas-px coords); rotates every origin shape's `a` and `b`
+      // around the pivot in world coords; writes back via the no-undo
+      // mutator. One undo entry pushed at mouseup.
+      if (techRotateDrag) {
+        const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+        const techZoom = techV.zoom || 1
+        const centerCanvasX = techRotateDrag.originCenter.x * techZoom + techV.panX
+        const centerCanvasY = techRotateDrag.originCenter.y * techZoom + techV.panY
+        const origAngle = Math.atan2(
+          techRotateDrag.originCursor.y - centerCanvasY,
+          techRotateDrag.originCursor.x - centerCanvasX,
+        )
+        const currAngle = Math.atan2(y - centerCanvasY, x - centerCanvasX)
+        const deltaDeg = ((currAngle - origAngle) * 180) / Math.PI
+        for (const origShape of techRotateDrag.originShapes) {
+          const rotated = rotateTechShape(origShape, techRotateDrag.originCenter, deltaDeg)
+          // Look up the layerId via current techSelected — selection is
+          // stable through the drag, so this stays consistent.
+          const selEntry = store.techSelected.find((s) => s.shapeId === origShape.id)
+          if (selEntry) {
+            store.updateTechnicalShapeNoUndo(selEntry.layerId, origShape.id, rotated)
+          }
+        }
+        staticDirty = true
+        dynamicDirty = true
+        return
+      }
+
       if (editDrag) {
         // Use snap target when available (Spec §9: "Snap applies while
         // dragging handles") for point drags; body drags use raw cursor.
@@ -1856,6 +1962,56 @@ export default function CanvasStage() {
       if (store.appMode === 'TECHNICAL') {
         if (e.button !== 0) return // only left-click commits
         const t = store.tool
+
+        // Phase 2 18d (May 11 2026) — Select tool dispatch. Priority:
+        //   1. If selection exists, check rotation grip proximity first.
+        //   2. Else hit-test shapes for selection / multi-select.
+        //   3. Empty-canvas click clears selection + typed rotation.
+        if (t === 'tech-select') {
+          const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+          // 1. Rotation grip hit.
+          if (store.techSelected.length > 0) {
+            const selectedShapes = getSelectedTechShapes(store.technicalLayers, store.techSelected)
+            const center = store.techSelected.length === 1
+              ? techShapeCentroid(selectedShapes[0])
+              : techMultiShapeCentroid(selectedShapes)
+            if (center) {
+              const handleX = center.x * techV.zoom + techV.panX
+              const handleY = center.y * techV.zoom + techV.panY
+              const dxH = raw.x - handleX, dyH = raw.y - handleY
+              const HANDLE_TOL_SQ = 81  // 9-px radius matches Field Markup body-center
+              if (dxH * dxH + dyH * dyH <= HANDLE_TOL_SQ) {
+                techRotateDrag = {
+                  originShapes: selectedShapes.map((sh) => JSON.parse(JSON.stringify(sh))),
+                  originCenter: { x: center.x, y: center.y },
+                  originCursor: { x: raw.x, y: raw.y },
+                  preDragSnap: useAppStore.getState().captureUndoSnapshot(),
+                }
+                dynamicDirty = true
+                return
+              }
+            }
+          }
+          // 2. Shape hit-test for new/added selection.
+          const hit = techHitTest({ x: raw.x, y: raw.y }, store.technicalLayers, techV, 7)
+          if (hit) {
+            if (e.shiftKey) {
+              store.toggleTechSelectionMember(hit)
+            } else {
+              store.setTechSelection([hit])
+            }
+          } else if (!e.shiftKey) {
+            // 3. Empty-canvas click (without shift) — clear both selection
+            // and the typed rotation input. Shift+empty does nothing
+            // (operator was likely shift-clicking on the canvas trying to
+            // toggle a shape; missing the shape shouldn't clear).
+            store.clearTechSelection()
+            store.setTechRotationInput(null)
+          }
+          dynamicDirty = true
+          return
+        }
+
         if (t === 'tech-line') {
           const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
           const techZoom = techV.zoom || 1
@@ -2181,6 +2337,33 @@ export default function CanvasStage() {
         return
       }
       // Spec §9 — end edit-mode drag if active
+      // Phase 2 18d — Technical Drawing rotation drag commit. Mirrors
+      // Field Markup editDrag's "one undo per drag" pattern: push the
+      // captured pre-drag snapshot if any of the rotated shapes ended
+      // up different from their origin. JSON-stringify comparison
+      // covers the {a, b} rotation in one shot.
+      if (techRotateDrag) {
+        let changed = false
+        const liveLayers = useAppStore.getState().technicalLayers
+        for (const origShape of techRotateDrag.originShapes) {
+          let cur = null
+          for (const tl of liveLayers) {
+            const found = (tl.shapes || []).find((sh) => sh.id === origShape.id)
+            if (found) { cur = found; break }
+          }
+          if (cur && JSON.stringify(cur) !== JSON.stringify(origShape)) {
+            changed = true
+            break
+          }
+        }
+        if (changed && typeof techRotateDrag.preDragSnap === 'string') {
+          useAppStore.getState().pushCapturedSnapshot(techRotateDrag.preDragSnap)
+        }
+        techRotateDrag = null
+        dynamicDirty = true
+        return
+      }
+
       if (editDrag) {
         // P34 side fix (May 7 2026) — push captured pre-drag snapshot
         // if the shape actually changed. updateShape doesn't pushUndo
@@ -2369,10 +2552,29 @@ export default function CanvasStage() {
         // so this branch only fires when focus is elsewhere — e.g.
         // operator clicked back onto the canvas mid-draft).
         const sEscTech = useAppStore.getState()
-        if (sEscTech.appMode === 'TECHNICAL' && sEscTech.techDraft) {
-          sEscTech.setTechDraft(null)
-          dynamicDirty = true
-          return
+        if (sEscTech.appMode === 'TECHNICAL') {
+          // Phase 2 18d — Escape priority chain under TECHNICAL:
+          //   1. Active rotation drag → cancel (shape stays at last
+          //      mousemove position; matches Field Markup editDrag
+          //      Escape semantics).
+          //   2. Active tech-line draft → null the draft.
+          //   3. Active selection → clear selection + typed rotation.
+          if (techRotateDrag) {
+            techRotateDrag = null
+            dynamicDirty = true
+            return
+          }
+          if (sEscTech.techDraft) {
+            sEscTech.setTechDraft(null)
+            dynamicDirty = true
+            return
+          }
+          if (sEscTech.techSelected.length > 0) {
+            sEscTech.clearTechSelection()
+            sEscTech.setTechRotationInput(null)
+            dynamicDirty = true
+            return
+          }
         }
         if (draft) {
           draft = null
@@ -2602,6 +2804,13 @@ export default function CanvasStage() {
       // commit / Escape cancel (draft end), and each typedInches update
       // from TechLengthInput's onTypedChange.
       if (state.techDraft !== prev.techDraft) {
+        dynamicDirty = true
+      }
+      // 18d — selection change repaints BOTH static (orange stroke flip)
+      // and dynamic (rotation grip mount/unmount). Fires on every
+      // setTechSelection / add / remove / toggle / clear.
+      if (state.techSelected !== prev.techSelected) {
+        staticDirty = true
         dynamicDirty = true
       }
       // Spec §9 — selection change repaints both static (selected outline)

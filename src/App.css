@@ -1233,6 +1233,19 @@ body {
   font-size: 11px;
   user-select: none;
 }
+/* Phase 2 18d (May 11 2026) — selection count badge in the rotation
+   input row. KCC orange so the operator sees at a glance how many
+   shapes the rotation will affect. */
+.tech-input-panel .tech-selection-count {
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: rgba(232, 83, 26, 0.15);
+  border: 1px solid #e8531a;
+  color: #e8531a;
+  font-size: 11px;
+  font-weight: 600;
+  user-select: none;
+}
 
 /* ---- Context menu (Step 9) ---- */
 .context-menu {

@@ -500,6 +500,18 @@ const initialState = {
   // in PERSIST_KEYS (operator's mid-edit state shouldn't survive reload —
   // they re-enter via the Perspective button).
   perspectiveEditMode: false,
+  // Phase 2 18d (May 11 2026) — Technical Drawing multi-shape selection.
+  // Transient. NOT in PERSIST_KEYS. Independent from Field Markup's
+  // `selected` (which stays single-select-only for backward compat).
+  // Each entry: { layerId, shapeId } identifying a shape in
+  // technicalLayers. Cleared on appMode change, tool change away from
+  // 'tech-select', clearAll, importJSON, and Escape when no rotation
+  // drag is in progress.
+  techSelected: [],
+  // Phase 2 18d — operator's typed rotation value in degrees while
+  // selection is active. null = no typed value (rubber-band-equivalent
+  // for rotation = drag handle only). Transient.
+  techRotationInput: null,
   // Phase 2 18b/18c — Technical Drawing line-tool draft state.
   // Transient. NOT in PERSIST_KEYS. null when no draft in progress.
   // Active shape:
@@ -1408,6 +1420,11 @@ export const useAppStore = create((set, get) => {
           // mid-draft). Mirrors the `tool: null` clear above so a
           // returning operator picks the tool back up cleanly.
           techDraft: null,
+          // Phase 2 18d — selection is mode-scoped; entering FIELD
+          // shouldn't leave TECHNICAL shapes "selected" in the back-
+          // ground. Same goes for the transient typed rotation value.
+          techSelected: [],
+          techRotationInput: null,
         }
       })
     },
@@ -1646,13 +1663,102 @@ export const useAppStore = create((set, get) => {
         tool: mode === 'DRAW' ? s.tool : null,
       }))
     },
-    setTool: (tool) => set({ tool }),
+    setTool: (tool) => set((s) => {
+      // Phase 2 18d — switching away from 'tech-select' clears the
+      // selection + typed rotation value. Selection is tool-scoped: a
+      // returning operator picking 'tech-select' starts with a fresh
+      // selection.
+      if (s.tool === 'tech-select' && tool !== 'tech-select') {
+        return { tool, techSelected: [], techRotationInput: null }
+      }
+      return { tool }
+    }),
     // Phase 2 18b — setTechDraft writes the Technical Drawing line-tool
     // draft state. Called from CanvasStage onMouseDown (anchor capture)
     // + TechLengthInput onTypedChange (live projection update) + commit/
     // cancel paths. Pass null to clear. Subscribed by CanvasStage's
     // dirty-flag pipeline so changes trigger a dynamic-canvas repaint.
     setTechDraft: (techDraft) => set({ techDraft }),
+
+    // ============ Phase 2 18d — Technical Drawing selection (May 11 2026) ====
+    // Multi-shape selection lives in `techSelected` (transient). Validates
+    // each {layerId, shapeId} entry against current technicalLayers; invalid
+    // entries are silently dropped. Keeps the canvas + TechInputPanel from
+    // ever pointing at a stale shape.
+    setTechSelection: (arr) => set((s) => {
+      if (!Array.isArray(arr)) return { techSelected: [] }
+      const valid = arr.filter((entry) => {
+        if (!entry || typeof entry !== 'object') return false
+        if (!entry.layerId || !entry.shapeId) return false
+        const layer = s.technicalLayers.find((tl) => tl.id === entry.layerId)
+        if (!layer) return false
+        return (layer.shapes || []).some((sh) => sh.id === entry.shapeId)
+      })
+      return { techSelected: valid }
+    }),
+
+    addToTechSelection: (entry) => set((s) => {
+      if (!entry || !entry.layerId || !entry.shapeId) return {}
+      const layer = s.technicalLayers.find((tl) => tl.id === entry.layerId)
+      if (!layer) return {}
+      const exists = (layer.shapes || []).some((sh) => sh.id === entry.shapeId)
+      if (!exists) return {}
+      const already = s.techSelected.some(
+        (e) => e.layerId === entry.layerId && e.shapeId === entry.shapeId
+      )
+      if (already) return {}
+      return { techSelected: [...s.techSelected, { layerId: entry.layerId, shapeId: entry.shapeId }] }
+    }),
+
+    removeFromTechSelection: (entry) => set((s) => {
+      if (!entry) return {}
+      return {
+        techSelected: s.techSelected.filter(
+          (e) => !(e.layerId === entry.layerId && e.shapeId === entry.shapeId)
+        ),
+      }
+    }),
+
+    toggleTechSelectionMember: (entry) => set((s) => {
+      if (!entry || !entry.layerId || !entry.shapeId) return {}
+      const layer = s.technicalLayers.find((tl) => tl.id === entry.layerId)
+      if (!layer) return {}
+      const exists = (layer.shapes || []).some((sh) => sh.id === entry.shapeId)
+      if (!exists) return {}
+      const idx = s.techSelected.findIndex(
+        (e) => e.layerId === entry.layerId && e.shapeId === entry.shapeId
+      )
+      if (idx >= 0) {
+        // Remove
+        const next = s.techSelected.slice()
+        next.splice(idx, 1)
+        return { techSelected: next }
+      }
+      // Add
+      return { techSelected: [...s.techSelected, { layerId: entry.layerId, shapeId: entry.shapeId }] }
+    }),
+
+    clearTechSelection: () => set({ techSelected: [] }),
+
+    // 18d — Transient typed rotation value. Cleared on selection clear,
+    // on rotation commit, and on Escape.
+    setTechRotationInput: (value) => set({ techRotationInput: value }),
+
+    // 18d — Per-mousemove rotation drag mutator. Mirrors
+    // updateTechnicalShape (same set() shape) but DOES NOT call pushUndo.
+    // The drag captures one undo snapshot at mousedown via
+    // captureUndoSnapshot and pushes it at mouseup if anything changed
+    // (same pattern as Field Markup's editDrag at CanvasStage.jsx:2184).
+    updateTechnicalShapeNoUndo: (layerId, shapeId, patch) => {
+      set((s) => ({
+        technicalLayers: s.technicalLayers.map((tl) =>
+          tl.id !== layerId ? tl : {
+            ...tl,
+            shapes: tl.shapes.map((sh) => sh.id === shapeId ? { ...sh, ...patch } : sh),
+          }
+        ),
+      }))
+    },
     setCursor: (x, y) => set({ cursorX: x, cursorY: y }),
     // (Old setSnapType: (snapType) => set({ snapType }) was vestigial dead
     // code with no callers — setSnap below writes both snapPt + snapType
@@ -2125,6 +2231,11 @@ export const useAppStore = create((set, get) => {
         // Phase 2 18b — transient Technical Drawing draft never restores
         // from a file (same convention as perspectiveEditMode).
         techDraft: null,
+        // Phase 2 18d — selection + typed rotation are session-scoped UI
+        // state. Loaded projects start with no selection (operator picks
+        // shapes again in the freshly-loaded canvas).
+        techSelected: [],
+        techRotationInput: null,
         pdfOrientation: normalizePdfOrientation(obj.pdfOrientation),
         // P45 (Phase 2 18a, May 10 2026) — Load Project clears the
         // currentFileHandle + currentFileName so the loaded file is
@@ -2377,6 +2488,10 @@ export const useAppStore = create((set, get) => {
         // New Project so a half-drawn line from the prior session doesn't
         // surface mid-input on the cleared canvas.
         techDraft: null,
+        // Phase 2 18d — selection + typed rotation cleared on New Project
+        // (same convention as `selected` for Field Markup above).
+        techSelected: [],
+        techRotationInput: null,
         // P45 (Phase 2 18a, May 10 2026) — New Project clears the
         // currentFileHandle + currentFileName so the operator's next
         // Save opens the picker fresh. Matches the Load Project

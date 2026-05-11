@@ -472,6 +472,23 @@ export default function DrawingTools() {
       {appMode === 'TECHNICAL' && (
       <>
       <div className="tool-group" data-tool-group="technical">
+        {/* Phase 2 18d (May 11 2026) — Select tool prepended to the
+            Technical group. CAD convention: selection first, draw tools
+            second. tool === 'tech-select' enables click-to-select +
+            shift-click multi-select + drag-rotation-handle behavior in
+            CanvasStage. setTool clears techSelected when switching away. */}
+        <button
+          type="button"
+          className={tool === 'tech-select' ? 'tool-btn tech-btn active' : 'tool-btn tech-btn'}
+          onClick={() => onSelect('tech-select', appMode !== 'TECHNICAL')}
+          disabled={appMode !== 'TECHNICAL'}
+          title="Select — click to select a shape; shift-click adds to selection. Drag the centroid handle or type a rotation angle."
+          aria-pressed={tool === 'tech-select'}
+          data-tool="tech-select"
+        >
+          <span className="tool-icon" aria-hidden="true">↗</span>
+          <span className="tool-name">Select</span>
+        </button>
         <button
           type="button"
           className={tool === 'tech-line' ? 'tool-btn tech-btn active' : 'tool-btn tech-btn'}
