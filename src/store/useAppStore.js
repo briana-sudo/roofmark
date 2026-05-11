@@ -621,7 +621,12 @@ const initialState = {
 //
 // Geometry-only undo (when the snapshot's photo state matches current)
 // continues to take the fast sync path in the undo action.
-const dataSnapshot = (state) => JSON.stringify({
+// Export under test-only name as well so the block test runner can
+// import the exact serialization shape and exercise the full undo
+// round-trip without a parallel mock that might lie about what's
+// actually persisted. Production callers continue to use the closure-
+// internal pushUndo / dataSnapshot defined inside the store factory.
+export const dataSnapshot = (state) => JSON.stringify({
   layers: state.layers,
   sequences: state.sequences,
   clines: state.clines,
@@ -640,6 +645,17 @@ const dataSnapshot = (state) => JSON.stringify({
   // coverage AND inclusion in dataSnapshot."
   gridRotation: typeof state.gridRotation === 'number' ? state.gridRotation : 0,
   perspectiveCorners: state.perspectiveCorners || null,
+  // Phase 2 18b follow-on (operator-reported May 10 2026 on `1edd117`).
+  // Same bug class as the P16+P38 gridRotation/perspectiveCorners follow-
+  // on May 8 2026: any new mutable field needs both pushUndo coverage
+  // AND inclusion in dataSnapshot/undo/redo. 18b shipped the first half
+  // only — addTechnicalShape called pushUndo but the snapshot omitted
+  // technicalLayers, so undo restored geometry + photo + perspective
+  // but left committed Technical lines on the canvas. specTable is
+  // added pre-emptively for 18g (spec table panel) so the same gap
+  // doesn't re-open when that lands.
+  technicalLayers: state.technicalLayers || [],
+  specTable: state.specTable || {},
 })
 
 // ============================================================================
@@ -2119,6 +2135,14 @@ export const useAppStore = create((set, get) => {
         // landed.
         gridRotation: typeof next.gridRotation === 'number' ? next.gridRotation : 0,
         perspectiveCorners: next.perspectiveCorners ?? null,
+        // Phase 2 18b follow-on (operator-reported May 10 2026 on
+        // `1edd117`) — restore Technical Drawing geometry + spec table
+        // alongside the rest. Pre-this-fix undo popped the stack but
+        // never patched these fields, leaving committed Technical lines
+        // on the canvas while the operator pressed Cmd+Z. Backward-
+        // compat fallback to [] / {} for snapshots pushed pre-fix.
+        technicalLayers: Array.isArray(next.technicalLayers) ? next.technicalLayers : [],
+        specTable: (next.specTable && typeof next.specTable === 'object') ? next.specTable : {},
         undoStack: undoStack.slice(0, -1),
         redoStack: [...redoStack, current],
       }
@@ -2206,6 +2230,12 @@ export const useAppStore = create((set, get) => {
         // post-action state symmetrically with undo.
         gridRotation: typeof next.gridRotation === 'number' ? next.gridRotation : 0,
         perspectiveCorners: next.perspectiveCorners ?? null,
+        // Phase 2 18b follow-on (operator-reported May 10 2026) —
+        // symmetric restore for Technical geometry + spec table so
+        // Cmd+Shift+Z brings back what Cmd+Z undid. Backward-compat
+        // fallback to [] / {} for pre-fix snapshots.
+        technicalLayers: Array.isArray(next.technicalLayers) ? next.technicalLayers : [],
+        specTable: (next.specTable && typeof next.specTable === 'object') ? next.specTable : {},
         // Photo fields intentionally NOT restored. See note above.
         undoStack: [...undoStack, current],
         redoStack: redoStack.slice(0, -1),

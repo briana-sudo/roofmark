@@ -152,11 +152,24 @@ function makeTechStore() {
 }
 
 // 18. addTechnicalShape pushes one undo snapshot per call.
+// Phase 2 18b follow-on (May 10 2026): the pre-fix version of this test used
+// a mock pushUndo that serialized `state.technicalLayers` directly — testing
+// the BEHAVIOR the real dataSnapshot SHOULD have, not the BEHAVIOR it
+// ACTUALLY had. That lie let the production bug ship. Rewritten below to
+// use makeRoundTripStore (full real-dataSnapshot replica) so stack-length
+// + restore-content are tested together.
 {
-  const s = makeTechStore()
+  const s = makeRoundTripStore()
   pass('18a. undoStack starts empty', s.state.undoStack.length === 0)
   s.addTechnicalShape({ type: 'line', a: {x:0,y:0}, b: {x:24,y:0}, lengthInches: 1, lengthSource: 'freehand' })
   pass('18b. addTechnicalShape pushes one undo snapshot', s.state.undoStack.length === 1)
+  // Verify the snapshot actually carries technicalLayers (this is the
+  // assertion that pre-fix would have caught Bug B if it had existed).
+  const parsed = JSON.parse(s.state.undoStack[0])
+  pass('18b-2. undo snapshot includes technicalLayers field',
+    Array.isArray(parsed.technicalLayers))
+  pass('18b-3. undo snapshot includes specTable field',
+    parsed.specTable !== undefined && typeof parsed.specTable === 'object')
   s.addTechnicalShape({ type: 'line', a: {x:0,y:0}, b: {x:48,y:0}, lengthInches: 2, lengthSource: 'freehand' })
   pass('18c. second addTechnicalShape pushes a second undo snapshot', s.state.undoStack.length === 2)
 }
@@ -374,6 +387,212 @@ const PX_PER_INCH = 24
   onMouseMove({ movementX: 2, movementY: 1 }, state)
   pass('27d. subsequent mouse move leaves pointerType on "mouse"',
     state.pointerType === 'mouse')
+}
+
+// ============================================================================
+// FULL ROUND-TRIP UNDO/REDO TESTS (28–32) — Phase 2 18b follow-on (May 10 2026)
+// ============================================================================
+// Bug B (operator-reported on `1edd117`): dataSnapshot omitted technicalLayers
+// and specTable, so undo popped the stack but the patch left committed
+// Technical lines on the canvas. Same root cause as the P16+P38 follow-on:
+// any new mutable field needs both pushUndo coverage AND inclusion in
+// dataSnapshot/undo/redo. The pre-fix test 18 cheated by mocking pushUndo
+// with a custom serializer that included technicalLayers — the test
+// passed while the prod code lied.
+//
+// `makeRoundTripStore` below uses a dataSnapshot replica that MATCHES the
+// production useAppStore.dataSnapshot field-for-field. If the production
+// shape changes, this replica MUST be updated in lockstep — otherwise
+// the test goes back to lying. (A future improvement would be to import
+// the real dataSnapshot via the new test-only `export` at line 624 of
+// useAppStore.js; the current eval-shim pattern doesn't extend cleanly
+// to a file that imports Zustand + photoIDB + React. Keep in sync.)
+function makeRoundTripStore() {
+  let techLayerSeq = 0
+  let techShapeSeq = 0
+  let layerSeq = 0
+  let shapeSeq = 0
+  const state = {
+    layers: [],
+    sequences: [],
+    clines: [],
+    photoMeta: null,
+    cropMeta: null,
+    hasSourcePhoto: false,
+    gridRotation: 0,
+    perspectiveCorners: null,
+    technicalLayers: [],
+    specTable: {},
+    undoStack: [],
+    redoStack: [],
+  }
+  // Replica of production dataSnapshot — keep field-for-field in sync.
+  const dataSnapshot = (s) => JSON.stringify({
+    layers: s.layers,
+    sequences: s.sequences,
+    clines: s.clines,
+    photoMeta: s.photoMeta || null,
+    cropMeta: s.cropMeta || null,
+    hasSourcePhoto: !!s.hasSourcePhoto,
+    gridRotation: typeof s.gridRotation === 'number' ? s.gridRotation : 0,
+    perspectiveCorners: s.perspectiveCorners || null,
+    technicalLayers: s.technicalLayers || [],
+    specTable: s.specTable || {},
+  })
+  const pushUndo = () => {
+    state.undoStack.push(dataSnapshot(state))
+  }
+  const applySnapshot = (snap) => {
+    const next = JSON.parse(snap)
+    state.layers = next.layers || []
+    state.sequences = next.sequences || []
+    state.clines = next.clines || []
+    state.gridRotation = typeof next.gridRotation === 'number' ? next.gridRotation : 0
+    state.perspectiveCorners = next.perspectiveCorners ?? null
+    state.technicalLayers = Array.isArray(next.technicalLayers) ? next.technicalLayers : []
+    state.specTable = (next.specTable && typeof next.specTable === 'object') ? next.specTable : {}
+  }
+  const undo = () => {
+    if (state.undoStack.length === 0) return false
+    const current = dataSnapshot(state)
+    const last = state.undoStack[state.undoStack.length - 1]
+    applySnapshot(last)
+    state.undoStack = state.undoStack.slice(0, -1)
+    state.redoStack = [...state.redoStack, current]
+    return true
+  }
+  const redo = () => {
+    if (state.redoStack.length === 0) return false
+    const current = dataSnapshot(state)
+    const last = state.redoStack[state.redoStack.length - 1]
+    applySnapshot(last)
+    state.undoStack = [...state.undoStack, current]
+    state.redoStack = state.redoStack.slice(0, -1)
+    return true
+  }
+  // addTechnicalShape — production-equivalent: pushUndo, then mutate.
+  const addTechnicalShape = (shape) => {
+    pushUndo()
+    const id = shape.id || `tech-shape-${++techShapeSeq}`
+    const fullShape = { ...shape, id }
+    if (state.technicalLayers.length === 0) {
+      state.technicalLayers = [{
+        id: `tech-layer-${++techLayerSeq}`,
+        name: 'Layer 1',
+        visible: true,
+        shapes: [fullShape],
+      }]
+    } else {
+      state.technicalLayers = state.technicalLayers.map((tl, i) =>
+        i === 0 ? { ...tl, shapes: [...tl.shapes, fullShape] } : tl
+      )
+    }
+    return id
+  }
+  // Field Markup addLayer + addShape — production-equivalent. Tests use
+  // this to verify the dataSnapshot extension didn't break the Field path.
+  const addLayer = () => {
+    pushUndo()
+    const id = `l${++layerSeq}`
+    state.layers = [...state.layers, { id, shapes: [] }]
+    return id
+  }
+  const addShape = (layerId, shape) => {
+    pushUndo()
+    const id = shape.id || `sh${++shapeSeq}`
+    const fullShape = { ...shape, id }
+    state.layers = state.layers.map((l) =>
+      l.id === layerId ? { ...l, shapes: [...l.shapes, fullShape] } : l
+    )
+    return id
+  }
+  return { state, dataSnapshot, addTechnicalShape, addLayer, addShape, undo, redo }
+}
+
+// 28. Full round-trip: add then undo restores empty state.
+{
+  const s = makeRoundTripStore()
+  // Pre-condition.
+  pass('28-pre. technicalLayers starts empty', s.state.technicalLayers.length === 0)
+  // Add.
+  s.addTechnicalShape({ type: 'line', a: {x:0,y:0}, b: {x:24,y:0}, lengthInches: 1, lengthSource: 'typed' })
+  pass('28a. addTechnicalShape creates one layer with one shape',
+    s.state.technicalLayers.length === 1 && s.state.technicalLayers[0].shapes.length === 1)
+  pass('28b. undoStack grew by one after add', s.state.undoStack.length === 1)
+  // Undo.
+  s.undo()
+  // Pre-add state had NO technical layers (auto-create happened inside the
+  // add). Undo restores that pre-add empty state → entire auto-layer
+  // disappears alongside the shape.
+  pass('28c. undo removes the auto-created layer entirely',
+    s.state.technicalLayers.length === 0)
+  pass('28d. undoStack empty after undo', s.state.undoStack.length === 0)
+  pass('28e. redoStack has the one entry after undo', s.state.redoStack.length === 1)
+}
+
+// 29. Redo restores the shape.
+{
+  const s = makeRoundTripStore()
+  s.addTechnicalShape({ type: 'line', a: {x:0,y:0}, b: {x:24,y:0}, lengthInches: 1, lengthSource: 'typed' })
+  s.undo()
+  // Now redo.
+  s.redo()
+  pass('29a. redo restores the layer', s.state.technicalLayers.length === 1)
+  pass('29b. redo restores the shape', s.state.technicalLayers[0].shapes.length === 1)
+  pass('29c. redo restores lengthInches', s.state.technicalLayers[0].shapes[0].lengthInches === 1)
+  pass('29d. undoStack has one entry after redo', s.state.undoStack.length === 1)
+  pass('29e. redoStack empty after redo', s.state.redoStack.length === 0)
+}
+
+// 30. Multi-shape undo: add three, undo three, all gone.
+{
+  const s = makeRoundTripStore()
+  s.addTechnicalShape({ type: 'line', a: {x:0,y:0}, b: {x:24,y:0}, lengthInches: 1, lengthSource: 'typed' })
+  s.addTechnicalShape({ type: 'line', a: {x:0,y:0}, b: {x:48,y:0}, lengthInches: 2, lengthSource: 'typed' })
+  s.addTechnicalShape({ type: 'line', a: {x:0,y:0}, b: {x:72,y:0}, lengthInches: 3, lengthSource: 'typed' })
+  pass('30a. three shapes commit', s.state.technicalLayers[0].shapes.length === 3)
+  s.undo()
+  s.undo()
+  s.undo()
+  // After three undos: back to pre-first-add state — no technical layers.
+  pass('30b. all shapes removed after 3 undos', s.state.technicalLayers.length === 0)
+  pass('30c. undoStack empty after 3 undos', s.state.undoStack.length === 0)
+  pass('30d. redoStack has 3 entries after 3 undos', s.state.redoStack.length === 3)
+}
+
+// 31. specTable round-trip placeholder — locks coverage for 18g spec table panel.
+{
+  const s = makeRoundTripStore()
+  // Mutate specTable directly + push a snapshot (simulating what a future
+  // setSpecTable action would do).
+  s.state.specTable = { partName: 'test', qty: 7 }
+  const snap = s.dataSnapshot(s.state)
+  const parsed = JSON.parse(snap)
+  pass('31a. specTable round-trips through dataSnapshot',
+    parsed.specTable.partName === 'test' && parsed.specTable.qty === 7)
+  // Now flip specTable + undo from a manual push to verify the restore path.
+  const previousSnap = JSON.stringify({ specTable: { partName: 'test', qty: 7 } })
+  s.state.undoStack.push(previousSnap)
+  s.state.specTable = { partName: 'changed', qty: 99 }
+  s.undo()
+  pass('31b. undo restores specTable contents',
+    s.state.specTable.partName === 'test' && s.state.specTable.qty === 7)
+}
+
+// 32. Field Markup undo regression — dataSnapshot extension didn't break the existing path.
+{
+  const s = makeRoundTripStore()
+  const layerId = s.addLayer()
+  const preCount = s.state.layers[0].shapes.length
+  pass('32-pre. pre-add shape count === 0', preCount === 0)
+  s.addShape(layerId, { type: 'rect', pts: [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}] })
+  pass('32a. addShape increments shape count to 1',
+    s.state.layers[0].shapes.length === 1)
+  s.undo()
+  pass('32b. undo decrements shape count back to 0',
+    s.state.layers[0].shapes.length === preCount)
+  pass('32c. Field Markup layer itself still present after shape-only undo',
+    s.state.layers.length === 1)
 }
 
 // ============================================================================

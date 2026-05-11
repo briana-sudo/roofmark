@@ -43,11 +43,54 @@ export default function TechLengthInput({ onCommit, onCancel }) {
   // on each rAF tick via the dynamic-canvas subscription).
   const [raw, setRaw] = useState('')
   const inputRef = useRef(null)
+  const wrapperRef = useRef(null)
 
-  // Autofocus on mount so the operator can start typing immediately.
+  // Phase 2 18b bug fix (operator-reported May 10 2026 on `1edd117`):
+  // belt-and-suspenders autofocus. Pre-fix the input never received
+  // focus on the live build, so every keystroke was lost (and `0` / `1`
+  // / `+` / `-` got hijacked by CanvasStage's document-level zoom-key
+  // shortcuts). Three independent paths now race to win focus:
+  //   1. <input autoFocus> — native attribute, applied at HTML parse time.
+  //   2. inputRef.current.focus() — fires synchronously on first render.
+  //   3. rAF re-focus — if step 1+2 lose focus to a sibling event
+  //      (mouseup released to body, etc.), the next animation frame
+  //      retries. Cleanup cancels the rAF on unmount.
   useEffect(() => {
     inputRef.current?.focus()
+    const raf = requestAnimationFrame(() => {
+      if (inputRef.current && document.activeElement !== inputRef.current) {
+        inputRef.current.focus()
+      }
+    })
+    return () => cancelAnimationFrame(raf)
   }, [])
+
+  // Phase 2 18b bug fix: native capture-phase keydown listener on the
+  // wrapper. React's synthetic `e.stopPropagation()` in the input's
+  // onKeyDown stops React's synthetic event from bubbling, but the
+  // NATIVE event still bubbles up to document-level listeners (the
+  // CanvasStage zoom-key shortcuts at lines 2334-2342 hijack `0`/`1`/
+  // `+`/`-` even though the operator is typing in this input). Adding
+  // a capture-phase listener on the wrapper intercepts the native
+  // event BEFORE it can bubble out — stopPropagation here stops
+  // bubbling to document entirely. Capture phase (third arg `true`)
+  // is important: bubble-phase would fire after document's listener.
+  useEffect(() => {
+    const wrapper = wrapperRef.current
+    if (!wrapper) return
+    const stop = (e) => { e.stopPropagation() }
+    wrapper.addEventListener('keydown', stop, true)
+    return () => wrapper.removeEventListener('keydown', stop, true)
+  }, [])
+
+  // Re-focus the input on any wrapper-margin click. The wrapper has
+  // padding + a label element; clicking the dead space around the
+  // input element would otherwise steal focus from the input. This
+  // belt-and-suspenders handler snaps focus back so the operator
+  // never lands in a "looks like typing should work but doesn't" state.
+  const handleWrapperMouseDown = () => {
+    inputRef.current?.focus()
+  }
 
   const parsed = parseLength(raw)
   const invalid = raw.length > 0 && parsed === null
@@ -79,11 +122,13 @@ export default function TechLengthInput({ onCommit, onCancel }) {
 
   return (
     <div
+      ref={wrapperRef}
       className="tech-length-input"
       style={{ left: cursorX + CURSOR_OFFSET_X, top: cursorY + CURSOR_OFFSET_Y }}
       role="dialog"
       aria-label="Technical Drawing length input"
       data-testid="tech-length-input"
+      onMouseDown={handleWrapperMouseDown}
     >
       <label className="tech-length-label" htmlFor="tech-length-input-field">
         Length
@@ -97,6 +142,7 @@ export default function TechLengthInput({ onCommit, onCancel }) {
         onChange={onChange}
         onKeyDown={onKeyDown}
         placeholder={`4"  or  1'6"`}
+        autoFocus
         aria-invalid={invalid}
         aria-label={'Length (inches or feet/inches). Enter to commit. Escape to cancel.'}
         data-testid="tech-length-input-field"
