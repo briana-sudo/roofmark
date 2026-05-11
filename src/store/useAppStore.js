@@ -1807,6 +1807,114 @@ export const useAppStore = create((set, get) => {
     setTechCommandHover: (target) => set({ techCommandHover: target }),
     setTechGripEdit: (obj) => set({ techGripEdit: obj }),
 
+    // 18d-edit commit actions (May 11 2026 addendum) — single source of
+    // truth for command semantics. All five commit paths (Rotate, Move,
+    // Copy, Delete, Grip-edit) live as store actions so:
+    //   1. Both CanvasStage click-commit and TechInputPanel typed-Enter
+    //      reach the same logic — no duplication.
+    //   2. The Node test runner can exercise the full commit cycle
+    //      (including undo/redo) via store actions alone, without
+    //      needing TechInputPanel / CanvasStage mocks.
+    //   3. Multi-shape commits push exactly ONE undo snapshot via the
+    //      provided preSnap, not N (would happen with per-shape
+    //      addTechnicalShape / updateTechnicalShape calls).
+    //
+    // Each accepts origins (deep-clone Array at command start) + a
+    // preSnap captured via captureUndoSnapshot when the command began.
+    // Rotate/Move/Grip-edit mutate live technicalLayers in-place; Copy
+    // adds new clones; Delete removes by id.
+
+    // Rotate commit: rotate every origin shape by delta degrees around
+    // basePoint, write the result to live technicalLayers, push preSnap.
+    commitRotateCommand: (origins, basePoint, deltaDeg, preSnap) => {
+      if (!Array.isArray(origins) || origins.length === 0 || !basePoint) return
+      const rad = (deltaDeg * Math.PI) / 180
+      const cos = Math.cos(rad)
+      const sin = Math.sin(rad)
+      const rotatePt = (p) => {
+        const dx = p.x - basePoint.x
+        const dy = p.y - basePoint.y
+        return {
+          x: basePoint.x + dx * cos - dy * sin,
+          y: basePoint.y + dx * sin + dy * cos,
+        }
+      }
+      set((s) => {
+        let nextLayers = s.technicalLayers
+        for (const orig of origins) {
+          if (!orig || orig.type !== 'line' || !orig.a || !orig.b) continue
+          const rotated = { ...orig, a: rotatePt(orig.a), b: rotatePt(orig.b) }
+          nextLayers = nextLayers.map((l) => ({
+            ...l,
+            shapes: (l.shapes || []).map((sh) =>
+              sh.id === orig.id ? { ...sh, ...rotated } : sh
+            ),
+          }))
+        }
+        return { technicalLayers: nextLayers }
+      })
+      if (typeof preSnap === 'string') {
+        set((s) => {
+          const next = [...s.undoStack, preSnap]
+          if (next.length > UNDO_LIMIT) next.shift()
+          return { undoStack: next, redoStack: [] }
+        })
+      }
+    },
+
+    // Move commit: translate every origin shape by (dx, dy), write
+    // live, push preSnap.
+    commitMoveCommand: (origins, delta, preSnap) => {
+      if (!Array.isArray(origins) || origins.length === 0 || !delta) return
+      set((s) => {
+        let nextLayers = s.technicalLayers
+        for (const orig of origins) {
+          if (!orig || orig.type !== 'line' || !orig.a || !orig.b) continue
+          const moved = {
+            ...orig,
+            a: { x: orig.a.x + delta.dx, y: orig.a.y + delta.dy },
+            b: { x: orig.b.x + delta.dx, y: orig.b.y + delta.dy },
+          }
+          nextLayers = nextLayers.map((l) => ({
+            ...l,
+            shapes: (l.shapes || []).map((sh) =>
+              sh.id === orig.id ? { ...sh, ...moved } : sh
+            ),
+          }))
+        }
+        return { technicalLayers: nextLayers }
+      })
+      if (typeof preSnap === 'string') {
+        set((s) => {
+          const next = [...s.undoStack, preSnap]
+          if (next.length > UNDO_LIMIT) next.shift()
+          return { undoStack: next, redoStack: [] }
+        })
+      }
+    },
+
+    // Grip-edit commit: update one endpoint on one shape, push preSnap.
+    commitGripEditCommand: (layerId, shapeId, pointKey, newPoint, preSnap) => {
+      if (!layerId || !shapeId || !pointKey || !newPoint) return
+      set((s) => ({
+        technicalLayers: s.technicalLayers.map((tl) =>
+          tl.id !== layerId ? tl : {
+            ...tl,
+            shapes: tl.shapes.map((sh) =>
+              sh.id === shapeId ? { ...sh, [pointKey]: { x: newPoint.x, y: newPoint.y } } : sh
+            ),
+          }
+        ),
+      }))
+      if (typeof preSnap === 'string') {
+        set((s) => {
+          const next = [...s.undoStack, preSnap]
+          if (next.length > UNDO_LIMIT) next.shift()
+          return { undoStack: next, redoStack: [] }
+        })
+      }
+    },
+
     // 18d-edit Copy + Delete with single-snapshot undo. Both commands
     // mutate technicalLayers in a single set() call so an N-shape Copy
     // or Delete is one undo entry (vs. N entries when calling

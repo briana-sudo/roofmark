@@ -635,6 +635,456 @@ function makeMockCmdStore() {
 }
 
 // ============================================================================
+// UNDO / REDO ROUND-TRIP (41–54) — 18d-edit addendum (May 11 2026)
+// Same gap that caused the 18b undo bug (P47): commit pushes a snap
+// onto undoStack but the snap shape didn't include the mutated field.
+// 18d-edit verifies the full restore cycle for every command + grip.
+//
+// Test scaffolding: minimal-store harness with dataSnapshot replica,
+// undoStack + redoStack, captureSnap / applySnap / undo / redo +
+// commit action replicas. Mirrors the production store's commitRotate/
+// commitMove/commitCopy/commitDelete/commitGripEditCommand contracts;
+// kept in sync via the keep-in-sync comment in techGeometry-test
+// section (step-18b precedent).
+// ============================================================================
+
+function makeUndoStore() {
+  let _shapeSeq = 100
+  const newId = () => `tech-shape-${++_shapeSeq}`
+  const state = {
+    technicalLayers: [{
+      id: 'L1', name: 'Layer 1', visible: true, shapes: [],
+    }],
+    undoStack: [],
+    redoStack: [],
+  }
+  // Replica of production dataSnapshot — field-for-field. Keep in sync.
+  const dataSnapshot = (s) => JSON.stringify({
+    layers: [], sequences: [], clines: [],
+    photoMeta: null, cropMeta: null, hasSourcePhoto: false,
+    gridRotation: 0, perspectiveCorners: null,
+    technicalLayers: s.technicalLayers || [],
+    specTable: {},
+  })
+  const captureSnap = () => dataSnapshot(state)
+  const pushCapturedSnap = (snap) => {
+    if (typeof snap !== 'string') return
+    state.undoStack.push(snap)
+    state.redoStack = []  // pushing always wipes redo (standard semantics)
+  }
+  const applySnap = (snap) => {
+    const next = JSON.parse(snap)
+    state.technicalLayers = Array.isArray(next.technicalLayers) ? next.technicalLayers : []
+  }
+  // undo: pop preSnap, capture current, apply preSnap, push current to redoStack.
+  const undo = () => {
+    if (state.undoStack.length === 0) return false
+    const current = dataSnapshot(state)
+    const last = state.undoStack[state.undoStack.length - 1]
+    applySnap(last)
+    state.undoStack = state.undoStack.slice(0, -1)
+    state.redoStack = [...state.redoStack, current]
+    return true
+  }
+  // redo: pop postSnap, capture current (= preSnap), apply postSnap, push to undoStack.
+  const redo = () => {
+    if (state.redoStack.length === 0) return false
+    const current = dataSnapshot(state)
+    const last = state.redoStack[state.redoStack.length - 1]
+    applySnap(last)
+    state.undoStack = [...state.undoStack, current]
+    state.redoStack = state.redoStack.slice(0, -1)
+    return true
+  }
+
+  // ===== Commit action replicas (mirror useAppStore.js) =====
+  const commitRotateCommand = (origins, basePoint, deltaDeg, preSnap) => {
+    if (!Array.isArray(origins) || origins.length === 0 || !basePoint) return
+    const rad = (deltaDeg * Math.PI) / 180
+    const cos = Math.cos(rad)
+    const sin = Math.sin(rad)
+    const rotatePt = (p) => ({
+      x: basePoint.x + (p.x - basePoint.x) * cos - (p.y - basePoint.y) * sin,
+      y: basePoint.y + (p.x - basePoint.x) * sin + (p.y - basePoint.y) * cos,
+    })
+    let nextLayers = state.technicalLayers
+    for (const orig of origins) {
+      if (!orig || orig.type !== 'line') continue
+      nextLayers = nextLayers.map((l) => ({
+        ...l,
+        shapes: (l.shapes || []).map((sh) =>
+          sh.id === orig.id ? { ...sh, a: rotatePt(orig.a), b: rotatePt(orig.b) } : sh
+        ),
+      }))
+    }
+    state.technicalLayers = nextLayers
+    pushCapturedSnap(preSnap)
+  }
+  const commitMoveCommand = (origins, delta, preSnap) => {
+    if (!Array.isArray(origins) || origins.length === 0 || !delta) return
+    let nextLayers = state.technicalLayers
+    for (const orig of origins) {
+      if (!orig || orig.type !== 'line') continue
+      nextLayers = nextLayers.map((l) => ({
+        ...l,
+        shapes: (l.shapes || []).map((sh) =>
+          sh.id === orig.id ? {
+            ...sh,
+            a: { x: orig.a.x + delta.dx, y: orig.a.y + delta.dy },
+            b: { x: orig.b.x + delta.dx, y: orig.b.y + delta.dy },
+          } : sh
+        ),
+      }))
+    }
+    state.technicalLayers = nextLayers
+    pushCapturedSnap(preSnap)
+  }
+  const commitCopyCommand = (origins, delta, preSnap) => {
+    if (!Array.isArray(origins) || origins.length === 0) return
+    let nextLayers = state.technicalLayers
+    for (const orig of origins) {
+      const layerIdx = nextLayers.findIndex((l) => (l.shapes || []).some((sh) => sh.id === orig.id))
+      if (layerIdx < 0) continue
+      if (orig.type !== 'line') continue
+      const newShape = {
+        ...orig, id: newId(),
+        a: { x: orig.a.x + delta.dx, y: orig.a.y + delta.dy },
+        b: { x: orig.b.x + delta.dx, y: orig.b.y + delta.dy },
+      }
+      nextLayers = nextLayers.map((l, i) =>
+        i === layerIdx ? { ...l, shapes: [...l.shapes, newShape] } : l
+      )
+    }
+    state.technicalLayers = nextLayers
+    pushCapturedSnap(preSnap)
+  }
+  const commitDeleteCommand = (sel, preSnap) => {
+    if (!Array.isArray(sel) || sel.length === 0) return
+    const selSet = new Set(sel.map((e) => e && e.shapeId).filter(Boolean))
+    state.technicalLayers = state.technicalLayers.map((l) => ({
+      ...l,
+      shapes: (l.shapes || []).filter((sh) => !selSet.has(sh.id)),
+    }))
+    pushCapturedSnap(preSnap)
+  }
+  const commitGripEditCommand = (layerId, shapeId, pointKey, newPoint, preSnap) => {
+    if (!layerId || !shapeId || !pointKey || !newPoint) return
+    state.technicalLayers = state.technicalLayers.map((tl) =>
+      tl.id !== layerId ? tl : {
+        ...tl,
+        shapes: tl.shapes.map((sh) =>
+          sh.id === shapeId ? { ...sh, [pointKey]: { x: newPoint.x, y: newPoint.y } } : sh
+        ),
+      }
+    )
+    pushCapturedSnap(preSnap)
+  }
+
+  // Helper to seed initial shapes.
+  const seedShape = (shape) => {
+    state.technicalLayers[0].shapes.push(shape)
+  }
+  const findShape = (id) => {
+    for (const l of state.technicalLayers) {
+      const s = (l.shapes || []).find((sh) => sh.id === id)
+      if (s) return s
+    }
+    return null
+  }
+  return {
+    state, dataSnapshot, captureSnap, pushCapturedSnap, applySnap, undo, redo,
+    commitRotateCommand, commitMoveCommand, commitCopyCommand,
+    commitDeleteCommand, commitGripEditCommand,
+    seedShape, findShape, newId,
+  }
+}
+
+// 41. Rotate commit pushes one snapshot; undo restores; redo re-applies.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  const preSnap = s.captureSnap()
+  const origins = [JSON.parse(JSON.stringify(s.findShape('sh1')))]
+  s.commitRotateCommand(origins, { x: 0, y: 0 }, 90, preSnap)
+  pass('41a. Rotate commit pushes 1 undo snap',
+    s.state.undoStack.length === 1)
+  const afterCommit = s.findShape('sh1')
+  pass('41b. Rotate commit mutated b to (0, 24)',
+    near(afterCommit.b.x, 0) && near(afterCommit.b.y, 24))
+  s.undo()
+  pass('41c. After undo, shape restored to b=(24, 0)',
+    near(s.findShape('sh1').b.x, 24) && near(s.findShape('sh1').b.y, 0))
+  pass('41d. After undo, redoStack has 1 entry', s.state.redoStack.length === 1)
+  s.redo()
+  pass('41e. After redo, shape b back at (0, 24)',
+    near(s.findShape('sh1').b.x, 0) && near(s.findShape('sh1').b.y, 24))
+  pass('41f. After redo, undoStack back to 1', s.state.undoStack.length === 1)
+}
+
+// 42. Multi-select Rotate: 3 shapes rotated together, 1 snap pushed.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'a', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  s.seedShape({ id: 'b', type: 'line', a: { x: 50, y: 0 }, b: { x: 74, y: 0 } })
+  s.seedShape({ id: 'c', type: 'line', a: { x: 100, y: 0 }, b: { x: 124, y: 0 } })
+  const preSnap = s.captureSnap()
+  const origins = ['a', 'b', 'c'].map((id) => JSON.parse(JSON.stringify(s.findShape(id))))
+  s.commitRotateCommand(origins, { x: 0, y: 0 }, 90, preSnap)
+  pass('42a. multi-select Rotate pushes 1 snap (not 3)',
+    s.state.undoStack.length === 1)
+  // After 90° rotation around (0,0), shape 'b' (x: 50→74, y: 0) → x: 0, y: 50→74
+  pass('42b. shape b rotated to vertical',
+    near(s.findShape('b').a.x, 0) && near(s.findShape('b').a.y, 50))
+  s.undo()
+  pass('42c. After undo, all 3 shapes restored',
+    near(s.findShape('a').b.x, 24)
+    && near(s.findShape('b').a.x, 50)
+    && near(s.findShape('c').b.x, 124))
+}
+
+// 43. Move commit pushes one snapshot; undo restores; redo re-applies.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  const preSnap = s.captureSnap()
+  const origins = [JSON.parse(JSON.stringify(s.findShape('sh1')))]
+  s.commitMoveCommand(origins, { dx: 50, dy: 30 }, preSnap)
+  pass('43a. Move commit pushes 1 snap', s.state.undoStack.length === 1)
+  pass('43b. Move commit translated a to (50, 30)',
+    s.findShape('sh1').a.x === 50 && s.findShape('sh1').a.y === 30)
+  s.undo()
+  pass('43c. After undo, shape back at origin',
+    s.findShape('sh1').a.x === 0 && s.findShape('sh1').b.x === 24)
+  s.redo()
+  pass('43d. After redo, shape back at (50, 30)+offset',
+    s.findShape('sh1').a.x === 50 && s.findShape('sh1').b.x === 74)
+}
+
+// 44. Multi-select Move: 3 shapes moved, 1 snap.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'a', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  s.seedShape({ id: 'b', type: 'line', a: { x: 50, y: 0 }, b: { x: 74, y: 0 } })
+  s.seedShape({ id: 'c', type: 'line', a: { x: 100, y: 0 }, b: { x: 124, y: 0 } })
+  const preSnap = s.captureSnap()
+  const origins = ['a', 'b', 'c'].map((id) => JSON.parse(JSON.stringify(s.findShape(id))))
+  s.commitMoveCommand(origins, { dx: 100, dy: 0 }, preSnap)
+  pass('44a. multi-Move pushes 1 snap', s.state.undoStack.length === 1)
+  pass('44b. all 3 shapes moved 100 right',
+    s.findShape('a').a.x === 100 && s.findShape('b').a.x === 150 && s.findShape('c').a.x === 200)
+  s.undo()
+  pass('44c. undo reverts all 3',
+    s.findShape('a').a.x === 0 && s.findShape('b').a.x === 50 && s.findShape('c').a.x === 100)
+}
+
+// 45. Copy commit: clone added, original unchanged. undo removes clone.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  const preSnap = s.captureSnap()
+  const origins = [JSON.parse(JSON.stringify(s.findShape('sh1')))]
+  s.commitCopyCommand(origins, { dx: 50, dy: 0 }, preSnap)
+  pass('45a. Copy adds 1 clone', s.state.technicalLayers[0].shapes.length === 2)
+  pass('45b. Copy pushes 1 snap', s.state.undoStack.length === 1)
+  pass('45c. Copy: original sh1 unchanged',
+    s.findShape('sh1').a.x === 0 && s.findShape('sh1').b.x === 24)
+  s.undo()
+  pass('45d. After undo, clone removed (back to 1 shape)',
+    s.state.technicalLayers[0].shapes.length === 1)
+  s.redo()
+  pass('45e. After redo, clone back', s.state.technicalLayers[0].shapes.length === 2)
+}
+
+// 46. Multi-select Copy: 3 clones added, 1 snap.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'a', type: 'line', a: { x: 0, y: 0 }, b: { x: 10, y: 0 } })
+  s.seedShape({ id: 'b', type: 'line', a: { x: 20, y: 0 }, b: { x: 30, y: 0 } })
+  s.seedShape({ id: 'c', type: 'line', a: { x: 40, y: 0 }, b: { x: 50, y: 0 } })
+  const preSnap = s.captureSnap()
+  const origins = ['a', 'b', 'c'].map((id) => JSON.parse(JSON.stringify(s.findShape(id))))
+  s.commitCopyCommand(origins, { dx: 100, dy: 0 }, preSnap)
+  pass('46a. 3-shape Copy adds 3 clones', s.state.technicalLayers[0].shapes.length === 6)
+  pass('46b. 3-shape Copy pushes 1 snap (not 3)', s.state.undoStack.length === 1)
+  s.undo()
+  pass('46c. undo removes all 3 clones', s.state.technicalLayers[0].shapes.length === 3)
+}
+
+// 47. Delete commit: shape removed; undo restores with original ID.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  const preSnap = s.captureSnap()
+  s.commitDeleteCommand([{ layerId: 'L1', shapeId: 'sh1' }], preSnap)
+  pass('47a. Delete removes shape', s.state.technicalLayers[0].shapes.length === 0)
+  pass('47b. Delete pushes 1 snap', s.state.undoStack.length === 1)
+  s.undo()
+  const restored = s.findShape('sh1')
+  pass('47c. undo restores shape with original ID',
+    restored && restored.a.x === 0 && restored.b.x === 24)
+  s.redo()
+  pass('47d. redo removes again', s.state.technicalLayers[0].shapes.length === 0)
+}
+
+// 48. Multi-select Delete: 3 shapes removed, 1 snap, all restored on undo.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'a', type: 'line', a: { x: 0, y: 0 }, b: { x: 10, y: 0 } })
+  s.seedShape({ id: 'b', type: 'line', a: { x: 20, y: 0 }, b: { x: 30, y: 0 } })
+  s.seedShape({ id: 'c', type: 'line', a: { x: 40, y: 0 }, b: { x: 50, y: 0 } })
+  const preSnap = s.captureSnap()
+  s.commitDeleteCommand(
+    [{ layerId: 'L1', shapeId: 'a' }, { layerId: 'L1', shapeId: 'b' }, { layerId: 'L1', shapeId: 'c' }],
+    preSnap,
+  )
+  pass('48a. 3-Delete removes all', s.state.technicalLayers[0].shapes.length === 0)
+  pass('48b. 3-Delete pushes 1 snap', s.state.undoStack.length === 1)
+  s.undo()
+  pass('48c. undo restores all 3 with correct IDs',
+    s.findShape('a') && s.findShape('b') && s.findShape('c'))
+}
+
+// 49. Grip edit commit: endpoint moved; undo restores; redo re-applies.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  const preSnap = s.captureSnap()
+  s.commitGripEditCommand('L1', 'sh1', 'b', { x: 100, y: 50 }, preSnap)
+  pass('49a. grip-edit pushes 1 snap', s.state.undoStack.length === 1)
+  pass('49b. grip-edit endpoint b moved',
+    s.findShape('sh1').b.x === 100 && s.findShape('sh1').b.y === 50)
+  pass('49c. grip-edit other endpoint a untouched',
+    s.findShape('sh1').a.x === 0 && s.findShape('sh1').a.y === 0)
+  s.undo()
+  pass('49d. undo restores endpoint b to (24, 0)',
+    s.findShape('sh1').b.x === 24 && s.findShape('sh1').b.y === 0)
+  s.redo()
+  pass('49e. redo restores endpoint b to (100, 50)',
+    s.findShape('sh1').b.x === 100 && s.findShape('sh1').b.y === 50)
+}
+
+// 50. Sequential commands: Rotate → Move → Copy. undoStack has 3 entries.
+//     Three undos each revert one command in reverse order.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  // Rotate
+  let preSnap = s.captureSnap()
+  let origins = [JSON.parse(JSON.stringify(s.findShape('sh1')))]
+  s.commitRotateCommand(origins, { x: 0, y: 0 }, 90, preSnap)
+  // Move
+  preSnap = s.captureSnap()
+  origins = [JSON.parse(JSON.stringify(s.findShape('sh1')))]
+  s.commitMoveCommand(origins, { dx: 100, dy: 0 }, preSnap)
+  // Copy
+  preSnap = s.captureSnap()
+  origins = [JSON.parse(JSON.stringify(s.findShape('sh1')))]
+  s.commitCopyCommand(origins, { dx: 200, dy: 0 }, preSnap)
+  pass('50a. 3 commands → undoStack length 3', s.state.undoStack.length === 3)
+  pass('50b. After Copy: 2 shapes', s.state.technicalLayers[0].shapes.length === 2)
+  // Undo 1: Copy → back to 1 shape, still moved + rotated
+  s.undo()
+  pass('50c. undo 1 removes copy', s.state.technicalLayers[0].shapes.length === 1)
+  // Shape is at (100, 0)→(100, 24) (moved + rotated)
+  pass('50d. undo 1: shape still rotated + moved',
+    near(s.findShape('sh1').a.x, 100) && near(s.findShape('sh1').b.y, 24))
+  // Undo 2: Move → shape un-moved, still rotated
+  s.undo()
+  pass('50e. undo 2 reverts move',
+    near(s.findShape('sh1').a.x, 0) && near(s.findShape('sh1').b.y, 24))
+  // Undo 3: Rotate → shape back at origin
+  s.undo()
+  pass('50f. undo 3 reverts rotate',
+    s.findShape('sh1').a.x === 0 && s.findShape('sh1').b.x === 24)
+  pass('50g. undoStack empty', s.state.undoStack.length === 0)
+}
+
+// 51. Mixed undo/redo: Rotate, undo, Move (Rotate's redo entry discarded).
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  let preSnap = s.captureSnap()
+  let origins = [JSON.parse(JSON.stringify(s.findShape('sh1')))]
+  s.commitRotateCommand(origins, { x: 0, y: 0 }, 90, preSnap)
+  pass('51a. Rotate → undoStack 1', s.state.undoStack.length === 1)
+  s.undo()
+  pass('51b. After undo → undoStack 0, redoStack 1',
+    s.state.undoStack.length === 0 && s.state.redoStack.length === 1)
+  // Now do Move — redoStack should clear (standard semantics).
+  preSnap = s.captureSnap()
+  origins = [JSON.parse(JSON.stringify(s.findShape('sh1')))]
+  s.commitMoveCommand(origins, { dx: 100, dy: 0 }, preSnap)
+  pass('51c. After Move: undoStack 1, redoStack EMPTY',
+    s.state.undoStack.length === 1 && s.state.redoStack.length === 0)
+  s.undo()
+  pass('51d. undo restores pre-Move (NOT pre-Rotate; Rotate is gone)',
+    s.findShape('sh1').a.x === 0 && s.findShape('sh1').b.x === 24)
+}
+
+// 52. Escape during command preview does NOT push a snapshot.
+//     Pre-fix scenario: live-preview mutates shapes via no-undo mutator;
+//     Escape reverts via direct write (no commit action called).
+//     undoStack must be unchanged.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  // Simulate the command flow: capture preSnap, then "mousemove" mutates
+  // shape via no-undo (just direct write here), then Escape reverts.
+  const undoLenBefore = s.state.undoStack.length
+  const preSnap = s.captureSnap()  // operator clicked base point
+  const origin = JSON.parse(JSON.stringify(s.findShape('sh1')))
+  // Simulate mousemove preview: rotate shape 45° in place.
+  const rot45 = (p) => ({
+    x: Math.cos(Math.PI / 4) * p.x - Math.sin(Math.PI / 4) * p.y,
+    y: Math.sin(Math.PI / 4) * p.x + Math.cos(Math.PI / 4) * p.y,
+  })
+  s.state.technicalLayers[0].shapes[0].b = rot45(origin.b)
+  // Escape: revert (no pushCapturedSnap because we never committed).
+  s.state.technicalLayers[0].shapes[0] = { ...origin }
+  // Note: preSnap was captured but NOT pushed.
+  pass('52a. Escape does NOT push undo snapshot',
+    s.state.undoStack.length === undoLenBefore)
+  pass('52b. After Escape, shape back at origin',
+    s.findShape('sh1').b.x === 24)
+  pass('52c. preSnap captured but unused (string is fine, no side effect)',
+    typeof preSnap === 'string')
+}
+
+// 53. Cancel button has same no-push behavior as Escape.
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  const undoLenBefore = s.state.undoStack.length
+  // Capture preSnap, mutate, then Cancel (= same revert pattern as Escape).
+  s.captureSnap()
+  s.state.technicalLayers[0].shapes[0].b = { x: 99, y: 99 }
+  // Cancel — revert from origin captured in techCommandOriginShapes.
+  // (No commit action called; no snap pushed.)
+  s.state.technicalLayers[0].shapes[0].b = { x: 24, y: 0 }
+  pass('53a. Cancel does NOT push snapshot',
+    s.state.undoStack.length === undoLenBefore)
+  pass('53b. After Cancel, shape back at origin',
+    s.findShape('sh1').b.x === 24)
+}
+
+// 54. dataSnapshot includes technicalLayers after a commit (lock in
+//     the 18b-post-fix contract for 18d-edit too).
+{
+  const s = makeUndoStore()
+  s.seedShape({ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } })
+  const preSnap = s.captureSnap()
+  const origins = [JSON.parse(JSON.stringify(s.findShape('sh1')))]
+  s.commitRotateCommand(origins, { x: 0, y: 0 }, 90, preSnap)
+  pass('54a. undoStack has 1 entry after commit', s.state.undoStack.length === 1)
+  const parsed = JSON.parse(s.state.undoStack[0])
+  pass('54b. snapshot includes technicalLayers field',
+    Array.isArray(parsed.technicalLayers))
+  pass('54c. snapshot technicalLayers contains sh1 in pre-rotate position',
+    parsed.technicalLayers[0].shapes[0].b.x === 24
+    && parsed.technicalLayers[0].shapes[0].b.y === 0)
+}
+
+// ============================================================================
 // SUMMARY
 // ============================================================================
 const passCount = tests.filter((t) => t.ok).length

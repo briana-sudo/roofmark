@@ -4,9 +4,7 @@ import { parseLength } from '../utils/parseLength'
 import { parseAngle } from '../utils/parseAngle'
 import { parseMoveInput } from '../utils/parseMoveInput'
 import { commitTechLine } from '../utils/techLineCommit'
-import {
-  techShapeCentroid, applyCommandTransform,
-} from '../utils/techGeometry'
+import { techShapeCentroid } from '../utils/techGeometry'
 
 /**
  * TechInputPanel — Phase 2 sub-step 18d-edit (May 11 2026).
@@ -62,8 +60,14 @@ export default function TechInputPanel() {
   const setTechCommandHover = useAppStore((s) => s.setTechCommandHover)
   const setTechGripEdit = useAppStore((s) => s.setTechGripEdit)
   const updateTechnicalShapeNoUndo = useAppStore((s) => s.updateTechnicalShapeNoUndo)
+  // 18d-edit commit actions (May 11 2026 addendum) — single source of
+  // truth so typed-Enter and CanvasStage click-commit reach the same
+  // implementation.
+  const commitRotateCommand = useAppStore((s) => s.commitRotateCommand)
+  const commitMoveCommand = useAppStore((s) => s.commitMoveCommand)
   const commitCopyCommand = useAppStore((s) => s.commitCopyCommand)
   const commitDeleteCommand = useAppStore((s) => s.commitDeleteCommand)
+  const commitGripEditCommand = useAppStore((s) => s.commitGripEditCommand)
   const clearTechSelection = useAppStore((s) => s.clearTechSelection)
   // Total tech-shape count — trigger to clear tech-line inputs after commit.
   const totalShapes = useAppStore((s) =>
@@ -221,15 +225,10 @@ export default function TechInputPanel() {
     if (cmd === 'rotate') {
       const deg = parseAngle(rawCommandInput, 'degrees')
       if (deg === null) return
-      // Revert any live-preview mutation back to origins so the typed
-      // rotation is measured from pre-pivot orientation (absolute).
-      for (const orig of origins) {
-        const selEntry = techSelected.find((s) => s.shapeId === orig.id)
-        if (selEntry) {
-          updateTechnicalShapeNoUndo(selEntry.layerId, orig.id, orig)
-        }
-      }
-      // Compute delta = typed - baselineFromOriginCentroid
+      // Compute delta = typed - baselineFromOriginCentroid. The store
+      // commitRotateCommand takes the delta and writes rotated origins
+      // to live state in one set() — overwrites any live-preview state
+      // implicitly (so the "revert origins first" loop is unnecessary).
       const firstCentroid = techShapeCentroid(origins[0])
       if (!firstCentroid) return
       const baselineDeg = (Math.atan2(
@@ -237,37 +236,14 @@ export default function TechInputPanel() {
         firstCentroid.x - basePoint.x,
       ) * 180) / Math.PI
       const deltaDeg = deg - baselineDeg
-      for (const orig of origins) {
-        const rotated = applyCommandTransform('rotate', orig, basePoint, { angleDegrees: deltaDeg })
-        const selEntry = techSelected.find((s) => s.shapeId === orig.id)
-        if (selEntry) {
-          updateTechnicalShapeNoUndo(selEntry.layerId, orig.id, rotated)
-        }
-      }
-      if (typeof preSnap === 'string') {
-        useAppStore.getState().pushCapturedSnapshot(preSnap)
-      }
+      commitRotateCommand(origins, basePoint, deltaDeg, preSnap)
     } else if (cmd === 'move') {
       const delta = parseMoveInput(rawCommandInput)
       if (!delta) return
-      // Revert preview, apply typed delta.
-      for (const orig of origins) {
-        const selEntry = techSelected.find((s) => s.shapeId === orig.id)
-        if (selEntry) updateTechnicalShapeNoUndo(selEntry.layerId, orig.id, orig)
-      }
-      for (const orig of origins) {
-        const moved = applyCommandTransform('move', orig, basePoint, delta)
-        const selEntry = techSelected.find((s) => s.shapeId === orig.id)
-        if (selEntry) updateTechnicalShapeNoUndo(selEntry.layerId, orig.id, moved)
-      }
-      if (typeof preSnap === 'string') {
-        useAppStore.getState().pushCapturedSnapshot(preSnap)
-      }
+      commitMoveCommand(origins, delta, preSnap)
     } else if (cmd === 'copy') {
       const delta = parseMoveInput(rawCommandInput)
       if (!delta) return
-      // Copy: originals stay; clones get new IDs and join same layer.
-      // commitCopyCommand handles the multi-shape add + single snapshot.
       commitCopyCommand(origins, delta, preSnap)
     }
 
@@ -299,10 +275,16 @@ export default function TechInputPanel() {
       x: techGripEdit.originPoint.x + delta.dx,
       y: techGripEdit.originPoint.y + delta.dy,
     }
-    updateTechnicalShapeNoUndo(techGripEdit.layerId, techGripEdit.shapeId, { [techGripEdit.pointKey]: newPoint })
-    if (typeof techGripEdit.preSnap === 'string') {
-      useAppStore.getState().pushCapturedSnapshot(techGripEdit.preSnap)
-    }
+    // Use store action for consistency with click-commit path AND for
+    // testability (the Node test runner calls commitGripEditCommand
+    // directly to verify undo/redo round-trip).
+    commitGripEditCommand(
+      techGripEdit.layerId,
+      techGripEdit.shapeId,
+      techGripEdit.pointKey,
+      newPoint,
+      techGripEdit.preSnap,
+    )
     setTechGripEdit(null)
     setTechCommandInput(null)
     setTechCommandHover(null)
