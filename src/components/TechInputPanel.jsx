@@ -2,167 +2,129 @@ import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { parseLength } from '../utils/parseLength'
 import { parseAngle } from '../utils/parseAngle'
-import { shouldStopHijackedKey } from '../utils/techPanelKeyHandling'
+import { commitTechLine } from '../utils/techLineCommit'
 
 /**
- * TechInputPanel — Phase 2 sub-step 18c (May 11 2026).
+ * TechInputPanel — Phase 2 sub-step 18c DOCKED PIVOT (May 11 2026).
  *
- * Cursor-anchored input panel that appears when the Technical Drawing
- * line tool is drafting (anchor placed, awaiting end-point). 18b shipped
- * the length-only TechLengthInput; 18c extends it with an angle field
- * and a Degrees / Pitch unit toggle. Renamed to TechInputPanel to
- * reflect the multi-field scope.
+ * Three failed fix attempts on a cursor-anchored floating panel
+ * (18b autofocus belt-and-suspenders, 18c focusin restorer, 18c-fix
+ * selective wrapper keydown listener) all surfaced the same class of
+ * bug: a child-of-canvas input element fights the canvas event
+ * hierarchy for focus and keystroke delivery. Pivoted to a docked
+ * panel mounted as a sibling of DrawingTools in App.jsx's
+ * `.canvas-area`, OUTSIDE the canvas event hierarchy.
  *
- * Layout (vertical stack, ~160px wide × ~80px tall):
- *   Length: [______________]       ← row 1
- *   Angle:  [______________]       ← row 2
- *           [Degrees | Pitch]      ← row 3 (unit toggle)
+ * Architecture changes vs. pre-pivot:
+ *   - Panel visibility: mounts when `appMode === 'TECHNICAL' && tool
+ *     === 'tech-line'`, regardless of techDraft state. Operator can
+ *     pre-fill length + angle BEFORE clicking the canvas to place an
+ *     anchor.
+ *   - No cursor subscription. No absolute positioning.
+ *   - No focusin restorer (focus competition with canvas eliminated).
+ *   - No native capture-phase keydown listener (panel is outside the
+ *     canvas event subtree; document keydown shortcuts can't hijack
+ *     keystrokes that reach the input).
+ *   - No wrapper-mousedown re-focus (operator clicks the input
+ *     directly; no margin-click problem).
+ *   - The autofocus useEffect remains but simpler: single focus()
+ *     call when the panel becomes visible (deps: appMode + tool).
  *
- * Subscribes internally to:
- *   - store.cursorX / cursorY  — follow the cursor with +12/+12 offset
- *   - store.setTechDraft        — write typed values back per keystroke
+ * Pre-fill flow:
+ *   1. Operator switches to Technical Drawing → picks Line tool.
+ *   2. Panel mounts. Operator can type "4"" in Length, "45" in Angle.
+ *   3. onLengthChange / onAngleChange write the parsed values to
+ *      store.techDraft (creating it if null — anchor remains null).
+ *   4. Operator clicks the canvas → CanvasStage's onMouseDown sees
+ *      techDraft exists with typed values, spreads `a` into it.
+ *   5. Rubber-band immediately uses pre-filled values.
  *
- * Commit gestures (parent CanvasStage owns the geometry math):
- *   - Click on canvas         → commit. Uses whichever typed values are
- *                               present; freehand for the rest.
- *   - Enter from either input → shortcut for both-locked. Only fires
- *                               onCommit when BOTH length AND angle parse
- *                               cleanly. Otherwise no-op (operator clicks
- *                               to commit a partial-lock scenario).
- *   - Escape                  → onCancel → setTechDraft(null) → unmount
+ * Commit-clears-inputs:
+ *   When a shape commits successfully, the total tech-shape count
+ *   increments AND techDraft transitions to null. The useEffect below
+ *   watches the shape count; on increment, local rawLength/rawAngle
+ *   reset to empty so the next anchor click starts fresh. Escape also
+ *   nulls techDraft but does NOT increment the shape count, so
+ *   Escape's "Inputs retain typed values" UX from §21 holds.
  *
- * Escape-after-typing fix (18b regression resurfaced in 18c investigation):
- * a `focusin` listener on document re-focuses the length input if focus
- * escapes the panel for any reason while it's mounted. Belt-and-suspenders
- * autofocus + native capture-phase keydown stopper from 18b carried forward.
- *
- * Smart parser (parseAngle):
- *   - `/` in input → pitch (always)
- *   - `°` or `deg` in input → degrees (always)
- *   - otherwise → defaultUnit from the toggle state
- *
- * Invalid input: red border on the offending input, no toast. Parser
- * returns null; commit treats null as "use freehand for this axis".
+ * Smart parser (parseAngle): `/` → pitch, `°`/`deg` → degrees,
+ * otherwise → defaultUnit (from the toggle).
  *
  * Debug hook: set `window.__rmDebugFocus = true` in DevTools to log
- * document.activeElement.tagName on every keystroke. Off by default.
+ * keystroke + focus events from the panel. Off by default.
  */
-const CURSOR_OFFSET_X = 12
-const CURSOR_OFFSET_Y = 12
-
-export default function TechInputPanel({ onCommit, onCancel }) {
-  const cursorX = useAppStore((s) => s.cursorX)
-  const cursorY = useAppStore((s) => s.cursorY)
+export default function TechInputPanel() {
+  const appMode = useAppStore((s) => s.appMode)
+  const tool = useAppStore((s) => s.tool)
+  const techDraft = useAppStore((s) => s.techDraft)
   const setTechDraft = useAppStore((s) => s.setTechDraft)
+  // Total tech-shape count across all technical layers — the trigger
+  // signal for clearing inputs after a successful commit (commit
+  // increments count; Escape doesn't).
+  const totalShapes = useAppStore((s) =>
+    (s.technicalLayers || []).reduce((n, tl) => n + (tl.shapes?.length || 0), 0)
+  )
+
   const [rawLength, setRawLength] = useState('')
   const [rawAngle, setRawAngle] = useState('')
   const [unit, setUnit] = useState('degrees') // 'degrees' | 'pitch'
   const lengthInputRef = useRef(null)
   const angleInputRef = useRef(null)
-  const wrapperRef = useRef(null)
+  const prevShapesRef = useRef(totalShapes)
+
+  const visible = appMode === 'TECHNICAL' && tool === 'tech-line'
+  const anchorPlaced = !!(techDraft && techDraft.a)
 
   const parsedInches = parseLength(rawLength)
   const parsedAngle = parseAngle(rawAngle, unit)
   const lengthInvalid = rawLength.length > 0 && parsedInches === null
   const angleInvalid = rawAngle.length > 0 && parsedAngle === null
 
-  // Belt-and-suspenders autofocus on the LENGTH input — 18b's three
-  // independent paths to win focus, carried forward verbatim:
-  //   1. <input autoFocus> on the length input element
-  //   2. lengthInputRef.current.focus() synchronously on first render
-  //   3. rAF re-focus if step 1+2 lose focus to a sibling event
+  // Autofocus when the panel becomes visible. The docked panel is
+  // OUTSIDE the canvas event hierarchy, so the rAF retry + focusin
+  // restorer from the floating-panel era are no longer necessary.
+  // Single focus call is sufficient.
   useEffect(() => {
-    lengthInputRef.current?.focus()
-    const raf = requestAnimationFrame(() => {
-      if (lengthInputRef.current && document.activeElement !== lengthInputRef.current) {
-        lengthInputRef.current.focus()
-      }
-    })
-    return () => cancelAnimationFrame(raf)
-  }, [])
-
-  // 18b native capture-phase keydown stopper on the wrapper — prevents
-  // CanvasStage's document-level zoom-key shortcuts (`+`/`-`/`0`/`1`)
-  // from hijacking keystrokes meant for the inputs.
-  //
-  // 18c Escape regression fix (operator-reported on `af1f3c8`):
-  //   The original 18b implementation called stopPropagation()
-  //   UNCONDITIONALLY for every key. That silently consumed Escape and
-  //   Enter at the wrapper before they could reach the input's React
-  //   onKeyDown handler (cancel + commit paths). Typing characters
-  //   appeared to work because text input uses a separate `input` event
-  //   path, not blocked by the keydown listener.
-  //
-  // Fix: stop propagation ONLY for keys the document handler would
-  // hijack. Everything else (Enter, Escape, printable chars, Tab,
-  // arrows, modifiers) flows through to the input's React handler.
-  //
-  // The set below mirrors CanvasStage.onKeyDown's zoom/space branches
-  // (CanvasStage.jsx ~lines 2348-2365). Keep in sync if those shortcuts
-  // change.
-  useEffect(() => {
-    const wrapper = wrapperRef.current
-    if (!wrapper) return
-    const stop = (e) => {
-      if (shouldStopHijackedKey(e)) {
-        e.stopPropagation()
-        if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
-          console.log(`[TechInputPanel wrapper captured (hijack)] key=${e.key}`)
-        }
-      } else if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
-        console.log(`[TechInputPanel wrapper passed-through] key=${e.key}`)
-      }
-    }
-    wrapper.addEventListener('keydown', stop, true)
-    return () => wrapper.removeEventListener('keydown', stop, true)
-  }, [])
-
-  // 18c Escape-after-typing fix — document-level focusin listener that
-  // restores focus to the length input whenever it escapes the panel.
-  // Operator-reported symptom: after typing in length, then in angle,
-  // Escape sometimes failed to dismiss the panel. Root cause hypothesis:
-  // focus drifted to document.body between state-update React-render
-  // cycles; the document Escape handler in CanvasStage saw the keystroke
-  // but did fire setTechDraft(null) cleanly — yet the panel appeared to
-  // linger because the rubber-band repaint missed a frame. Forcing focus
-  // to stay inside the panel sidesteps the race entirely.
-  useEffect(() => {
-    const handleFocusIn = (e) => {
-      const wrapper = wrapperRef.current
-      if (!wrapper) return
-      if (!wrapper.contains(e.target) && lengthInputRef.current) {
-        lengthInputRef.current.focus()
-      }
-    }
-    document.addEventListener('focusin', handleFocusIn)
-    return () => document.removeEventListener('focusin', handleFocusIn)
-  }, [])
-
-  // Re-focus the length input on any wrapper-margin click (clicking the
-  // padding / label / toggle button shouldn't strand focus on a non-
-  // typable child). Carried forward from 18b.
-  const handleWrapperMouseDown = (e) => {
-    // Don't steal focus if the operator clicked an interactive element
-    // inside the panel (the angle input, the unit toggle). Only re-focus
-    // when the click landed on the wrapper itself or its dead space.
-    if (e.target === wrapperRef.current || e.target.tagName === 'LABEL') {
+    if (visible) {
       lengthInputRef.current?.focus()
     }
-  }
+  }, [visible])
 
-  const debugLog = (label) => {
+  // Clear local typed values after a successful commit. A commit
+  // increments totalShapes (addTechnicalShape pushes a shape into
+  // technicalLayers); Escape clears techDraft without committing
+  // (totalShapes unchanged). The deps array catches the increment
+  // and clears; Escape doesn't trigger this effect.
+  useEffect(() => {
+    if (totalShapes > prevShapesRef.current) {
+      setRawLength('')
+      setRawAngle('')
+    }
+    prevShapesRef.current = totalShapes
+  }, [totalShapes])
+
+  const debugLog = (label, extra) => {
     if (typeof window !== 'undefined' && window.__rmDebugFocus === true) {
-      console.log(`[TechInputPanel ${label}] activeElement=`, document.activeElement?.tagName, document.activeElement?.id)
+      console.log(`[TechInputPanel ${label}]`, extra || '')
     }
   }
 
+  // Write typed values into store.techDraft on every keystroke. If
+  // techDraft is null (operator hasn't clicked the canvas yet), create
+  // it with a null anchor — the value carries forward to when the
+  // operator places the anchor (CanvasStage's onMouseDown spreads the
+  // current techDraft when setting `a`).
   const onLengthChange = (e) => {
     const next = e.target.value
     setRawLength(next)
     const p = parseLength(next)
     const cur = useAppStore.getState().techDraft
-    if (cur) setTechDraft({ ...cur, typedInches: p })
-    debugLog('length-change')
+    if (cur) {
+      setTechDraft({ ...cur, typedInches: p })
+    } else {
+      setTechDraft({ a: null, typedInches: p, typedAngleDegrees: null })
+    }
+    debugLog('length-change', next)
   }
 
   const onAngleChange = (e) => {
@@ -170,115 +132,132 @@ export default function TechInputPanel({ onCommit, onCancel }) {
     setRawAngle(next)
     const p = parseAngle(next, unit)
     const cur = useAppStore.getState().techDraft
-    if (cur) setTechDraft({ ...cur, typedAngleDegrees: p })
-    debugLog('angle-change')
-  }
-
-  // Enter from EITHER input field — shortcut for both-locked. Only fires
-  // when both length AND angle parsed cleanly. Otherwise the operator
-  // commits via canvas click (partial-lock cases).
-  const handleEnter = (e) => {
-    if (parsedInches !== null && parsedAngle !== null) {
-      e.preventDefault()
-      if (typeof onCommit === 'function') {
-        onCommit({ inches: parsedInches, angleDegrees: parsedAngle })
-      }
+    if (cur) {
+      setTechDraft({ ...cur, typedAngleDegrees: p })
+    } else {
+      setTechDraft({ a: null, typedInches: null, typedAngleDegrees: p })
     }
-    // Otherwise: Enter does nothing. Operator clicks to commit.
+    debugLog('angle-change', next)
   }
 
-  const handleEscape = (e) => {
-    e.preventDefault()
-    if (typeof onCancel === 'function') onCancel()
+  const handleEnter = () => {
+    // Enter shortcut: commit only when anchor placed AND both values
+    // typed cleanly. Otherwise no-op — operator clicks canvas for
+    // partial-lock and no-lock cases.
+    const s = useAppStore.getState()
+    const d = s.techDraft
+    if (!d || !d.a) return
+    if (parsedInches === null || parsedAngle === null) return
+    const v = s.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+    // Cursor world coords used only as freehand fallback. With both
+    // typed values present here, the helper's typed-vs-freehand decision
+    // picks 'typed' for both and ignores the cursor.
+    const cursorW = {
+      x: (s.cursorX - v.panX) / (v.zoom || 1),
+      y: (s.cursorY - v.panY) / (v.zoom || 1),
+    }
+    commitTechLine({
+      anchor: d.a,
+      cursorWorld: cursorW,
+      typedInches: parsedInches,
+      typedAngleDegrees: parsedAngle,
+      addTechnicalShape: s.addTechnicalShape,
+      setTechDraft: s.setTechDraft,
+    })
+  }
+
+  const handleEscape = () => {
+    // Cancel draft. Per §21 amendment: inputs retain their typed values
+    // (the operator may want to apply the same length/angle to another
+    // anchor placement). The setTechDraft(null) here transitions techDraft
+    // away from any anchor; totalShapes does NOT increment, so the
+    // commit-clears-inputs useEffect doesn't fire.
+    setTechDraft(null)
   }
 
   const onKeyDown = (e) => {
-    e.stopPropagation()
-    if (e.key === 'Enter') {
-      handleEnter(e)
-    } else if (e.key === 'Escape') {
-      handleEscape(e)
-    }
     debugLog(`keydown ${e.key}`)
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleEnter()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      handleEscape()
+    }
   }
 
   const onToggleUnit = () => {
-    setUnit((u) => (u === 'degrees' ? 'pitch' : 'degrees'))
-    // After toggle, re-parse the existing angle input against the new
-    // default unit so the rubber-band reflects the operator's intent.
-    // Done implicitly via the next render — `parsedAngle` reads from
-    // the new `unit` value. We also need to push the new parsed value
-    // to techDraft right now so the rubber-band doesn't lag a frame.
+    const nextUnit = unit === 'degrees' ? 'pitch' : 'degrees'
+    setUnit(nextUnit)
+    // Re-parse existing angle input against the new unit so techDraft's
+    // typed value stays consistent with the toggle.
     const cur = useAppStore.getState().techDraft
-    if (cur) {
-      // Compute against the NEW unit by inverting from old.
-      const nextUnit = unit === 'degrees' ? 'pitch' : 'degrees'
+    if (cur && rawAngle.length > 0) {
       const p = parseAngle(rawAngle, nextUnit)
       setTechDraft({ ...cur, typedAngleDegrees: p })
     }
-    // Keep focus where it was so the operator can continue typing.
-    // If focus was on the toggle button itself (from a click), move
-    // back to the angle input.
     angleInputRef.current?.focus()
   }
 
+  if (!visible) return null
+
   const anglePlaceholder = unit === 'degrees' ? `45 or 45°` : `4/12`
+  const lengthPlaceholder = anchorPlaced ? `4"  or  1'6"` : `Click on canvas to place anchor`
 
   return (
     <div
-      ref={wrapperRef}
       className="tech-input-panel"
-      style={{ left: cursorX + CURSOR_OFFSET_X, top: cursorY + CURSOR_OFFSET_Y }}
-      role="dialog"
+      role="toolbar"
       aria-label="Technical Drawing line input"
       data-testid="tech-input-panel"
-      onMouseDown={handleWrapperMouseDown}
     >
       <div className="tip-row">
-        <label className="tip-label" htmlFor="tech-length-input-field">Length</label>
+        <label htmlFor="tech-length-input-field">Length</label>
         <input
           id="tech-length-input-field"
           ref={lengthInputRef}
           type="text"
-          className={lengthInvalid ? 'tip-field invalid' : 'tip-field'}
+          className={lengthInvalid ? 'invalid' : ''}
           value={rawLength}
           onChange={onLengthChange}
           onKeyDown={onKeyDown}
-          placeholder={`4"  or  1'6"`}
-          autoFocus
+          placeholder={lengthPlaceholder}
           aria-invalid={lengthInvalid}
-          aria-label={'Length (inches or feet/inches). Enter to commit both. Click canvas to commit.'}
+          aria-label={'Length (inches or feet/inches). Enter to commit when both fields typed.'}
           data-testid="tech-length-input-field"
         />
       </div>
       <div className="tip-row">
-        <label className="tip-label" htmlFor="tech-angle-input-field">Angle</label>
+        <label htmlFor="tech-angle-input-field">Angle</label>
         <input
           id="tech-angle-input-field"
           ref={angleInputRef}
           type="text"
-          className={angleInvalid ? 'tip-field invalid' : 'tip-field'}
+          className={angleInvalid ? 'invalid' : ''}
           value={rawAngle}
           onChange={onAngleChange}
           onKeyDown={onKeyDown}
           placeholder={anglePlaceholder}
           aria-invalid={angleInvalid}
-          aria-label={'Angle (degrees or rise/run pitch). Smart parser: slash → pitch, ° or deg → degrees, otherwise uses the toggle.'}
+          aria-label={'Angle (degrees or rise/run pitch).'}
           data-testid="tech-angle-input-field"
         />
       </div>
-      <div className="tip-toggle-row">
-        <button
-          type="button"
-          className={unit === 'degrees' ? 'unit-toggle active' : 'unit-toggle'}
-          onClick={onToggleUnit}
-          aria-pressed={unit === 'degrees'}
-          title={unit === 'degrees' ? 'Switch to pitch (rise/run)' : 'Switch to degrees'}
-          data-testid="tech-unit-toggle"
-        >
-          {unit === 'degrees' ? 'Degrees' : 'Pitch'}
-        </button>
-      </div>
+      <button
+        type="button"
+        className={unit === 'degrees' ? 'unit-toggle active' : 'unit-toggle'}
+        onClick={onToggleUnit}
+        aria-pressed={unit === 'degrees'}
+        title={unit === 'degrees' ? 'Switch to pitch (rise/run)' : 'Switch to degrees'}
+        data-testid="tech-unit-toggle"
+      >
+        {unit === 'degrees' ? 'Degrees' : 'Pitch'}
+      </button>
+      {!anchorPlaced && (
+        <span className="placeholder-hint" data-testid="tech-placeholder-hint">
+          Click on canvas to place anchor
+        </span>
+      )}
     </div>
   )
 }

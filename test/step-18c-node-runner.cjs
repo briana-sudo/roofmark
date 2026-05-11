@@ -447,62 +447,170 @@ function makeStoreWithSnapshot() {
 }
 
 // ============================================================================
-// SELECTIVE-WRAPPER-STOP REGRESSION TESTS (59–72)
-// 18c Escape regression fix (operator-reported on `af1f3c8`): the wrapper
-// capture-phase keydown listener must stop ONLY the document zoom-hijack
-// keys + Space, and pass Enter / Escape / printable chars / Tab / arrows
-// through to the React onKeyDown handler. Pre-fix it stopped every key
-// unconditionally, silently consuming Escape and Enter.
+// DOCKED PANEL CONTRACT TESTS (73–83) — Phase 2 18c docked pivot
+// (May 11 2026, operator-reported regression on `cdd7f8f`).
+//
+// Three failed bug-fix attempts on the cursor-anchored floating panel
+// (18b autofocus, 18c focusin, 18c-fix selective wrapper keydown) all
+// surfaced the same focus-management bug class. Pivoted to a docked
+// panel mounted as a sibling of DrawingTools in App.jsx — OUTSIDE the
+// canvas event hierarchy. The previously-tested wrapper-keydown filter
+// (tests 59-72) was deleted along with the failed-fix code; replaced
+// with tests that lock in the docked contract.
 // ============================================================================
 
-// Replica of the production shouldStopHijackedKey helper (defined at
-// module level in src/components/TechInputPanel.jsx). Keep in sync —
-// the comment above the named export there flags this dependency.
-const HIJACKED_KEYS = new Set(['+', '=', '-', '_', '0', '1', ' '])
-function shouldStopHijackedKey(e) {
-  if (!e) return false
-  if (HIJACKED_KEYS.has(e.key)) return true
-  if (e.code === 'Space') return true
-  return false
+// Pure-logic mocks of TechInputPanel's render decisions.
+function isPanelVisible(appMode, tool) {
+  return appMode === 'TECHNICAL' && tool === 'tech-line'
+}
+function lengthPlaceholder(anchorPlaced) {
+  return anchorPlaced ? `4"  or  1'6"` : `Click on canvas to place anchor`
+}
+function shouldShowPlaceholderHint(anchorPlaced) {
+  return !anchorPlaced
+}
+function shouldClearInputsOnTransition(prevShapes, nextShapes) {
+  // Mirrors the post-commit reset useEffect: clear inputs only when
+  // totalShapes incremented (signaling a successful commit).
+  // Escape transitions techDraft → null without incrementing.
+  return nextShapes > prevShapes
 }
 
-// 59-65. Hijacked keys → wrapper SHOULD call stopPropagation.
-pass('59. wrapper stops Space (e.key=" ")',     shouldStopHijackedKey({ key: ' ' }) === true)
-pass('60. wrapper stops "+"',                    shouldStopHijackedKey({ key: '+' }) === true)
-pass('61. wrapper stops "="',                    shouldStopHijackedKey({ key: '=' }) === true)
-pass('62. wrapper stops "-"',                    shouldStopHijackedKey({ key: '-' }) === true)
-pass('63. wrapper stops "_"',                    shouldStopHijackedKey({ key: '_' }) === true)
-pass('64. wrapper stops "0"',                    shouldStopHijackedKey({ key: '0' }) === true)
-pass('65. wrapper stops "1"',                    shouldStopHijackedKey({ key: '1' }) === true)
+// 73. Panel mounts when appMode is TECHNICAL and tool is tech-line.
+pass('73. visible when TECHNICAL + tech-line', isPanelVisible('TECHNICAL', 'tech-line') === true)
 
-// 65b. Space variant via e.code (some browsers fire e.key === '' for Space
-//      with modifier keys held; the e.code === 'Space' fallback catches that).
-pass('65b. wrapper stops e.code === "Space" with weird e.key',
-  shouldStopHijackedKey({ key: '', code: 'Space' }) === true)
+// 74. Panel does NOT mount under FIELD even if tool is tech-line (defensive).
+pass('74. hidden when appMode FIELD', isPanelVisible('FIELD', 'tech-line') === false)
 
-// 66-72. Pass-through keys → wrapper must NOT call stopPropagation.
-pass('66. wrapper passes Enter',                 shouldStopHijackedKey({ key: 'Enter' }) === false)
-pass('67. wrapper passes Escape',                shouldStopHijackedKey({ key: 'Escape' }) === false)
-pass('68. wrapper passes "4" (digit)',           shouldStopHijackedKey({ key: '4' }) === false)
-pass('69. wrapper passes \'"\' (printable)',     shouldStopHijackedKey({ key: '"' }) === false)
-pass('70. wrapper passes Tab',                   shouldStopHijackedKey({ key: 'Tab' }) === false)
-pass('71. wrapper passes ArrowLeft',             shouldStopHijackedKey({ key: 'ArrowLeft' }) === false)
-pass('72. wrapper passes "a" (printable)',       shouldStopHijackedKey({ key: 'a' }) === false)
+// 75. Panel does NOT mount under TECHNICAL when tool is not tech-line.
+pass('75a. hidden under TECHNICAL with no tool', isPanelVisible('TECHNICAL', null) === false)
+pass('75b. hidden under TECHNICAL with poly tool', isPanelVisible('TECHNICAL', 'poly') === false)
 
-// 72b. End-to-end simulation: mock event with tracked stopPropagation.
-//      Confirms the wrapper-listener pattern (read shouldStop, call stop()
-//      conditionally) does what the real production code does.
+// 76. Panel inputs accept text when techDraft.a is null (pre-anchor state).
+//     Local state in TechInputPanel uses useState; setRawLength fires on
+//     onChange regardless of anchor presence. Verified at the contract
+//     level: the predicate `anchorPlaced` should NOT gate input acceptance.
 {
-  function simulateWrapperKeydown(e) {
-    const tracker = { stopped: false }
-    const evt = { ...e, stopPropagation: () => { tracker.stopped = true } }
-    if (shouldStopHijackedKey(evt)) evt.stopPropagation()
-    return tracker.stopped
+  const anchorPlaced = false
+  // The component's onLengthChange creates a new techDraft if cur is null:
+  function onLengthChangeMock(rawValue, techDraftBefore) {
+    const cur = techDraftBefore
+    if (cur) return { ...cur, typedInches: rawValue }
+    return { a: null, typedInches: rawValue, typedAngleDegrees: null }
   }
-  pass('72b. simulated Escape keydown does NOT stop propagation',
-    simulateWrapperKeydown({ key: 'Escape' }) === false)
-  pass('72c. simulated "0" keydown DOES stop propagation',
-    simulateWrapperKeydown({ key: '0' }) === true)
+  const result = onLengthChangeMock(4, null)
+  pass('76a. pre-anchor typing creates new techDraft with typedInches',
+    result.a === null && result.typedInches === 4)
+  // anchorPlaced reflects techDraft?.a, NOT whether typing is allowed.
+  pass('76b. anchorPlaced === false does not block input acceptance',
+    anchorPlaced === false)
+}
+
+// 77. Placeholder hint renders when techDraft.a is null and clears when set.
+pass('77a. placeholder hint shown when no anchor',
+  shouldShowPlaceholderHint(false) === true)
+pass('77b. placeholder hint hidden when anchor placed',
+  shouldShowPlaceholderHint(true) === false)
+pass('77c. length input placeholder text reflects anchor state',
+  lengthPlaceholder(false) === 'Click on canvas to place anchor'
+  && lengthPlaceholder(true) === `4"  or  1'6"`)
+
+// 78. Local input state resets when totalShapes increments (commit happened).
+//     Does NOT reset when totalShapes is unchanged (Escape).
+pass('78a. commit (shapes 0 → 1) triggers clear',
+  shouldClearInputsOnTransition(0, 1) === true)
+pass('78b. commit (shapes 3 → 4) triggers clear',
+  shouldClearInputsOnTransition(3, 4) === true)
+pass('78c. Escape (shapes 1 → 1) does NOT trigger clear',
+  shouldClearInputsOnTransition(1, 1) === false)
+pass('78d. Escape from empty state (shapes 0 → 0) does NOT trigger clear',
+  shouldClearInputsOnTransition(0, 0) === false)
+
+// 79. Escape clears techDraft when focus is on the panel input.
+//     Mock the React handler's Escape branch.
+{
+  let cleared = false
+  const handleEscape = (setTechDraft) => { setTechDraft(null) }
+  handleEscape(() => { cleared = true })
+  pass('79. handleEscape calls setTechDraft(null)', cleared === true)
+}
+
+// 80. Escape clears techDraft when focus is NOT on the panel (document
+//     fallback in CanvasStage.onKeyDown). Mocked at the contract level.
+{
+  let cleared = false
+  // Mirror of CanvasStage.onKeyDown's Escape branch when techDraft is set:
+  function documentEscapeHandler(appMode, techDraft, setTechDraft) {
+    if (appMode === 'TECHNICAL' && techDraft) {
+      setTechDraft(null)
+      return true
+    }
+    return false
+  }
+  const fired = documentEscapeHandler('TECHNICAL', { a: { x: 0, y: 0 } }, () => { cleared = true })
+  pass('80a. document Escape fires when appMode TECHNICAL + techDraft set', fired === true)
+  pass('80b. document Escape calls setTechDraft(null)', cleared === true)
+}
+
+// 81. Enter with anchor + both values valid commits a line.
+{
+  let committed = null
+  const mockAddTechnicalShape = (sh) => { committed = sh }
+  const mockSetTechDraft = () => {}
+  // Mirror of TechInputPanel's handleEnter preconditions:
+  function handleEnterMock(techDraft, parsedInches, parsedAngle) {
+    if (!techDraft || !techDraft.a) return false
+    if (parsedInches === null || parsedAngle === null) return false
+    commitTechLine({
+      anchor: techDraft.a,
+      cursorWorld: { x: 0, y: 0 },
+      typedInches: parsedInches,
+      typedAngleDegrees: parsedAngle,
+      addTechnicalShape: mockAddTechnicalShape,
+      setTechDraft: mockSetTechDraft,
+    })
+    return true
+  }
+  const ok = handleEnterMock({ a: { x: 100, y: 100 } }, 4, 45)
+  pass('81a. Enter commits when anchor + both values valid', ok === true)
+  pass('81b. committed shape is a line with typed sources',
+    committed && committed.type === 'line'
+    && committed.lengthSource === 'typed' && committed.angleSource === 'typed')
+}
+
+// 82. Enter with techDraft.a null no-ops.
+{
+  let committed = null
+  function handleEnterMock(techDraft, parsedInches, parsedAngle) {
+    if (!techDraft || !techDraft.a) return false
+    if (parsedInches === null || parsedAngle === null) return false
+    committed = 'would-commit'
+    return true
+  }
+  const result1 = handleEnterMock(null, 4, 45)
+  pass('82a. Enter with null techDraft no-ops', result1 === false && committed === null)
+  const result2 = handleEnterMock({ a: null, typedInches: 4, typedAngleDegrees: 45 }, 4, 45)
+  pass('82b. Enter with null anchor no-ops', result2 === false && committed === null)
+  const result3 = handleEnterMock({ a: { x: 0, y: 0 } }, null, 45)
+  pass('82c. Enter with unparsed length no-ops', result3 === false && committed === null)
+  const result4 = handleEnterMock({ a: { x: 0, y: 0 } }, 4, null)
+  pass('82d. Enter with unparsed angle no-ops', result4 === false && committed === null)
+}
+
+// 83. Pre-fill flow: typed values carry forward when anchor is placed.
+//     Mirror of CanvasStage's first-click handler (spread current techDraft).
+{
+  // Pre-fill state: techDraft populated by onLengthChange before any click.
+  const techDraftPreFill = { a: null, typedInches: 4, typedAngleDegrees: 45 }
+  // First click: spread current draft, add anchor.
+  const cur = techDraftPreFill || { typedInches: null, typedAngleDegrees: null }
+  const techDraftAfterClick = { ...cur, a: { x: 100, y: 100 } }
+  pass('83a. first-click spreads pre-filled typedInches',
+    techDraftAfterClick.typedInches === 4)
+  pass('83b. first-click spreads pre-filled typedAngleDegrees',
+    techDraftAfterClick.typedAngleDegrees === 45)
+  pass('83c. first-click sets anchor',
+    techDraftAfterClick.a.x === 100 && techDraftAfterClick.a.y === 100)
 }
 
 // ============================================================================

@@ -11,15 +11,15 @@ import {
 } from '../utils/canvasRender'
 import { buildPerspectiveTransform, rotatePoint } from '../utils/perspective'
 import ContextMenu from './ContextMenu'
-import TechInputPanel from './TechInputPanel'
 // Phase 2 18b — Technical Drawing internal scale (24 px = 1 inch per
 // Spec §21). Used by the line-tool dispatch + render. Importing the
 // constant rather than redefining it keeps the canvas in lock-step with
 // the store actions and the parseLength contract.
 import { PX_PER_INCH } from '../store/useAppStore'
-// Phase 2 18c — shared commit helper. Both the click-commit (onMouseDown
-// freehand) and the typed-commit (TechInputPanel Enter shortcut) route
-// through this so the typed-vs-freehand decision is made in one place.
+// Phase 2 18c — shared commit helper used by the canvas click-commit
+// path. The Enter-typed commit path lives in TechInputPanel (docked
+// panel, mounted by App.jsx since 18c docked pivot May 11 2026) and
+// imports commitTechLine directly from the same module.
 import { commitTechLine } from '../utils/techLineCommit'
 
 /**
@@ -530,13 +530,6 @@ export default function CanvasStage() {
   const staticCanvasRef = useRef(null)
   const dynamicCanvasRef = useRef(null)
   const tool = useAppStore((s) => s.tool)
-  // Phase 2 18b — appMode + techDraft drive the TechLengthInput conditional
-  // mount. Subscribed at component-render scope so the input mounts /
-  // unmounts cleanly on mode switch + draft begin / end. techDraftActive
-  // is derived: we only need a boolean for the conditional, not the full
-  // draft payload (TechLengthInput subscribes to the cursor itself).
-  const appMode = useAppStore((s) => s.appMode)
-  const techDraftActive = useAppStore((s) => s.techDraft !== null)
   // Spec §9 — context menu state lives at component-level so the JSX can
   // render <ContextMenu> conditionally. The useEffect captures setCtxMenu
   // (stable across renders) to call from inside the contextmenu handler.
@@ -1871,14 +1864,16 @@ export default function CanvasStage() {
           const worldY = (raw.y - techV.panY) / techZoom
           const draft = store.techDraft
           if (!draft || !draft.a) {
-            // First click — capture anchor. The floating input panel
-            // mounts on the next render via the techDraftActive subscription.
-            // 18c — initialize both typed fields explicitly so subsequent
-            // partial writes (onLengthChange / onAngleChange) spread cleanly.
+            // First click — capture anchor. 18c docked pivot: the panel
+            // is already mounted (whenever tool === 'tech-line'), so the
+            // operator may have pre-typed length/angle values that are
+            // sitting in techDraft.typedInches / typedAngleDegrees. Spread
+            // any existing draft to preserve those pre-fills; only the
+            // anchor is brand new at this point.
+            const cur = draft || { typedInches: null, typedAngleDegrees: null }
             store.setTechDraft({
+              ...cur,
               a: { x: worldX, y: worldY },
-              typedInches: null,
-              typedAngleDegrees: null,
             })
             dynamicDirty = true
             return
@@ -2764,39 +2759,17 @@ export default function CanvasStage() {
     >
       <canvas id="cvStatic" ref={staticCanvasRef} className="cv-static" aria-hidden="true" />
       <canvas id="cvDynamic" ref={dynamicCanvasRef} className="cv-dynamic" aria-hidden="true" />
-      {/* Phase 2 18b/18c — Technical Drawing line-tool input panel.
-          Mounts when appMode is TECHNICAL, tool is tech-line, and a
-          draft is active. onCommit (Enter from either field, fires only
-          when BOTH length AND angle are typed) routes through the same
-          commitTechLine helper as the canvas click-commit path so the
-          typed-vs-freehand decision lives in one place. */}
-      {appMode === 'TECHNICAL' && tool === 'tech-line' && techDraftActive && (
-        <TechInputPanel
-          onCommit={({ inches, angleDegrees }) => {
-            const s = useAppStore.getState()
-            const d = s.techDraft
-            if (!d || !d.a) return
-            const v = s.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
-            // Convert live cursor (canvas px) → TECHNICAL world coords.
-            // The helper uses the cursor only as freehand fallback; with
-            // both typed values present (the Enter-shortcut precondition),
-            // the cursor is effectively ignored.
-            const cursorW = {
-              x: (s.cursorX - v.panX) / (v.zoom || 1),
-              y: (s.cursorY - v.panY) / (v.zoom || 1),
-            }
-            commitTechLine({
-              anchor: d.a,
-              cursorWorld: cursorW,
-              typedInches: inches,
-              typedAngleDegrees: angleDegrees,
-              addTechnicalShape: s.addTechnicalShape,
-              setTechDraft: s.setTechDraft,
-            })
-          }}
-          onCancel={() => useAppStore.getState().setTechDraft(null)}
-        />
-      )}
+      {/* Phase 2 18c docked pivot (May 11 2026) — TechInputPanel was
+          previously mounted here as a cursor-anchored floating overlay.
+          Three failed fix attempts (autofocus useEffect chain, focusin
+          restorer, selective wrapper keydown listener) on the focus
+          management of a child-of-canvas input revealed that the entire
+          architecture was fighting the canvas event hierarchy. Pivot:
+          mount the panel as a sibling of DrawingTools in App.jsx's
+          .canvas-area, OUTSIDE the canvas event hierarchy. The panel
+          subscribes to store state directly and owns its own commit/
+          cancel paths. CanvasStage retains only the click-commit path
+          (onMouseDown tech-line branch) which calls commitTechLine. */}
       {ctxMenu && (
         <ContextMenu
           x={ctxMenu.x}

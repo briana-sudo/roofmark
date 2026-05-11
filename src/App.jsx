@@ -11,6 +11,11 @@ import AnnotationPanel from './components/AnnotationPanel'
 import PhotoPanel from './components/PhotoPanel'
 import HelpPopover from './components/HelpPopover'
 import HeaderMenu from './components/HeaderMenu'
+// Phase 2 18c docked pivot (May 11 2026) — TechInputPanel moved here
+// from CanvasStage's JSX subtree, OUTSIDE the canvas event hierarchy.
+// See TechInputPanel.jsx header comment for the three-failed-attempts
+// history that motivated the architectural pivot.
+import TechInputPanel from './components/TechInputPanel'
 import './App.css'
 
 export default function App() {
@@ -229,6 +234,13 @@ export default function App() {
           <div className="canvas-toolbar">
             <DrawingTools />
           </div>
+          {/* Phase 2 18c docked pivot — Technical Drawing input panel.
+              Renders only when appMode === 'TECHNICAL' && tool === 'tech-line'
+              (component-internal visibility guard returns null otherwise).
+              Sits between the toolbar and the canvas as a docked horizontal
+              row, OUTSIDE the canvas event hierarchy so it never competes
+              with canvas onMouseDown for focus. */}
+          <TechInputPanel />
           <CanvasStage />
           {/*
             Drawer-edge handle — belt-and-suspenders affordance for the

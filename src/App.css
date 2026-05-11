@@ -1157,40 +1157,39 @@ body {
   border-color: #3fb950;
   color: #d2f8d8;
 }
-/* Phase 2 18c (May 11 2026) — TechInputPanel replaces TechLengthInput.
-   Vertical stack: length row, angle row, unit toggle row. Wrapper grows
-   from ~28px tall (18b length-only) to ~80px tall. Width stays near
-   160px so the panel doesn't crowd a small viewport at cursor+12 offset. */
+/* Phase 2 18c docked pivot (May 11 2026) — TechInputPanel was a floating
+   cursor-anchored overlay through 18b/18c-initial; three failed focus-
+   management bug-fix attempts on that architecture surfaced the same
+   class of regression. Pivoted to a docked horizontal row sitting between
+   .canvas-toolbar and CanvasStage. Lives outside the canvas event
+   hierarchy → no autofocus race, no document-keydown competition.
+
+   Layout: [ Length: <input> ] [ Angle: <input> ] [ Degrees|Pitch ]
+            [ "Click on canvas to place anchor" hint when no anchor ]
+   Sized like a sub-toolbar row at ~32–36px tall, full canvas-area width. */
 .tech-input-panel {
-  position: absolute;
-  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
   background: var(--rm-panel);
-  border: 1px solid var(--rm-border);
-  border-radius: 4px;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
-  padding: 8px 10px;
+  border-bottom: 1px solid var(--rm-border);
   font-family: var(--rm-sans);
   font-size: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 160px;
-  pointer-events: auto;
 }
 .tech-input-panel .tip-row {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.tech-input-panel .tip-label {
-  width: 52px;
+.tech-input-panel label {
   color: var(--rm-fg-dim);
   font-size: 11px;
   user-select: none;
+  white-space: nowrap;
 }
-.tech-input-panel .tip-field {
-  flex: 1;
-  min-width: 0;
+.tech-input-panel input {
+  width: 220px;
   padding: 4px 6px;
   background: rgba(0, 0, 0, 0.25);
   border: 1px solid var(--rm-border);
@@ -1200,19 +1199,14 @@ body {
   font-size: 12px;
   outline: none;
 }
-.tech-input-panel .tip-field:focus {
+.tech-input-panel input:focus {
   border-color: #3fb950;
 }
-.tech-input-panel .tip-field.invalid {
+.tech-input-panel input.invalid {
   border-color: var(--rm-red);
 }
-.tech-input-panel .tip-field.invalid:focus {
+.tech-input-panel input.invalid:focus {
   border-color: var(--rm-red);
-}
-.tech-input-panel .tip-toggle-row {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 2px;
 }
 .tech-input-panel .unit-toggle {
   padding: 2px 10px;
@@ -1231,6 +1225,13 @@ body {
 }
 .tech-input-panel .unit-toggle:hover {
   color: var(--rm-fg);
+}
+.tech-input-panel .placeholder-hint {
+  margin-left: auto;
+  color: var(--rm-fg-dim);
+  font-style: italic;
+  font-size: 11px;
+  user-select: none;
 }
 
 /* ---- Context menu (Step 9) ---- */
