@@ -1292,9 +1292,81 @@ export const useAppStore = create((set, get) => {
     // they hit Fit; operator who hasn't keeps fit on canvas resize.
     fitToViewport: (canvasW, canvasH) => {
       const s = get()
-      if (!s.photoMeta || !canvasW || !canvasH) {
-        // No photo or no canvas dims — just clear the flag so subsequent
-        // resize doesn't try to fit a missing photo.
+      if (!canvasW || !canvasH) {
+        // No canvas dims — just clear the flag and bail. Same for both
+        // appModes; the fit math needs valid canvas size to compute pan.
+        set({ viewportTouchedSinceFit: false })
+        return
+      }
+
+      // Phase 2 18c follow-on (operator-reported May 11 2026 on `8a754d2`):
+      // Technical Drawing has no photo, so the pre-fix `!photoMeta` guard
+      // bailed before writing the viewport — Fit appeared dead under
+      // TECHNICAL. Branch here on appMode: TECHNICAL fits to the shape
+      // bounding box (or resets to default when no shapes); FIELD keeps
+      // the photo-based fit unchanged below.
+      if (s.appMode === 'TECHNICAL') {
+        // Compute bounding box across all visible technical layers.
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+        let hasShapes = false
+        for (const layer of s.technicalLayers || []) {
+          if (layer.visible === false) continue
+          for (const shape of layer.shapes || []) {
+            // 18b ships only the line shape; future tech shape types
+            // (rect, arc, circ in 18d+) extend this loop with their own
+            // bounding-box contributors.
+            if (shape.type === 'line' && shape.a && shape.b) {
+              minX = Math.min(minX, shape.a.x, shape.b.x)
+              minY = Math.min(minY, shape.a.y, shape.b.y)
+              maxX = Math.max(maxX, shape.a.x, shape.b.x)
+              maxY = Math.max(maxY, shape.a.y, shape.b.y)
+              hasShapes = true
+            }
+          }
+        }
+
+        if (!hasShapes) {
+          // Empty canvas — reset to a centered identity viewport so the
+          // operator gets a predictable "fresh canvas" state.
+          const defaultTech = normalizeViewport({ panX: 0, panY: 0, zoom: 1.0 })
+          set({
+            viewports: { ...s.viewports, TECHNICAL: defaultTech },
+            viewport: defaultTech,
+            viewportTouchedSinceFit: false,
+          })
+          return
+        }
+
+        // Fit-to-bounding-box with ~40 px breathing room on each side.
+        // Zoom is capped at 1.0 (never magnify a single point), and
+        // bounded by ZOOM_MIN_CAP via normalizeViewport. Pan centers the
+        // box on the canvas at the chosen zoom.
+        const PADDING_PX = 40
+        const contentW = maxX - minX
+        const contentH = maxY - minY
+        const availW = Math.max(canvasW - PADDING_PX * 2, 1)
+        const availH = Math.max(canvasH - PADDING_PX * 2, 1)
+        const zoomX = contentW > 0 ? availW / contentW : 1
+        const zoomY = contentH > 0 ? availH / contentH : 1
+        const zoomRaw = Math.min(zoomX, zoomY, 1.0)
+        const centerX = (minX + maxX) / 2
+        const centerY = (minY + maxY) / 2
+        const fitTech = normalizeViewport({
+          panX: canvasW / 2 - centerX * zoomRaw,
+          panY: canvasH / 2 - centerY * zoomRaw,
+          zoom: zoomRaw,
+        })
+        set({
+          viewports: { ...s.viewports, TECHNICAL: fitTech },
+          viewport: fitTech,
+          viewportTouchedSinceFit: false,
+        })
+        return
+      }
+
+      // FIELD path — unchanged from pre-18c-follow-on. Photo-anchored
+      // fit using computeFitViewport.
+      if (!s.photoMeta) {
         set({ viewportTouchedSinceFit: false })
         return
       }
@@ -1302,9 +1374,8 @@ export const useAppStore = create((set, get) => {
       // Phase 2 18a — write to BOTH per-mode viewports[appMode] AND the
       // viewport runtime mirror in one atomic set.
       const normalized = normalizeViewport(fit)
-      const am = s.appMode === 'TECHNICAL' ? 'TECHNICAL' : 'FIELD'
       set({
-        viewports: { ...s.viewports, [am]: normalized },
+        viewports: { ...s.viewports, FIELD: normalized },
         viewport: normalized,
         viewportTouchedSinceFit: false,
       })

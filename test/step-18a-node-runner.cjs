@@ -814,6 +814,142 @@ async function mockImportJSON_photoRestore(jsonStr, idb) {
 })()
 
 // ============================================================================
+// FIT-TO-VIEWPORT IN TECHNICAL MODE (35–39) — Phase 2 18c follow-on
+// (operator-reported May 11 2026 on `8a754d2`).
+//
+// Pre-fix fitToViewport bailed on `!photoMeta` before writing the
+// viewport. Under TECHNICAL (no photo), Fit silently did nothing.
+// Fix branches on appMode: TECHNICAL fits to the shape bounding box
+// (with 40px padding) or resets to {0, 0, 1.0} when empty; FIELD path
+// unchanged.
+// ============================================================================
+
+// Replica of the production fitToViewport logic for TECHNICAL mode.
+// Keep field-for-field in sync with useAppStore.fitToViewport's
+// TECHNICAL branch.
+const FIT_PADDING_PX = 40
+function fitToViewportTECHNICAL(state, canvasW, canvasH) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  let hasShapes = false
+  for (const layer of state.technicalLayers || []) {
+    if (layer.visible === false) continue
+    for (const shape of layer.shapes || []) {
+      if (shape.type === 'line' && shape.a && shape.b) {
+        minX = Math.min(minX, shape.a.x, shape.b.x)
+        minY = Math.min(minY, shape.a.y, shape.b.y)
+        maxX = Math.max(maxX, shape.a.x, shape.b.x)
+        maxY = Math.max(maxY, shape.a.y, shape.b.y)
+        hasShapes = true
+      }
+    }
+  }
+  if (!hasShapes) return { panX: 0, panY: 0, zoom: 1.0 }
+  const contentW = maxX - minX
+  const contentH = maxY - minY
+  const availW = Math.max(canvasW - FIT_PADDING_PX * 2, 1)
+  const availH = Math.max(canvasH - FIT_PADDING_PX * 2, 1)
+  const zoomX = contentW > 0 ? availW / contentW : 1
+  const zoomY = contentH > 0 ? availH / contentH : 1
+  const zoomRaw = Math.min(zoomX, zoomY, 1.0)
+  // normalizeViewport clamp (mirroring the production helper):
+  const zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN_CAP, zoomRaw))
+  const centerX = (minX + maxX) / 2
+  const centerY = (minY + maxY) / 2
+  return {
+    panX: canvasW / 2 - centerX * zoomRaw,
+    panY: canvasH / 2 - centerY * zoomRaw,
+    zoom,
+  }
+}
+
+// 35. Empty technicalLayers + Fit → default viewport {0, 0, 1.0}.
+{
+  const state = { technicalLayers: [] }
+  const v = fitToViewportTECHNICAL(state, 800, 600)
+  pass('35a. empty technicalLayers → panX = 0', v.panX === 0)
+  pass('35b. empty technicalLayers → panY = 0', v.panY === 0)
+  pass('35c. empty technicalLayers → zoom = 1.0', v.zoom === 1.0)
+}
+
+// 36. Single line at (0,0)→(96,0) + Fit on 800×600 canvas:
+//     bounding box (0,0)→(96,0). content fits easily, zoom clamps to 1.0.
+//     centered: panX = 400 - 48 = 352, panY = 300 - 0 = 300.
+{
+  const state = {
+    technicalLayers: [{
+      id: 'tech-layer-1', name: 'Layer 1', visible: true,
+      shapes: [
+        { id: 'tech-shape-1', type: 'line', a: { x: 0, y: 0 }, b: { x: 96, y: 0 }, lengthInches: 4, lengthSource: 'typed', angleSource: 'freehand' },
+      ],
+    }],
+  }
+  const v = fitToViewportTECHNICAL(state, 800, 600)
+  pass('36a. single small line → zoom clamps to 1.0', v.zoom === 1.0)
+  pass('36b. single line → panX = 400 - 48 = 352', v.panX === 352)
+  pass('36c. single line → panY = 300 - 0 = 300', v.panY === 300)
+}
+
+// 37. Multiple lines spanning a wide bounding box → zoom < 1.0,
+//     content centered.
+{
+  const state = {
+    technicalLayers: [{
+      id: 'tech-layer-1', name: 'Layer 1', visible: true,
+      shapes: [
+        { id: 's1', type: 'line', a: { x: -100, y: -100 }, b: { x:  100, y: -100 }, lengthInches: 8, lengthSource: 'typed', angleSource: 'freehand' },
+        { id: 's2', type: 'line', a: { x:  900, y:  500 }, b: { x: 1000, y:  500 }, lengthInches: 4, lengthSource: 'typed', angleSource: 'freehand' },
+      ],
+    }],
+  }
+  // Bounding box: (-100, -100) → (1000, 500). contentW = 1100, contentH = 600.
+  // availW = 800 - 80 = 720; availH = 600 - 80 = 520.
+  // zoomX = 720 / 1100 ≈ 0.6545. zoomY = 520 / 600 ≈ 0.8667.
+  // zoom = min(0.6545, 0.8667, 1.0) ≈ 0.6545.
+  const v = fitToViewportTECHNICAL(state, 800, 600)
+  pass('37a. wide bbox → zoom < 1.0', v.zoom < 1.0)
+  pass('37b. wide bbox → zoom ≈ 0.655 (X is limiting axis)',
+    Math.abs(v.zoom - (720 / 1100)) < 0.001)
+  // Center of bbox: ((-100 + 1000)/2, (-100 + 500)/2) = (450, 200).
+  // panX = 400 - 450 * 0.6545 = 400 - 294.55 ≈ 105.45
+  // panY = 300 - 200 * 0.6545 = 300 - 130.91 ≈ 169.09
+  pass('37c. wide bbox → panX centers the box',
+    Math.abs(v.panX - (400 - 450 * (720 / 1100))) < 0.01)
+  pass('37d. wide bbox → panY centers the box',
+    Math.abs(v.panY - (300 - 200 * (720 / 1100))) < 0.01)
+}
+
+// 38. Invisible layer's shapes excluded from bounding box.
+{
+  const state = {
+    technicalLayers: [
+      { id: 't1', name: 'Visible', visible: true,
+        shapes: [{ id: 's1', type: 'line', a: { x: 0, y: 0 }, b: { x: 96, y: 0 }, lengthInches: 4 }] },
+      { id: 't2', name: 'Invisible', visible: false,
+        shapes: [{ id: 's2', type: 'line', a: { x: 1000, y: 1000 }, b: { x: 2000, y: 2000 }, lengthInches: 50 }] },
+    ],
+  }
+  const v = fitToViewportTECHNICAL(state, 800, 600)
+  // Bounding box should only include the visible layer's shape (0,0)→(96,0).
+  // Same as test 36 — zoom 1.0, panX 352, panY 300.
+  pass('38a. invisible layer ignored: zoom 1.0', v.zoom === 1.0)
+  pass('38b. invisible layer ignored: panX 352',  v.panX === 352)
+  pass('38c. invisible layer ignored: panY 300',  v.panY === 300)
+}
+
+// 39. FIELD-mode Fit regression check (existing logic must not regress).
+//     The FIELD path uses computeFitViewport(photoMeta, canvasW, canvasH).
+//     Mock keeps existing test 10d's contract: zoom 0.5, panX 10, panY 20.
+{
+  const m = makeMockStore()
+  // Default appMode is FIELD.
+  m.fitToViewport(800, 600)
+  pass('39a. FIELD fitToViewport still writes viewports.FIELD.zoom = 0.5',
+    m.state.viewports.FIELD.zoom === 0.5)
+  pass('39b. FIELD fit does NOT mutate TECHNICAL viewport',
+    m.state.viewports.TECHNICAL.zoom === 1)
+}
+
+// ============================================================================
 // SUMMARY
 // ============================================================================
 // All async tests above push into `tests` synchronously OR via the IIFE wrap
