@@ -24,8 +24,13 @@ import { commitTechLine } from '../utils/techLineCommit'
 // Phase 2 18d (May 11 2026) — pure tech geometry helpers for
 // selection hit-test, centroid math (single + multi), shape rotation.
 import {
-  techShapeCentroid, techMultiShapeCentroid,
   techHitTest, rotateTechShape, getSelectedTechShapes,
+  // Phase 2 18d-pivot (May 11 2026) — operator-chosen rotation pivot.
+  // resolveTechPivot is the DRY point between the grip render and the
+  // rotation-drag start handler (replaces the inline centroid calls
+  // that 18d had at those sites); findPivotSnapTarget feeds the
+  // hover-while-picking branch in onMouseMove.
+  resolveTechPivot, findPivotSnapTarget,
 } from '../utils/techGeometry'
 
 /**
@@ -1229,21 +1234,25 @@ export default function CanvasStage() {
           const techZoomD = techVD.zoom || 1
           const shapesD = getSelectedTechShapes(state.technicalLayers, techSelDraw)
           if (shapesD.length > 0) {
-            const centerD = techSelDraw.length === 1
-              ? techShapeCentroid(shapesD[0])
-              : techMultiShapeCentroid(shapesD)
+            // 18d-pivot — resolveTechPivot returns the operator-locked
+            // pivot if set, else the centroid. Same call used by the
+            // mousedown rotation-drag start — guaranteed to agree.
+            const centerD = resolveTechPivot(state.techPivot, shapesD)
             if (centerD) {
               const cxD = centerD.x * techZoomD + techVD.panX
               const cyD = centerD.y * techZoomD + techVD.panY
+              // 18d-pivot — grip color flips to cyan when pivot is
+              // operator-locked. Visual distinction from the orange
+              // centroid grip makes the locked state obvious at a glance.
+              const isLocked = state.techPivot !== null
               ctxDynamic.save()
-              ctxDynamic.fillStyle = '#e8531a'
+              ctxDynamic.fillStyle = isLocked ? '#06b6d4' : '#e8531a'
               ctxDynamic.strokeStyle = '#ffffff'
               ctxDynamic.lineWidth = 1.5
               ctxDynamic.beginPath()
               ctxDynamic.arc(cxD, cyD, 8, 0, Math.PI * 2)
               ctxDynamic.fill()
               ctxDynamic.stroke()
-              // Inner crosshair (white on orange) for precise pivot reading.
               ctxDynamic.strokeStyle = '#ffffff'
               ctxDynamic.lineWidth = 1
               ctxDynamic.beginPath()
@@ -1255,6 +1264,34 @@ export default function CanvasStage() {
               ctxDynamic.restore()
             }
           }
+        }
+
+        // Phase 2 18d-pivot (May 11 2026) — snap-target indicator while
+        // operator is in pick-mode. Diamond marker, yellow for endpoint,
+        // cyan for midpoint. Renders independent of the rotation grip
+        // (operator may have a locked pivot AND be picking a new one).
+        if (state.techPivotPickMode && state.techPivotHover) {
+          const techVH = state.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+          const techZoomH = techVH.zoom || 1
+          const hover = state.techPivotHover
+          const hx = hover.x * techZoomH + techVH.panX
+          const hy = hover.y * techZoomH + techVH.panY
+          ctxDynamic.save()
+          const color = hover.type === 'endpoint' ? '#fbbf24' : '#06b6d4'
+          ctxDynamic.strokeStyle = color
+          ctxDynamic.lineWidth = 2
+          // Diamond marker (rotated square) — distinct shape from any
+          // existing circular handles so the operator never confuses
+          // a snap indicator for a draggable handle.
+          const r = 7
+          ctxDynamic.beginPath()
+          ctxDynamic.moveTo(hx, hy - r)
+          ctxDynamic.lineTo(hx + r, hy)
+          ctxDynamic.lineTo(hx, hy + r)
+          ctxDynamic.lineTo(hx - r, hy)
+          ctxDynamic.closePath()
+          ctxDynamic.stroke()
+          ctxDynamic.restore()
         }
 
         ctxDynamic.restore()
@@ -1820,6 +1857,38 @@ export default function CanvasStage() {
       // Spec §9 — edit-mode handle drag. Section 7.A — viewport-aware
       // movePoint / moveBody convert canvas-px deltas to photo-normalized
       // mutations so handles track the cursor 1:1 regardless of zoom.
+      // Phase 2 18d-pivot (May 11 2026) — pick-mode hover. When the
+      // operator has clicked "Set pivot" in TechInputPanel, every
+      // mousemove scans for snap targets (endpoint / midpoint of
+      // selected lines, then endpoint of other technical lines) and
+      // writes the result to store.techPivotHover. drawDynamic reads
+      // that and paints the diamond snap indicator. Returns early to
+      // skip Field Markup snap engine and all drag handlers — pick
+      // mode is a modal interaction.
+      if (store.techPivotPickMode) {
+        const techVPick = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+        const techZoomPick = techVPick.zoom || 1
+        const cursorWorld = {
+          x: (x - techVPick.panX) / techZoomPick,
+          y: (y - techVPick.panY) / techZoomPick,
+        }
+        const selShapes = getSelectedTechShapes(store.technicalLayers, store.techSelected)
+        const target = findPivotSnapTarget(cursorWorld, selShapes, store.technicalLayers, techVPick, 7)
+        // Only write when value changed — avoids render thrash on each
+        // mousemove tick when the cursor is in free-cursor zone (target
+        // stays null) or stable on the same snap point.
+        const cur = store.techPivotHover
+        const changed = (
+          (target && (!cur || cur.x !== target.x || cur.y !== target.y || cur.type !== target.type))
+          || (!target && cur)
+        )
+        if (changed) {
+          store.setTechPivotHover(target)
+        }
+        dynamicDirty = true
+        return
+      }
+
       // Phase 2 18d — Technical Drawing rotation drag. Runs BEFORE
       // Field Markup editDrag so rotation in TECHNICAL doesn't fall
       // through to FM editDrag handling (which references state that
@@ -1964,17 +2033,40 @@ export default function CanvasStage() {
         const t = store.tool
 
         // Phase 2 18d (May 11 2026) — Select tool dispatch. Priority:
+        //   0. (18d-pivot) Pick-mode click locks the hovered pivot.
         //   1. If selection exists, check rotation grip proximity first.
         //   2. Else hit-test shapes for selection / multi-select.
         //   3. Empty-canvas click clears selection + typed rotation.
         if (t === 'tech-select') {
           const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+
+          // 0. Phase 2 18d-pivot — pick-mode click locks the hovered
+          // pivot. Intercepts ALL clicks regardless of what's under the
+          // cursor (snap target or empty canvas). When no snap target
+          // is hovered, the click locks at the raw cursor world coords.
+          if (store.techPivotPickMode) {
+            const hover = store.techPivotHover
+            const pivot = hover
+              ? { x: hover.x, y: hover.y }
+              : {
+                  x: (raw.x - techV.panX) / (techV.zoom || 1),
+                  y: (raw.y - techV.panY) / (techV.zoom || 1),
+                }
+            store.setTechPivot(pivot)
+            store.setTechPivotPickMode(false)
+            store.setTechPivotHover(null)
+            dynamicDirty = true
+            return
+          }
+
           // 1. Rotation grip hit.
           if (store.techSelected.length > 0) {
             const selectedShapes = getSelectedTechShapes(store.technicalLayers, store.techSelected)
-            const center = store.techSelected.length === 1
-              ? techShapeCentroid(selectedShapes[0])
-              : techMultiShapeCentroid(selectedShapes)
+            // 18d-pivot — resolveTechPivot handles the operator-locked
+            // pivot OR centroid fallback in one call. Drag captures
+            // this value into originCenter and is pivot-source-agnostic
+            // for the rest of the drag.
+            const center = resolveTechPivot(store.techPivot, selectedShapes)
             if (center) {
               const handleX = center.x * techV.zoom + techV.panX
               const handleY = center.y * techV.zoom + techV.panY
@@ -2359,6 +2451,13 @@ export default function CanvasStage() {
         if (changed && typeof techRotateDrag.preDragSnap === 'string') {
           useAppStore.getState().pushCapturedSnapshot(techRotateDrag.preDragSnap)
         }
+        // Phase 2 18d-pivot — pivot resets to centroid after each
+        // rotation commit. Operator decision (May 11 2026): pivot is a
+        // single-rotation tool, not a sticky preference. Same reset
+        // applied in the TechInputPanel typed-Enter commit path.
+        if (changed) {
+          useAppStore.getState().setTechPivot(null)
+        }
         techRotateDrag = null
         dynamicDirty = true
         return
@@ -2553,12 +2652,26 @@ export default function CanvasStage() {
         // operator clicked back onto the canvas mid-draft).
         const sEscTech = useAppStore.getState()
         if (sEscTech.appMode === 'TECHNICAL') {
-          // Phase 2 18d — Escape priority chain under TECHNICAL:
-          //   1. Active rotation drag → cancel (shape stays at last
-          //      mousemove position; matches Field Markup editDrag
-          //      Escape semantics).
-          //   2. Active tech-line draft → null the draft.
-          //   3. Active selection → clear selection + typed rotation.
+          // Phase 2 18d/18d-pivot — Escape priority chain under TECHNICAL.
+          // Operator-facing semantic: Escape backs out ONE step at a
+          // time per AutoCAD convention. Layered from most-recent state:
+          //   0a. (18d-pivot) Pick-mode active → cancel pick.
+          //   0b. (18d-pivot) Locked pivot → revert to centroid.
+          //   1.  Active rotation drag → cancel (shape stays at last
+          //       mousemove position; matches FM editDrag semantics).
+          //   2.  Active tech-line draft → null the draft.
+          //   3.  Active selection → clear selection + typed rotation.
+          if (sEscTech.techPivotPickMode) {
+            sEscTech.setTechPivotPickMode(false)
+            sEscTech.setTechPivotHover(null)
+            dynamicDirty = true
+            return
+          }
+          if (sEscTech.techPivot) {
+            sEscTech.setTechPivot(null)
+            dynamicDirty = true
+            return
+          }
           if (techRotateDrag) {
             techRotateDrag = null
             dynamicDirty = true
@@ -2811,6 +2924,18 @@ export default function CanvasStage() {
       // setTechSelection / add / remove / toggle / clear.
       if (state.techSelected !== prev.techSelected) {
         staticDirty = true
+        dynamicDirty = true
+      }
+      // 18d-pivot — pivot, pick-mode flag, and hover target all repaint
+      // the dynamic canvas (grip color flip, snap indicator mount/move/
+      // unmount). Static canvas unchanged — pivot doesn't alter shape
+      // geometry until commit, which already flips static via the
+      // technicalLayers subscription above.
+      if (
+        state.techPivot !== prev.techPivot
+        || state.techPivotPickMode !== prev.techPivotPickMode
+        || state.techPivotHover !== prev.techPivotHover
+      ) {
         dynamicDirty = true
       }
       // Spec §9 — selection change repaints both static (selected outline)

@@ -512,6 +512,26 @@ const initialState = {
   // selection is active. null = no typed value (rubber-band-equivalent
   // for rotation = drag handle only). Transient.
   techRotationInput: null,
+  // Phase 2 18d-pivot (May 11 2026) — operator-chosen rotation pivot,
+  // mirrors AutoCAD's ROTATE base-point workflow. All three transient.
+  // NOT in PERSIST_KEYS. NOT in dataSnapshot. The rotation MUTATIONS
+  // to shape geometry persist via technicalLayers; the pivot itself is
+  // UI state that resets to centroid after each commit per operator
+  // decision (May 11 2026).
+  //   techPivot: {x, y} | null   — locked pivot in TECHNICAL world coords.
+  //                                null = use centroid (single-select)
+  //                                or bbox centroid (multi-select).
+  //   techPivotPickMode: boolean — true while operator is hovering canvas
+  //                                to pick a pivot via "Set pivot" button.
+  //                                Click locks the hovered pivot.
+  //   techPivotHover: {x, y, type} | null
+  //                              — current snap target under cursor while
+  //                                in pick mode. type is 'endpoint' or
+  //                                'midpoint'. Read by drawDynamic for
+  //                                the diamond snap indicator.
+  techPivot: null,
+  techPivotPickMode: false,
+  techPivotHover: null,
   // Phase 2 18b/18c — Technical Drawing line-tool draft state.
   // Transient. NOT in PERSIST_KEYS. null when no draft in progress.
   // Active shape:
@@ -1425,6 +1445,11 @@ export const useAppStore = create((set, get) => {
           // ground. Same goes for the transient typed rotation value.
           techSelected: [],
           techRotationInput: null,
+          // 18d-pivot — pivot state is selection-scoped; mode change
+          // wipes all three (locked pivot, pick-mode flag, hover snap).
+          techPivot: null,
+          techPivotPickMode: false,
+          techPivotHover: null,
         }
       })
     },
@@ -1669,7 +1694,16 @@ export const useAppStore = create((set, get) => {
       // returning operator picking 'tech-select' starts with a fresh
       // selection.
       if (s.tool === 'tech-select' && tool !== 'tech-select') {
-        return { tool, techSelected: [], techRotationInput: null }
+        return {
+          tool,
+          techSelected: [],
+          techRotationInput: null,
+          // 18d-pivot — pivot state is tied to the Select tool;
+          // switching away wipes it.
+          techPivot: null,
+          techPivotPickMode: false,
+          techPivotHover: null,
+        }
       }
       return { tool }
     }),
@@ -1738,11 +1772,28 @@ export const useAppStore = create((set, get) => {
       return { techSelected: [...s.techSelected, { layerId: entry.layerId, shapeId: entry.shapeId }] }
     }),
 
-    clearTechSelection: () => set({ techSelected: [] }),
+    clearTechSelection: () => set({
+      techSelected: [],
+      // 18d-pivot — selection cleared means there's no shape to rotate
+      // around. Reset all pivot state so a returning operator doesn't
+      // inherit a stale pivot from a different selection.
+      techPivot: null,
+      techPivotPickMode: false,
+      techPivotHover: null,
+    }),
 
     // 18d — Transient typed rotation value. Cleared on selection clear,
     // on rotation commit, and on Escape.
     setTechRotationInput: (value) => set({ techRotationInput: value }),
+
+    // 18d-pivot (May 11 2026) — operator-chosen rotation pivot. Three
+    // setters mirror the state-field naming. No validation beyond shape
+    // (the resolveTechPivot helper in techGeometry.js handles null
+    // gracefully; the canvas dispatch / TechInputPanel call paths
+    // ensure only well-formed values get written).
+    setTechPivot: (point) => set({ techPivot: point }),
+    setTechPivotPickMode: (active) => set({ techPivotPickMode: !!active }),
+    setTechPivotHover: (target) => set({ techPivotHover: target }),
 
     // 18d — Per-mousemove rotation drag mutator. Mirrors
     // updateTechnicalShape (same set() shape) but DOES NOT call pushUndo.
@@ -2236,6 +2287,10 @@ export const useAppStore = create((set, get) => {
         // shapes again in the freshly-loaded canvas).
         techSelected: [],
         techRotationInput: null,
+        // 18d-pivot — pivot is session-scoped UI state. Never persisted.
+        techPivot: null,
+        techPivotPickMode: false,
+        techPivotHover: null,
         pdfOrientation: normalizePdfOrientation(obj.pdfOrientation),
         // P45 (Phase 2 18a, May 10 2026) — Load Project clears the
         // currentFileHandle + currentFileName so the loaded file is
@@ -2492,6 +2547,10 @@ export const useAppStore = create((set, get) => {
         // (same convention as `selected` for Field Markup above).
         techSelected: [],
         techRotationInput: null,
+        // 18d-pivot — pivot cleared too.
+        techPivot: null,
+        techPivotPickMode: false,
+        techPivotHover: null,
         // P45 (Phase 2 18a, May 10 2026) — New Project clears the
         // currentFileHandle + currentFileName so the operator's next
         // Save opens the picker fresh. Matches the Load Project

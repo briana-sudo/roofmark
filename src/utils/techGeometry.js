@@ -155,3 +155,119 @@ export function getSelectedTechShapes(technicalLayers, techSelected) {
   }
   return out
 }
+
+// ============================================================================
+// Phase 2 18d-pivot (May 11 2026) — operator-chosen rotation pivot.
+// ============================================================================
+
+/**
+ * Returns the effective pivot for rotation operations. DRY for the
+ * canvas grip render AND the rotation-drag start handler.
+ *
+ *   - Operator-locked pivot (techPivot) takes precedence when non-null.
+ *   - Otherwise: single-shape selection → centroid of that shape.
+ *   - Multi-shape selection → centroid of combined bounding box.
+ *   - Empty selection → null (caller must check before rendering).
+ *
+ * @param {{x, y} | null} techPivot
+ * @param {Array} selectedShapes
+ * @returns {{x, y} | null}
+ */
+export function resolveTechPivot(techPivot, selectedShapes) {
+  if (techPivot && typeof techPivot.x === 'number' && typeof techPivot.y === 'number') {
+    return { x: techPivot.x, y: techPivot.y }
+  }
+  if (!Array.isArray(selectedShapes) || selectedShapes.length === 0) return null
+  if (selectedShapes.length === 1) return techShapeCentroid(selectedShapes[0])
+  return techMultiShapeCentroid(selectedShapes)
+}
+
+/**
+ * Find the closest snap candidate to the cursor for pivot picking.
+ *
+ * Priority order (lower number = higher priority):
+ *   1. Endpoints of currently-selected lines (operator most likely
+ *      wants these — they're rotating around their own line's end).
+ *   2. Midpoints of currently-selected lines.
+ *   3. Endpoints of non-selected visible technical lines (snap to
+ *      neighbour geometry — common CAD pattern).
+ *
+ * Within the same priority, ties break by canvas-px distance. Returns
+ * null when no candidate is within tolPx canvas-pixels — caller uses
+ * the raw cursor world position as the free pivot.
+ *
+ * @param {{x, y}} cursorWorld - cursor in TECHNICAL world coords (px @ zoom=1)
+ * @param {Array} selectedShapes - shapes currently in techSelected
+ * @param {Array} allTechnicalLayers - full technicalLayers array
+ * @param {{panX, panY, zoom}} techViewport
+ * @param {number} [tolPx=7]
+ * @returns {{x, y, type: 'endpoint' | 'midpoint'} | null}
+ */
+export function findPivotSnapTarget(cursorWorld, selectedShapes, allTechnicalLayers, techViewport, tolPx) {
+  const tol = typeof tolPx === 'number' ? tolPx : 7
+  const zoom = (techViewport && techViewport.zoom) || 1
+  const panX = (techViewport && techViewport.panX) || 0
+  const panY = (techViewport && techViewport.panY) || 0
+  // Cursor in canvas-px for distance compare.
+  const cursorCanvasX = cursorWorld.x * zoom + panX
+  const cursorCanvasY = cursorWorld.y * zoom + panY
+
+  // Collect candidates with explicit priority numbers.
+  const candidates = []
+  const sel = Array.isArray(selectedShapes) ? selectedShapes : []
+
+  // Priority 1: selected line endpoints.
+  for (const sh of sel) {
+    if (!sh || sh.type !== 'line' || !sh.a || !sh.b) continue
+    candidates.push({ worldX: sh.a.x, worldY: sh.a.y, type: 'endpoint', priority: 1 })
+    candidates.push({ worldX: sh.b.x, worldY: sh.b.y, type: 'endpoint', priority: 1 })
+  }
+
+  // Priority 2: selected line midpoints.
+  for (const sh of sel) {
+    if (!sh || sh.type !== 'line' || !sh.a || !sh.b) continue
+    candidates.push({
+      worldX: (sh.a.x + sh.b.x) / 2,
+      worldY: (sh.a.y + sh.b.y) / 2,
+      type: 'midpoint',
+      priority: 2,
+    })
+  }
+
+  // Priority 3: non-selected visible line endpoints.
+  const selectedIds = new Set(sel.map((s) => s && s.id).filter(Boolean))
+  if (Array.isArray(allTechnicalLayers)) {
+    for (const layer of allTechnicalLayers) {
+      if (!layer || layer.visible === false) continue
+      for (const sh of layer.shapes || []) {
+        if (!sh || sh.type !== 'line' || !sh.a || !sh.b) continue
+        if (selectedIds.has(sh.id)) continue
+        candidates.push({ worldX: sh.a.x, worldY: sh.a.y, type: 'endpoint', priority: 3 })
+        candidates.push({ worldX: sh.b.x, worldY: sh.b.y, type: 'endpoint', priority: 3 })
+      }
+    }
+  }
+
+  // Single pass: pick the best candidate within tolerance, breaking ties
+  // by priority first (lower number wins), then distance.
+  const tolSq = tol * tol
+  let best = null
+  let bestDistSq = Infinity
+  let bestPriority = Infinity
+  for (const cand of candidates) {
+    const cx = cand.worldX * zoom + panX
+    const cy = cand.worldY * zoom + panY
+    const dx = cx - cursorCanvasX
+    const dy = cy - cursorCanvasY
+    const distSq = dx * dx + dy * dy
+    if (distSq > tolSq) continue
+    if (cand.priority < bestPriority
+      || (cand.priority === bestPriority && distSq < bestDistSq)) {
+      best = cand
+      bestDistSq = distSq
+      bestPriority = cand.priority
+    }
+  }
+
+  return best ? { x: best.worldX, y: best.worldY, type: best.type } : null
+}

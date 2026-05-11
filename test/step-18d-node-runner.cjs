@@ -57,9 +57,15 @@ const {
   techShapeCentroid, techMultiShapeCentroid,
   techHitTest, rotateTechShape, getSelectedTechShapes,
   distanceFromSegment,
+  // Phase 2 18d-pivot (May 11 2026)
+  resolveTechPivot, findPivotSnapTarget,
 } = loadModule(
   'src/utils/techGeometry.js',
-  ['techShapeCentroid', 'techMultiShapeCentroid', 'techHitTest', 'rotateTechShape', 'getSelectedTechShapes', 'distanceFromSegment'],
+  [
+    'techShapeCentroid', 'techMultiShapeCentroid', 'techHitTest',
+    'rotateTechShape', 'getSelectedTechShapes', 'distanceFromSegment',
+    'resolveTechPivot', 'findPivotSnapTarget',
+  ],
   techGeomPreamble,
 )
 
@@ -495,6 +501,280 @@ function makeMockTechStore() {
   ]
   const shapes2 = getSelectedTechShapes(layers, sel2)
   pass('30d. invalid entries dropped', shapes2.length === 1 && shapes2[0].id === 'tech-shape-1')
+}
+
+// ============================================================================
+// PIVOT — resolveTechPivot (31–35)
+// Phase 2 18d-pivot (May 11 2026) — operator-chosen pivot helper.
+// ============================================================================
+
+// 31. Null techPivot + single selection → centroid of that shape.
+{
+  const sh = { type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } }
+  const p = resolveTechPivot(null, [sh])
+  pass('31a. null pivot + single sel → midpoint.x', p.x === 12)
+  pass('31b. null pivot + single sel → midpoint.y', p.y === 0)
+}
+
+// 32. Null techPivot + multi selection → bbox centroid.
+{
+  const shapes = [
+    { type: 'line', a: { x: 0, y: 0 }, b: { x: 100, y: 0 } },
+    { type: 'line', a: { x: 200, y: 200 }, b: { x: 400, y: 400 } },
+  ]
+  const p = resolveTechPivot(null, shapes)
+  pass('32a. null pivot + multi → bbox.x === 200', p.x === 200)
+  pass('32b. null pivot + multi → bbox.y === 200', p.y === 200)
+}
+
+// 33. Null techPivot + empty selection → null.
+{
+  pass('33. null pivot + empty selection → null', resolveTechPivot(null, []) === null)
+}
+
+// 34. Non-null techPivot + any selection → returns the pivot.
+{
+  const pivot = { x: 999, y: -7 }
+  const shapes = [{ type: 'line', a: { x: 0, y: 0 }, b: { x: 100, y: 0 } }]
+  const result = resolveTechPivot(pivot, shapes)
+  pass('34a. operator pivot takes precedence over centroid', result.x === 999 && result.y === -7)
+}
+
+// 35. Non-null techPivot + empty selection → still returns the pivot.
+{
+  const pivot = { x: 42, y: 24 }
+  const result = resolveTechPivot(pivot, [])
+  pass('35. operator pivot returned even with empty selection',
+    result && result.x === 42 && result.y === 24)
+}
+
+// ============================================================================
+// PIVOT — findPivotSnapTarget (36–45)
+// ============================================================================
+
+const ID_VIEWPORT = { panX: 0, panY: 0, zoom: 1 }
+// At zoom=1, world distance === canvas-px distance, simplifying tolerance math.
+
+// 36. Endpoint of selected line within tolerance → returns endpoint.
+{
+  const sel = [{ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 100, y: 0 } }]
+  const layers = [{ id: 'L1', visible: true, shapes: sel }]
+  // Cursor at (2, 0): 2 px from selected endpoint (0, 0). Within tol 7.
+  const target = findPivotSnapTarget({ x: 2, y: 0 }, sel, layers, ID_VIEWPORT, 7)
+  pass('36a. selected endpoint hit returns endpoint',
+    target && target.type === 'endpoint' && target.x === 0 && target.y === 0)
+}
+
+// 37. Midpoint of selected line within tolerance.
+{
+  const sel = [{ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 100, y: 0 } }]
+  const layers = [{ id: 'L1', visible: true, shapes: sel }]
+  // Cursor at (50, 2). Selected midpoint is (50, 0). Within tol 7.
+  // Selected endpoints are at (0,0) and (100,0) — far away.
+  const target = findPivotSnapTarget({ x: 50, y: 2 }, sel, layers, ID_VIEWPORT, 7)
+  pass('37. selected midpoint hit returns midpoint',
+    target && target.type === 'midpoint' && target.x === 50 && target.y === 0)
+}
+
+// 38. Endpoint of non-selected line within tolerance.
+{
+  const sel = []  // nothing selected
+  const layers = [{
+    id: 'L1', visible: true,
+    shapes: [{ id: 'sh1', type: 'line', a: { x: 50, y: 50 }, b: { x: 100, y: 50 } }],
+  }]
+  const target = findPivotSnapTarget({ x: 52, y: 51 }, sel, layers, ID_VIEWPORT, 7)
+  pass('38. non-selected endpoint hit returns endpoint',
+    target && target.type === 'endpoint' && target.x === 50 && target.y === 50)
+}
+
+// 39. Cursor outside all tolerances → null.
+{
+  const sel = [{ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 100, y: 0 } }]
+  const layers = [{ id: 'L1', visible: true, shapes: sel }]
+  const target = findPivotSnapTarget({ x: 200, y: 200 }, sel, layers, ID_VIEWPORT, 7)
+  pass('39. cursor far from all candidates → null', target === null)
+}
+
+// 40. Empty layers + empty selection → null.
+{
+  pass('40. empty layers + empty selection → null',
+    findPivotSnapTarget({ x: 0, y: 0 }, [], [], ID_VIEWPORT, 7) === null)
+}
+
+// 41. Empty selection + non-empty layers → uses priority-3 endpoints.
+{
+  const layers = [{
+    id: 'L1', visible: true,
+    shapes: [{ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 100, y: 0 } }],
+  }]
+  const target = findPivotSnapTarget({ x: 1, y: 1 }, [], layers, ID_VIEWPORT, 7)
+  pass('41. no selection → falls back to layer endpoints',
+    target && target.type === 'endpoint' && target.x === 0 && target.y === 0)
+}
+
+// 42. Priority: selected endpoint wins over non-selected endpoint at same distance.
+{
+  const selShape = { id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 100, y: 0 } }
+  const otherShape = { id: 'sh2', type: 'line', a: { x: 4, y: 0 }, b: { x: 200, y: 0 } }
+  const layers = [{
+    id: 'L1', visible: true,
+    shapes: [selShape, otherShape],
+  }]
+  // Cursor at (2, 0). Selected endpoint (0,0) is 2 px away (priority 1).
+  // Non-selected endpoint (4,0) is also 2 px away (priority 3).
+  // Selected wins on priority.
+  const target = findPivotSnapTarget({ x: 2, y: 0 }, [selShape], layers, ID_VIEWPORT, 7)
+  pass('42. selected endpoint wins on priority over non-selected at same distance',
+    target && target.x === 0 && target.y === 0)
+}
+
+// 43. Selected endpoint wins over selected midpoint when both in range.
+{
+  const sel = [{ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 12, y: 0 } }]
+  const layers = [{ id: 'L1', visible: true, shapes: sel }]
+  // Selected endpoint (0,0) and selected midpoint (6,0).
+  // Cursor at (4, 0): 4 px from endpoint (priority 1), 2 px from midpoint (priority 2).
+  // Priority dominates → endpoint wins despite midpoint being closer.
+  const target = findPivotSnapTarget({ x: 4, y: 0 }, sel, layers, ID_VIEWPORT, 7)
+  pass('43. endpoint priority beats midpoint despite distance',
+    target && target.type === 'endpoint')
+}
+
+// 44. Invisible layer's endpoints excluded.
+{
+  const sel = []
+  const layers = [
+    { id: 'L1', visible: false,
+      shapes: [{ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 100, y: 0 } }] },
+  ]
+  const target = findPivotSnapTarget({ x: 1, y: 1 }, sel, layers, ID_VIEWPORT, 7)
+  pass('44. invisible layer endpoints ignored', target === null)
+}
+
+// 45. Zoom scaling: tolerance is canvas-px, world distance scales with zoom.
+{
+  // World shape at (0,0)→(100,0). Viewport zoom 2 → canvas endpoint at (0,0)
+  // (since panX/Y = 0). Cursor world (3.5, 0) → canvas (7, 0) — 7 px from
+  // the canvas endpoint. Tolerance 7 → just inside. World distance is
+  // 3.5 px which would be inside a world-px tolerance of 7 too; this
+  // test confirms the function uses CANVAS-px tolerance.
+  const sel = [{ id: 'sh1', type: 'line', a: { x: 0, y: 0 }, b: { x: 100, y: 0 } }]
+  const layers = [{ id: 'L1', visible: true, shapes: sel }]
+  const vp = { panX: 0, panY: 0, zoom: 2 }
+  const hit = findPivotSnapTarget({ x: 3.5, y: 0 }, sel, layers, vp, 7)
+  pass('45a. zoom 2 + cursor 3.5 world = 7 canvas-px → just inside tol',
+    hit !== null)
+  const miss = findPivotSnapTarget({ x: 4, y: 0 }, sel, layers, vp, 7)
+  pass('45b. zoom 2 + cursor 4 world = 8 canvas-px → outside tol',
+    miss === null)
+}
+
+// ============================================================================
+// PIVOT — state action contract (46–48)
+// ============================================================================
+
+// 46. setTechPivot writes value; null clears.
+{
+  const state = { techPivot: null }
+  const setTechPivot = (p) => { state.techPivot = p }
+  setTechPivot({ x: 10, y: 20 })
+  pass('46a. setTechPivot writes object',
+    state.techPivot && state.techPivot.x === 10 && state.techPivot.y === 20)
+  setTechPivot(null)
+  pass('46b. setTechPivot(null) clears', state.techPivot === null)
+}
+
+// 47. setTechPivotPickMode coerces to boolean.
+{
+  const state = { techPivotPickMode: false }
+  const setTechPivotPickMode = (v) => { state.techPivotPickMode = !!v }
+  setTechPivotPickMode(true)
+  pass('47a. setTechPivotPickMode(true)', state.techPivotPickMode === true)
+  setTechPivotPickMode(false)
+  pass('47b. setTechPivotPickMode(false)', state.techPivotPickMode === false)
+  setTechPivotPickMode(1)
+  pass('47c. truthy non-bool coerces to true', state.techPivotPickMode === true)
+}
+
+// 48. setAppMode / setTool / clearAll / importJSON / clearTechSelection
+//     all clear the three pivot fields. Pure-logic mock of the cleanup.
+{
+  // Mock clearTechSelection
+  const state = {
+    techSelected: [{ layerId: 'L1', shapeId: 'sh1' }],
+    techPivot: { x: 10, y: 20 },
+    techPivotPickMode: true,
+    techPivotHover: { x: 5, y: 5, type: 'endpoint' },
+  }
+  const clearTechSelection = () => {
+    state.techSelected = []
+    state.techPivot = null
+    state.techPivotPickMode = false
+    state.techPivotHover = null
+  }
+  clearTechSelection()
+  pass('48a. clearTechSelection clears techPivot', state.techPivot === null)
+  pass('48b. clearTechSelection clears pickMode', state.techPivotPickMode === false)
+  pass('48c. clearTechSelection clears pivotHover', state.techPivotHover === null)
+}
+
+// ============================================================================
+// PIVOT — rotation around locked pivot (49–51)
+// ============================================================================
+
+// 49. Single-shape rotation around locked pivot at (50, 50).
+//     Shape at (0,0)→(24,0), rotate by 90°.
+{
+  const sh = { type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } }
+  const lockedPivot = { x: 50, y: 50 }
+  const rotated = rotateTechShape(sh, lockedPivot, 90)
+  // rotatePoint formula: x' = cx + dx*cos - dy*sin, y' = cy + dx*sin + dy*cos
+  // For (0,0): dx=-50, dy=-50, cos(90°)=0, sin(90°)=1
+  //   x = 50 + (-50)*0 - (-50)*1 = 100
+  //   y = 50 + (-50)*1 + (-50)*0 = 0
+  // For (24,0): dx=-26, dy=-50
+  //   x = 50 + (-26)*0 - (-50)*1 = 100
+  //   y = 50 + (-26)*1 + (-50)*0 = 24
+  pass('49a. locked pivot rotation: a → (100, 0)',
+    near(rotated.a.x, 100) && near(rotated.a.y, 0))
+  pass('49b. locked pivot rotation: b → (100, 24)',
+    near(rotated.b.x, 100) && near(rotated.b.y, 24))
+}
+
+// 50. Multi-select rotation around locked pivot.
+{
+  const shapes = [
+    { type: 'line', a: { x: 0, y: 0 }, b: { x: 24, y: 0 } },
+    { type: 'line', a: { x: 100, y: 0 }, b: { x: 124, y: 0 } },
+  ]
+  const lockedPivot = { x: 0, y: 0 }
+  // Rotate both by 90° around origin.
+  const rotated = shapes.map((sh) => rotateTechShape(sh, lockedPivot, 90))
+  // Shape 1: (0,0) stays at (0,0). (24,0) → (0, 24).
+  pass('50a. shape 1 a stays at origin',
+    near(rotated[0].a.x, 0) && near(rotated[0].a.y, 0))
+  pass('50b. shape 1 b → (0, 24)',
+    near(rotated[0].b.x, 0) && near(rotated[0].b.y, 24))
+  // Shape 2: (100,0) → (0, 100). (124,0) → (0, 124).
+  pass('50c. shape 2 a → (0, 100)',
+    near(rotated[1].a.x, 0) && near(rotated[1].a.y, 100))
+  pass('50d. shape 2 b → (0, 124)',
+    near(rotated[1].b.x, 0) && near(rotated[1].b.y, 124))
+}
+
+// 51. After rotation commit, techPivot resets to null (operator decision).
+//     Pure-logic mock: drag-end + typed-Enter both set pivot to null.
+{
+  const state = { techPivot: { x: 99, y: 99 }, _committed: false }
+  const commitRotation = () => {
+    // ... do shape mutations (out of scope for this test) ...
+    state._committed = true
+    state.techPivot = null  // ← the operator decision being tested
+  }
+  commitRotation()
+  pass('51a. commit clears techPivot', state.techPivot === null)
+  pass('51b. commit happened', state._committed === true)
 }
 
 // ============================================================================

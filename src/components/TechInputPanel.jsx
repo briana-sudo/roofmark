@@ -53,6 +53,14 @@ export default function TechInputPanel() {
   const technicalLayers = useAppStore((s) => s.technicalLayers)
   const techRotationInput = useAppStore((s) => s.techRotationInput)
   const setTechRotationInput = useAppStore((s) => s.setTechRotationInput)
+  // Phase 2 18d-pivot (May 11 2026) — operator-chosen rotation pivot.
+  // Set Pivot button reads + drives these. Pivot reset on rotation
+  // commit happens in handleRotationEnter below.
+  const techPivot = useAppStore((s) => s.techPivot)
+  const techPivotPickMode = useAppStore((s) => s.techPivotPickMode)
+  const setTechPivot = useAppStore((s) => s.setTechPivot)
+  const setTechPivotPickMode = useAppStore((s) => s.setTechPivotPickMode)
+  const setTechPivotHover = useAppStore((s) => s.setTechPivotHover)
   // Total tech-shape count across all technical layers — the trigger
   // signal for clearing line inputs after a successful tech-line commit.
   const totalShapes = useAppStore((s) =>
@@ -238,6 +246,11 @@ export default function TechInputPanel() {
     useAppStore.getState().pushCapturedSnapshot(snap)
     setRawRotation('')
     setTechRotationInput(null)
+    // Phase 2 18d-pivot — pivot resets to centroid after each rotation
+    // commit (operator decision May 11 2026 — pivot is a single-action
+    // tool, not a sticky preference). Mirrors the same reset in
+    // CanvasStage's drag-end path.
+    setTechPivot(null)
   }
 
   const handleRotationEscape = () => {
@@ -253,6 +266,42 @@ export default function TechInputPanel() {
     } else if (e.key === 'Escape') {
       e.preventDefault()
       handleRotationEscape()
+    }
+  }
+
+  // Phase 2 18d-pivot — Set Pivot button state machine + click handler.
+  // Three visual states cycle in order based on current pivot state:
+  //   1. Default (no locked pivot, not picking) — operator entry point.
+  //   2. Picking (techPivotPickMode = true)     — waiting for canvas click.
+  //   3. Locked  (techPivot non-null)           — operator-chosen pivot active.
+  // Click on the button cycles: default → picking, picking → cancel (back to
+  // default), locked → reset to default. Canvas click during picking locks
+  // the pivot (handled in CanvasStage onMouseDown).
+  let pivotButtonLabel
+  let pivotButtonClassName
+  let pivotButtonTooltip
+  if (techPivotPickMode) {
+    pivotButtonLabel = 'Click canvas…'
+    pivotButtonClassName = 'tech-pivot-btn picking'
+    pivotButtonTooltip = 'Click anywhere on the canvas to lock the pivot. Escape to cancel.'
+  } else if (techPivot) {
+    pivotButtonLabel = 'Pivot ↺'
+    pivotButtonClassName = 'tech-pivot-btn locked'
+    pivotButtonTooltip = 'Pivot locked. Click to reset to centroid.'
+  } else {
+    pivotButtonLabel = 'Set pivot'
+    pivotButtonClassName = 'tech-pivot-btn'
+    pivotButtonTooltip = 'Click to pick a custom rotation pivot. Then click on the canvas to lock it.'
+  }
+  const handlePivotClick = () => {
+    if (techPivotPickMode) {
+      setTechPivotPickMode(false)
+      setTechPivotHover(null)
+    } else if (techPivot) {
+      setTechPivot(null)
+    } else {
+      setTechPivotPickMode(true)
+      setTechPivotHover(null)
     }
   }
 
@@ -343,6 +392,19 @@ export default function TechInputPanel() {
           aria-label={'Rotation angle in degrees (absolute, CCW positive). Enter commits; Escape clears selection.'}
           data-testid="tech-rotation-input-field"
         />
+        {/* Phase 2 18d-pivot — Set Pivot button. Three states (default /
+            picking / locked) drive the label, className, tooltip, and
+            click behavior. See state machine above for handler logic. */}
+        <button
+          type="button"
+          className={pivotButtonClassName}
+          onClick={handlePivotClick}
+          title={pivotButtonTooltip}
+          aria-pressed={techPivotPickMode || techPivot !== null}
+          data-testid="tech-pivot-button"
+        >
+          {pivotButtonLabel}
+        </button>
       </div>
       <span className="tech-selection-count" data-testid="tech-selection-count">
         {techSelected.length} selected
