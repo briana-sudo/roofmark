@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { parseLength } from '../utils/parseLength'
 import { parseAngle } from '../utils/parseAngle'
 import { parseMoveInput } from '../utils/parseMoveInput'
 import { commitTechLine } from '../utils/techLineCommit'
-import { techShapeCentroid } from '../utils/techGeometry'
+import { techShapeCentroid, getSelectedTechShapes } from '../utils/techGeometry'
 // 18d-edit boundary fix (May 11 2026) — operator-typed grip-edit delta
 // is in INCHES; shape coords are canvas PIXELS. Convert at this caller
 // (the store's commitGripEditCommand receives newPoint already in
@@ -75,10 +75,35 @@ export default function TechInputPanel() {
   const commitDeleteCommand = useAppStore((s) => s.commitDeleteCommand)
   const commitGripEditCommand = useAppStore((s) => s.commitGripEditCommand)
   const clearTechSelection = useAppStore((s) => s.clearTechSelection)
+  // Phase 2 18e (May 12 2026) — dimension command state + actions.
+  const techDimStage = useAppStore((s) => s.techDimStage)
+  const techDimPointA = useAppStore((s) => s.techDimPointA)
+  const techDimPointB = useAppStore((s) => s.techDimPointB)
+  const setTechDimStage = useAppStore((s) => s.setTechDimStage)
+  const setTechDimPointA = useAppStore((s) => s.setTechDimPointA)
+  const setTechDimPointB = useAppStore((s) => s.setTechDimPointB)
+  const commitWorkflow1Dimension = useAppStore((s) => s.commitWorkflow1Dimension)
+  const captureUndoSnapshot = useAppStore((s) => s.captureUndoSnapshot)
+  const technicalLayers = useAppStore((s) => s.technicalLayers)
   // Total tech-shape count — trigger to clear tech-line inputs after commit.
   const totalShapes = useAppStore((s) =>
     (s.technicalLayers || []).reduce((n, tl) => n + (tl.shapes?.length || 0), 0)
   )
+
+  // Phase 2 18e — selection composition check for the Dim-button-dispatch
+  // and the Rotate/Move/Copy-hide rule per spec §"Decision flags" #11+#12.
+  //   selectionHasDimension: true if ANY selected shape is a dimension →
+  //                          Rotate/Move/Copy hidden (out of scope for
+  //                          18e initial — dim mutation via parent only).
+  //   workflow1Eligible:     true ONLY when selection is exactly one
+  //                          line. Anything else (empty, multi, dim,
+  //                          mixed) routes through Workflow 2.
+  const selectionShapes = useMemo(
+    () => getSelectedTechShapes(technicalLayers, techSelected),
+    [technicalLayers, techSelected],
+  )
+  const selectionHasDimension = selectionShapes.some((sh) => sh.type === 'dimension')
+  const workflow1Eligible = selectionShapes.length === 1 && selectionShapes[0].type === 'line'
 
   // Local raw input state (one per render branch; only one is active at a time).
   const [rawLength, setRawLength] = useState('')
@@ -94,9 +119,16 @@ export default function TechInputPanel() {
   const prevShapesRef = useRef(totalShapes)
 
   // Visibility (derived).
+  // Phase 2 18e (May 12 2026) — the panel now ALWAYS renders under
+  // tech-select (was previously gated on `grip || command || selection`).
+  // Reason: the Dim button is the entry point to Workflow 2 (2-point
+  // pick), which by definition starts with NO selection. Without an
+  // always-visible panel, the Dim button can't be reached from an
+  // empty-selection state and Workflow 2 is undiscoverable.
+  // Different render branches inside the panel switch on state — the
+  // visibility broadening is purely additive.
   const isLineMode = appMode === 'TECHNICAL' && tool === 'tech-line'
   const isSelectMode = appMode === 'TECHNICAL' && tool === 'tech-select'
-    && (techGripEdit || techActiveCommand || techSelected.length > 0)
   const visible = isLineMode || isSelectMode
   const anchorPlaced = !!(techDraft && techDraft.a)
 
@@ -272,6 +304,49 @@ export default function TechInputPanel() {
     clearTechSelection()
   }
 
+  // ===== Phase 2 18e dimension handlers =====
+  //
+  // Dim button dispatch per spec §"Decision flags" #12:
+  //   - Workflow 1: exactly one line selected → instant placement of
+  //                 an aligned dim attached to that line's a/b.
+  //   - Workflow 2: empty selection, multi-select, or selection
+  //                 contains a dimension → enter 3-click state machine.
+  //
+  // captureUndoSnapshot at start of either workflow so Cmd+Z removes
+  // the dim cleanly (matches single-undo-per-logical-command convention).
+  const handleDim = () => {
+    if (workflow1Eligible) {
+      const lineShape = selectionShapes[0]
+      const layer = technicalLayers.find((l) =>
+        (l.shapes || []).some((sh) => sh.id === lineShape.id)
+      )
+      if (!layer) return
+      const preSnap = captureUndoSnapshot()
+      commitWorkflow1Dimension(lineShape.id, layer.id, preSnap)
+    } else {
+      // Workflow 2: capture pre-command snapshot then enter state machine.
+      // CanvasStage's onMouseDown handles the 3 clicks; this handler
+      // just starts the command.
+      const preSnap = captureUndoSnapshot()
+      setTechCommandPreSnap(preSnap)
+      setTechActiveCommand('dimension')
+      setTechDimStage('awaitPointA')
+      setTechDimPointA(null)
+      setTechDimPointB(null)
+    }
+  }
+
+  // Cancel button during dim command — equivalent to Escape per spec.
+  // Cleans up all transient state regardless of stage.
+  const cancelDimCommand = () => {
+    setTechActiveCommand(null)
+    setTechDimStage(null)
+    setTechDimPointA(null)
+    setTechDimPointB(null)
+    setTechCommandHover(null)
+    setTechCommandPreSnap(null)
+  }
+
   // ===== Grip-edit typed Enter =====
   const commitTypedGripEdit = () => {
     if (!techGripEdit) return
@@ -394,6 +469,32 @@ export default function TechInputPanel() {
     )
   }
 
+  // Phase 2 18e — Dimension command branch (Workflow 2 state machine).
+  // Three stage-specific prompts plus a Cancel button. CanvasStage's
+  // mousedown drives the state machine; this panel just displays where
+  // the operator is in the flow.
+  if (techActiveCommand === 'dimension') {
+    const dimPrompts = {
+      awaitPointA: 'Dimension: click first point (snap-aware)',
+      awaitPointB: 'Dimension: click second point',
+      awaitPosition: 'Dimension: drag to position dimension line; click to commit',
+    }
+    const promptText = dimPrompts[techDimStage] || 'Dimension'
+    return (
+      <div className="tech-input-panel" role="toolbar" data-testid="tech-input-panel">
+        <span className="cmd-prompt" data-testid="tech-dim-prompt">{promptText}</span>
+        <button
+          type="button"
+          className="cmd-cancel"
+          onClick={cancelDimCommand}
+          data-testid="tech-dim-cancel-button"
+        >
+          Cancel
+        </button>
+      </div>
+    )
+  }
+
   // Active command branch.
   if (techActiveCommand) {
     const cmdLabel = { rotate: 'Rotate', move: 'Move', copy: 'Copy' }[techActiveCommand] || techActiveCommand
@@ -430,32 +531,71 @@ export default function TechInputPanel() {
     )
   }
 
+  // Phase 2 18e (May 12 2026) — empty-selection branch under tech-select.
+  // Renders ONLY the Dim button + a hint so Workflow 2 is discoverable
+  // even when there's no selection. Per spec §"Workflow 1" + §"Workflow 2":
+  // the Dim button is always available under tech-select; the workflow
+  // chosen depends on selection composition.
+  if (techSelected.length === 0) {
+    return (
+      <div className="tech-input-panel" role="toolbar" data-testid="tech-input-panel">
+        <button
+          type="button"
+          className="cmd-btn"
+          onClick={handleDim}
+          data-testid="tech-dim-button"
+        >
+          📏 Dim
+        </button>
+        <span className="placeholder-hint">
+          Click Dim to start a 2-point dimension, or select a shape to edit it.
+        </span>
+      </div>
+    )
+  }
+
   // Default tech-select branch: selection without active command — show command bar.
+  // Phase 2 18e: when ANY selected shape is a dimension, hide
+  // Rotate/Move/Copy per spec §"Decision flags" #11 (those operations
+  // are out of scope for 18e initial on dim shapes — Delete + recreate
+  // is the workflow). Dim button is always present.
   return (
     <div className="tech-input-panel" role="toolbar" data-testid="tech-input-panel">
+      {!selectionHasDimension && (
+        <>
+          <button
+            type="button"
+            className="cmd-btn"
+            onClick={() => startCommand('rotate')}
+            data-testid="tech-rotate-button"
+          >
+            ↻ Rotate
+          </button>
+          <button
+            type="button"
+            className="cmd-btn"
+            onClick={() => startCommand('move')}
+            data-testid="tech-move-button"
+          >
+            → Move
+          </button>
+          <button
+            type="button"
+            className="cmd-btn"
+            onClick={() => startCommand('copy')}
+            data-testid="tech-copy-button"
+          >
+            ⧉ Copy
+          </button>
+        </>
+      )}
       <button
         type="button"
         className="cmd-btn"
-        onClick={() => startCommand('rotate')}
-        data-testid="tech-rotate-button"
+        onClick={handleDim}
+        data-testid="tech-dim-button"
       >
-        ↻ Rotate
-      </button>
-      <button
-        type="button"
-        className="cmd-btn"
-        onClick={() => startCommand('move')}
-        data-testid="tech-move-button"
-      >
-        → Move
-      </button>
-      <button
-        type="button"
-        className="cmd-btn"
-        onClick={() => startCommand('copy')}
-        data-testid="tech-copy-button"
-      >
-        ⧉ Copy
+        📏 Dim
       </button>
       <button
         type="button"

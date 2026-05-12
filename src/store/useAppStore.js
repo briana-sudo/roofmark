@@ -215,6 +215,10 @@ const VALID_MODES = new Set(['DRAW', 'EDIT', 'SEQUENCE'])
 // compatibility with existing imports (CanvasStage etc.).
 import { PX_PER_INCH as PX_PER_INCH_CONST } from '../utils/techConstants'
 export const PX_PER_INCH = PX_PER_INCH_CONST
+// Phase 2 18e (May 12 2026) — dimension default offset. Used by Workflow 1
+// (single-line shortcut) and Workflow 2 initial preview before the operator
+// drags. 24 px = 1 inch at zoom 1.0 per spec §"Default offset".
+import { DEFAULT_DIM_OFFSET } from '../utils/dimConstants'
 // Phase 2 18b — default Technical layer name when auto-created on first
 // shape commit. Operator can rename via the layer-panel UI in 18c+.
 export const TECHNICAL_LAYER_NAME_DEFAULT = 'Layer 1'
@@ -566,6 +570,21 @@ const initialState = {
   techCommandInput: null,
   techCommandHover: null,
   techGripEdit: null,
+  // Phase 2 18e (May 12 2026) — Dimension command 3-stage state machine.
+  // All transient (NOT in PERSIST_KEYS, NOT in dataSnapshot). Cleared at
+  // the same 6 sites as other tech-command state (setAppMode, setTool away
+  // from tech-select, clearTechSelection, importJSON, clearAll, dim
+  // commit/cancel via commitWorkflow2Dimension / Escape chain).
+  //   techDimStage:    null | 'awaitPointA' | 'awaitPointB' | 'awaitPosition'
+  //   techDimPointA:   null | { mode, shapeId, pointKey, x, y }
+  //   techDimPointB:   null | { mode, shapeId, pointKey, x, y }
+  // techActiveCommand === 'dimension' is the outer gate; stage drives
+  // sub-state inside the command. mode === 'attached' means the point
+  // follows a line endpoint (DIMASSOC=2 associativity); mode === 'free'
+  // means cached coords only (snap was a midpoint OR snap was off).
+  techDimStage: null,
+  techDimPointA: null,
+  techDimPointB: null,
   // Phase 2 18b/18c — Technical Drawing line-tool draft state.
   // Transient. NOT in PERSIST_KEYS. null when no draft in progress.
   // Active shape:
@@ -728,6 +747,105 @@ export const dataSnapshot = (state) => JSON.stringify({
   technicalLayers: state.technicalLayers || [],
   specTable: state.specTable || {},
 })
+
+// ============================================================================
+// Phase 2 18e (May 12 2026) — Dimension associativity helpers.
+//
+// Pure module-level functions. Called by every commit action that mutates
+// line geometry (Rotate, Move, GripEdit, no-undo live drag), AND by
+// commitDeleteCommand (cascade).
+//
+// `propagateDimensionUpdates` walks every dimension in `technicalLayers`,
+// finds those with `pointA.mode === 'attached'` or `pointB.mode === 'attached'`
+// pointing to a shape in `mutatedShapeIds`, and writes the live shape's
+// current `[pointKey]` coords into the dim's cached `x/y`. Returns a NEW
+// technicalLayers array (immutable update — caller `set()`s the result).
+// O(L*S) where L = total layers and S = total shapes. Skipped entirely
+// when `mutatedShapeIds` is empty.
+//
+// `cascadeDimensionDeletion` is called BEFORE filter-removing deleted
+// shapes. For every dim attached to a deleted shape, flip that point's
+// mode from 'attached' to 'free' (preserve cached x/y, null shapeId/
+// pointKey). Returns a NEW technicalLayers array. Caller then runs the
+// shapes.filter() to remove the deleted shapes (dims themselves may also
+// be in the deletion set — those simply get removed by the filter).
+//
+// Both helpers handle missing/malformed shapes gracefully (return the
+// same dim unchanged if the referenced shape is gone — the cache fallback
+// in resolveDimensionPoints handles render-side display).
+// ============================================================================
+export const propagateDimensionUpdates = (technicalLayers, mutatedShapeIds) => {
+  if (!Array.isArray(technicalLayers)) return technicalLayers
+  if (!(mutatedShapeIds instanceof Set) || mutatedShapeIds.size === 0) {
+    return technicalLayers
+  }
+  let anyLayerChanged = false
+  const nextLayers = technicalLayers.map((layer) => {
+    if (!layer || !Array.isArray(layer.shapes)) return layer
+    let anyShapeChanged = false
+    const nextShapes = layer.shapes.map((sh) => {
+      if (!sh || sh.type !== 'dimension') return sh
+      let changed = false
+      const updatePoint = (p) => {
+        if (!p || p.mode !== 'attached' || !p.shapeId || !p.pointKey) return p
+        if (!mutatedShapeIds.has(p.shapeId)) return p
+        // Walk technicalLayers to find live coords. We use the INCOMING
+        // technicalLayers (the just-mutated array) so the cache picks up
+        // the post-mutation values.
+        for (const l of technicalLayers) {
+          if (!l || !Array.isArray(l.shapes)) continue
+          const target = l.shapes.find((s) => s && s.id === p.shapeId)
+          if (target && target[p.pointKey]) {
+            changed = true
+            return { ...p, x: target[p.pointKey].x, y: target[p.pointKey].y }
+          }
+        }
+        return p
+      }
+      const newA = updatePoint(sh.pointA)
+      const newB = updatePoint(sh.pointB)
+      if (!changed) return sh
+      anyShapeChanged = true
+      return { ...sh, pointA: newA, pointB: newB }
+    })
+    if (!anyShapeChanged) return layer
+    anyLayerChanged = true
+    return { ...layer, shapes: nextShapes }
+  })
+  return anyLayerChanged ? nextLayers : technicalLayers
+}
+
+export const cascadeDimensionDeletion = (technicalLayers, deletedShapeIds) => {
+  if (!Array.isArray(technicalLayers)) return technicalLayers
+  if (!(deletedShapeIds instanceof Set) || deletedShapeIds.size === 0) {
+    return technicalLayers
+  }
+  let anyLayerChanged = false
+  const nextLayers = technicalLayers.map((layer) => {
+    if (!layer || !Array.isArray(layer.shapes)) return layer
+    let anyShapeChanged = false
+    const nextShapes = layer.shapes.map((sh) => {
+      if (!sh || sh.type !== 'dimension') return sh
+      const flipPoint = (p) => {
+        if (!p || p.mode !== 'attached' || !p.shapeId) return p
+        if (!deletedShapeIds.has(p.shapeId)) return p
+        // Flip 'attached' → 'free'; preserve cached coords as the dim's
+        // last known position. Operator can delete the orphaned dim if
+        // they don't want it stranded.
+        return { mode: 'free', shapeId: null, pointKey: null, x: p.x, y: p.y }
+      }
+      const newA = flipPoint(sh.pointA)
+      const newB = flipPoint(sh.pointB)
+      if (newA === sh.pointA && newB === sh.pointB) return sh
+      anyShapeChanged = true
+      return { ...sh, pointA: newA, pointB: newB }
+    })
+    if (!anyShapeChanged) return layer
+    anyLayerChanged = true
+    return { ...layer, shapes: nextShapes }
+  })
+  return anyLayerChanged ? nextLayers : technicalLayers
+}
 
 // ============================================================================
 // STORE
@@ -1486,6 +1604,11 @@ export const useAppStore = create((set, get) => {
           techCommandInput: null,
           techCommandHover: null,
           techGripEdit: null,
+          // Phase 2 18e — dim command state clears alongside other
+          // tech-command transient state.
+          techDimStage: null,
+          techDimPointA: null,
+          techDimPointB: null,
         }
       })
     },
@@ -1742,6 +1865,10 @@ export const useAppStore = create((set, get) => {
           techCommandInput: null,
           techCommandHover: null,
           techGripEdit: null,
+          // Phase 2 18e — dim command state clears with tool switch.
+          techDimStage: null,
+          techDimPointA: null,
+          techDimPointB: null,
         }
       }
       return { tool }
@@ -1823,6 +1950,10 @@ export const useAppStore = create((set, get) => {
       techCommandInput: null,
       techCommandHover: null,
       techGripEdit: null,
+      // Phase 2 18e — dim command state clears with selection clear.
+      techDimStage: null,
+      techDimPointA: null,
+      techDimPointB: null,
     }),
 
     // 18d-edit (May 11 2026) — AutoCAD command-state setters. Simple
@@ -1835,6 +1966,10 @@ export const useAppStore = create((set, get) => {
     setTechCommandInput: (value) => set({ techCommandInput: value }),
     setTechCommandHover: (target) => set({ techCommandHover: target }),
     setTechGripEdit: (obj) => set({ techGripEdit: obj }),
+    // Phase 2 18e (May 12 2026) — dimension state machine setters.
+    setTechDimStage: (stage) => set({ techDimStage: stage }),
+    setTechDimPointA: (p) => set({ techDimPointA: p }),
+    setTechDimPointB: (p) => set({ techDimPointB: p }),
 
     // 18d-edit commit actions (May 11 2026 addendum) — single source of
     // truth for command semantics. All five commit paths (Rotate, Move,
@@ -1868,6 +2003,8 @@ export const useAppStore = create((set, get) => {
           y: basePoint.y + dx * sin + dy * cos,
         }
       }
+      // Phase 2 18e — collect mutated shape IDs for dim propagation.
+      const mutatedIds = new Set(origins.map((o) => o && o.id).filter(Boolean))
       set((s) => {
         let nextLayers = s.technicalLayers
         for (const orig of origins) {
@@ -1880,6 +2017,10 @@ export const useAppStore = create((set, get) => {
             ),
           }))
         }
+        // Phase 2 18e — propagate updated coords to every attached dim
+        // BEFORE committing technicalLayers. Single set() = single undo
+        // entry covering both the line mutation AND the dim cache update.
+        nextLayers = propagateDimensionUpdates(nextLayers, mutatedIds)
         return { technicalLayers: nextLayers }
       })
       if (typeof preSnap === 'string') {
@@ -1905,6 +2046,8 @@ export const useAppStore = create((set, get) => {
       if (!Array.isArray(origins) || origins.length === 0 || !delta) return
       const dxPx = delta.dx * PX_PER_INCH_CONST
       const dyPx = delta.dy * PX_PER_INCH_CONST
+      // Phase 2 18e — collect mutated shape IDs for dim propagation.
+      const mutatedIds = new Set(origins.map((o) => o && o.id).filter(Boolean))
       set((s) => {
         let nextLayers = s.technicalLayers
         for (const orig of origins) {
@@ -1921,6 +2064,9 @@ export const useAppStore = create((set, get) => {
             ),
           }))
         }
+        // Phase 2 18e — propagate to attached dims in same set() so
+        // undo covers both line + dim cache update.
+        nextLayers = propagateDimensionUpdates(nextLayers, mutatedIds)
         return { technicalLayers: nextLayers }
       })
       if (typeof preSnap === 'string') {
@@ -1935,16 +2081,21 @@ export const useAppStore = create((set, get) => {
     // Grip-edit commit: update one endpoint on one shape, push preSnap.
     commitGripEditCommand: (layerId, shapeId, pointKey, newPoint, preSnap) => {
       if (!layerId || !shapeId || !pointKey || !newPoint) return
-      set((s) => ({
-        technicalLayers: s.technicalLayers.map((tl) =>
+      set((s) => {
+        const grippedLayers = s.technicalLayers.map((tl) =>
           tl.id !== layerId ? tl : {
             ...tl,
             shapes: tl.shapes.map((sh) =>
               sh.id === shapeId ? { ...sh, [pointKey]: { x: newPoint.x, y: newPoint.y } } : sh
             ),
           }
-        ),
-      }))
+        )
+        // Phase 2 18e — propagate to attached dims. Grip edits one
+        // shape; pass a singleton Set so propagate's pointKey check
+        // updates only the affected endpoint cache.
+        const nextLayers = propagateDimensionUpdates(grippedLayers, new Set([shapeId]))
+        return { technicalLayers: nextLayers }
+      })
       if (typeof preSnap === 'string') {
         set((s) => {
           const next = [...s.undoStack, preSnap]
@@ -1999,7 +2150,13 @@ export const useAppStore = create((set, get) => {
       if (!Array.isArray(sel) || sel.length === 0) return
       set((s) => {
         const selSet = new Set(sel.map((e) => e && e.shapeId).filter(Boolean))
-        const nextLayers = s.technicalLayers.map((l) => ({
+        // Phase 2 18e — cascade BEFORE filter-removing deleted shapes.
+        // For every dim attached to a deleted shape, flip mode 'attached'
+        // → 'free' (cached coords preserved, shapeId/pointKey nulled).
+        // Per spec §"Associativity behavior" — the dim survives the
+        // parent deletion as an orphan with last-known coords.
+        const cascaded = cascadeDimensionDeletion(s.technicalLayers, selSet)
+        const nextLayers = cascaded.map((l) => ({
           ...l,
           shapes: (l.shapes || []).filter((sh) => !selSet.has(sh.id)),
         }))
@@ -2014,20 +2171,171 @@ export const useAppStore = create((set, get) => {
       }
     },
 
+    // ====== Phase 2 18e (May 12 2026) — Dimension commit actions ======
+    //
+    // Two commit paths matching the spec's two workflows:
+    //   - commitWorkflow1Dimension: single-line shortcut. Operator has a
+    //     line selected, clicks Dim → auto-creates an aligned dim with
+    //     pointA/B attached to the line's a/b endpoints at DEFAULT_DIM_OFFSET.
+    //     No live preview, no base-point pick — instant placement.
+    //   - commitWorkflow2Dimension: 3-click flow already navigated by
+    //     CanvasStage's state machine. Receives the captured pointA,
+    //     pointB, and computed dimType/orientation/offset from the
+    //     final commit click. Adds the dim to the appropriate layer,
+    //     pushes the preSnap, clears all dim transient state.
+    //
+    // Both push exactly ONE undo snapshot (the preSnap captured when the
+    // workflow began) so Cmd+Z removes the dim cleanly.
+    commitWorkflow1Dimension: (lineId, layerId, preSnap) => {
+      const s = get()
+      const layer = s.technicalLayers.find((l) => l.id === layerId)
+      const line = layer && (layer.shapes || []).find((sh) => sh.id === lineId)
+      if (!line || line.type !== 'line' || !line.a || !line.b) return
+      // Zero-length line guard (degenerate — can't dimension a point).
+      const dx = line.b.x - line.a.x
+      const dy = line.b.y - line.a.y
+      const dist = Math.hypot(dx, dy)
+      if (dist === 0) return
+      const dim = {
+        id: newTechShapeId(),
+        type: 'dimension',
+        dimType: 'aligned',
+        orientation: 'aligned',
+        pointA: {
+          mode: 'attached',
+          shapeId: lineId,
+          pointKey: 'a',
+          x: line.a.x,
+          y: line.a.y,
+        },
+        pointB: {
+          mode: 'attached',
+          shapeId: lineId,
+          pointKey: 'b',
+          x: line.b.x,
+          y: line.b.y,
+        },
+        offset: DEFAULT_DIM_OFFSET,
+        textOverride: null,
+      }
+      set((state) => ({
+        technicalLayers: state.technicalLayers.map((l) =>
+          l.id === layerId ? { ...l, shapes: [...l.shapes, dim] } : l
+        ),
+        // Workflow 1 commits and exits — selection clears per spec
+        // §"Workflow 1" step 5.
+        techSelected: [],
+      }))
+      if (typeof preSnap === 'string') {
+        set((state) => {
+          const next = [...state.undoStack, preSnap]
+          if (next.length > UNDO_LIMIT) next.shift()
+          return { undoStack: next, redoStack: [] }
+        })
+      }
+    },
+
+    commitWorkflow2Dimension: (pointA, pointB, dimType, orientation, offset, preSnap) => {
+      // Spec §"Decision flags" #13 — zero-distance commit fails silently.
+      // Operator's click landed pointA = pointB; can't dimension a point.
+      // Clear all dim transient state without creating a shape.
+      if (!pointA || !pointB) return
+      if (pointA.x === pointB.x && pointA.y === pointB.y) {
+        set({
+          techActiveCommand: null,
+          techDimStage: null,
+          techDimPointA: null,
+          techDimPointB: null,
+          techCommandHover: null,
+          techCommandPreSnap: null,
+        })
+        return
+      }
+
+      // Determine target layer for the new dim:
+      //   1. Layer of pointA's attached shape (if any)
+      //   2. Layer of pointB's attached shape (if any)
+      //   3. First existing layer
+      //   4. Auto-create 'Layer 1' (mirrors addTechnicalShape's policy)
+      const layers = get().technicalLayers
+      let layerId = null
+      if (pointA.mode === 'attached' && pointA.shapeId) {
+        const l = layers.find((l2) => (l2.shapes || []).some((sh) => sh.id === pointA.shapeId))
+        if (l) layerId = l.id
+      }
+      if (!layerId && pointB.mode === 'attached' && pointB.shapeId) {
+        const l = layers.find((l2) => (l2.shapes || []).some((sh) => sh.id === pointB.shapeId))
+        if (l) layerId = l.id
+      }
+      if (!layerId && layers.length > 0) layerId = layers[0].id
+
+      const dim = {
+        id: newTechShapeId(),
+        type: 'dimension',
+        dimType,
+        orientation,
+        pointA,
+        pointB,
+        offset,
+        textOverride: null,
+      }
+      set((state) => {
+        let nextLayers = state.technicalLayers
+        if (layerId) {
+          nextLayers = nextLayers.map((l) =>
+            l.id === layerId ? { ...l, shapes: [...l.shapes, dim] } : l
+          )
+        } else {
+          // No existing layer — auto-create one matching addTechnicalShape's
+          // convention (default 'Layer 1' name).
+          nextLayers = [{
+            id: newTechLayerId(),
+            name: TECHNICAL_LAYER_NAME_DEFAULT,
+            visible: true,
+            shapes: [dim],
+          }]
+        }
+        return {
+          technicalLayers: nextLayers,
+          techActiveCommand: null,
+          techDimStage: null,
+          techDimPointA: null,
+          techDimPointB: null,
+          techCommandHover: null,
+          techCommandPreSnap: null,
+        }
+      })
+      if (typeof preSnap === 'string') {
+        set((state) => {
+          const next = [...state.undoStack, preSnap]
+          if (next.length > UNDO_LIMIT) next.shift()
+          return { undoStack: next, redoStack: [] }
+        })
+      }
+    },
+
     // 18d — Per-mousemove rotation drag mutator. Mirrors
     // updateTechnicalShape (same set() shape) but DOES NOT call pushUndo.
     // The drag captures one undo snapshot at mousedown via
     // captureUndoSnapshot and pushes it at mouseup if anything changed
     // (same pattern as Field Markup's editDrag at CanvasStage.jsx:2184).
+    //
+    // Phase 2 18e — propagate to attached dims so the live preview
+    // (move drag, rotate drag, grip drag) visibly drags any attached
+    // dim along with the parent shape. Without this, the dim would
+    // appear to lag — visually inconsistent. Single set() so the
+    // mouseup snapshot push covers both line + dim caches together.
     updateTechnicalShapeNoUndo: (layerId, shapeId, patch) => {
-      set((s) => ({
-        technicalLayers: s.technicalLayers.map((tl) =>
+      set((s) => {
+        const patched = s.technicalLayers.map((tl) =>
           tl.id !== layerId ? tl : {
             ...tl,
             shapes: tl.shapes.map((sh) => sh.id === shapeId ? { ...sh, ...patch } : sh),
           }
-        ),
-      }))
+        )
+        const nextLayers = propagateDimensionUpdates(patched, new Set([shapeId]))
+        return { technicalLayers: nextLayers }
+      })
     },
     setCursor: (x, y) => set({ cursorX: x, cursorY: y }),
     // (Old setSnapType: (snapType) => set({ snapType }) was vestigial dead
@@ -2525,6 +2833,10 @@ export const useAppStore = create((set, get) => {
         techCommandInput: null,
         techCommandHover: null,
         techGripEdit: null,
+        // Phase 2 18e — dim command state cleared on importJSON.
+        techDimStage: null,
+        techDimPointA: null,
+        techDimPointB: null,
         pdfOrientation: normalizePdfOrientation(obj.pdfOrientation),
         // P45 (Phase 2 18a, May 10 2026) — Load Project clears the
         // currentFileHandle + currentFileName so the loaded file is
@@ -2785,6 +3097,10 @@ export const useAppStore = create((set, get) => {
         techCommandOriginShapes: null,
         techCommandPreSnap: null,
         techCommandInput: null,
+        // Phase 2 18e — dim command state cleared on clearAll (New Project).
+        techDimStage: null,
+        techDimPointA: null,
+        techDimPointB: null,
         techCommandHover: null,
         techGripEdit: null,
         // P45 (Phase 2 18a, May 10 2026) — New Project clears the

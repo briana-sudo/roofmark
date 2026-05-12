@@ -44,8 +44,23 @@
 // ============================================================================
 
 import { rotatePoint } from './perspective'
+// Phase 2 18e (May 12 2026) — dimension support for hit-test + centroids.
+// dimGeometry owns the dim-specific math; techGeometry stays shape-agnostic
+// plumbing that delegates to dim helpers for type === 'dimension'.
+import { hitTestDimension as dimHitTest, resolveDimensionPoints } from './dimGeometry'
 
-export function techShapeCentroid(shape) {
+/**
+ * Shape centroid. Lines: midpoint of a/b. Dimensions: midpoint of
+ * resolved pointA/pointB (attached coords if available, cached fallback).
+ *
+ * 18e signature extension: optional `technicalLayers` arg for dim
+ * attached-coord lookup. Backward-compatible — line callers can skip it.
+ *
+ * @param {Object} shape
+ * @param {Array} [technicalLayers] - required for dim attached resolve
+ * @returns {{x, y} | null}
+ */
+export function techShapeCentroid(shape, technicalLayers) {
   if (!shape) return null
   if (shape.type === 'line') {
     if (!shape.a || !shape.b) return null
@@ -54,11 +69,27 @@ export function techShapeCentroid(shape) {
       y: (shape.a.y + shape.b.y) / 2,
     }
   }
+  if (shape.type === 'dimension') {
+    const { A, B } = resolveDimensionPoints(shape, technicalLayers)
+    return { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 }
+  }
   // Future shape types (rect, arc, circle) extend here.
   return null
 }
 
-export function techMultiShapeCentroid(shapes) {
+/**
+ * Bounding-box centroid for a multi-shape selection. Mixes lines and
+ * dimensions transparently — each contributes its world-coord extents
+ * to the joint bbox.
+ *
+ * 18e signature extension: optional `technicalLayers` for dim attached
+ * coord resolution. Backward-compatible.
+ *
+ * @param {Array} shapes
+ * @param {Array} [technicalLayers]
+ * @returns {{x, y} | null}
+ */
+export function techMultiShapeCentroid(shapes, technicalLayers) {
   if (!shapes || shapes.length === 0) return null
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
   let any = false
@@ -68,6 +99,13 @@ export function techMultiShapeCentroid(shapes) {
       minY = Math.min(minY, sh.a.y, sh.b.y)
       maxX = Math.max(maxX, sh.a.x, sh.b.x)
       maxY = Math.max(maxY, sh.a.y, sh.b.y)
+      any = true
+    } else if (sh && sh.type === 'dimension') {
+      const { A, B } = resolveDimensionPoints(sh, technicalLayers)
+      minX = Math.min(minX, A.x, B.x)
+      minY = Math.min(minY, A.y, B.y)
+      maxX = Math.max(maxX, A.x, B.x)
+      maxY = Math.max(maxY, A.y, B.y)
       any = true
     }
     // Future shape types extend here.
@@ -121,6 +159,13 @@ export function techHitTest(cursorCanvasPx, technicalLayers, techViewport, tolPx
         const bx = sh.b.x * zoom + panX
         const by = sh.b.y * zoom + panY
         if (distanceFromSegment(cx, cy, ax, ay, bx, by) <= tol) {
+          return { layerId: layer.id, shapeId: sh.id }
+        }
+      } else if (sh.type === 'dimension') {
+        // Phase 2 18e — dimension hit-test delegates to dimGeometry's
+        // hitTestDimension which checks dim line, both extension lines,
+        // and the (rotated) text bounding box.
+        if (dimHitTest(sh, { x: cx, y: cy }, technicalLayers, zoom, panX, panY, tol)) {
           return { layerId: layer.id, shapeId: sh.id }
         }
       }

@@ -34,6 +34,12 @@ import {
   //     rotation preview
   findTechSnapTarget, applyCommandTransform, techShapeCentroid,
 } from '../utils/techGeometry'
+// Phase 2 18e (May 12 2026) — Dimension callouts.
+import {
+  renderDimension,
+  computeDimensionOrientation,
+  identifySnapSourceShape,
+} from '../utils/dimGeometry'
 
 /**
  * CanvasStage — Step 3 substrate + Step 5 drawing tools (Spec §6, §7).
@@ -781,39 +787,39 @@ export default function CanvasStage() {
         for (const tl of storeState.technicalLayers || []) {
           if (tl.visible === false) continue
           for (const sh of tl.shapes || []) {
-            if (sh.type !== 'line') continue
             const isSelected = techSel.some(
               (s) => s.layerId === tl.id && s.shapeId === sh.id
             )
-            const strokeColor = isSelected ? TECH_STROKE_SELECTED : TECH_STROKE
-            ctxStatic.strokeStyle = strokeColor
-            ctxStatic.fillStyle = strokeColor
-            // Transform world coords → canvas px via TECHNICAL viewport.
-            const ax = sh.a.x * techZoom + techV.panX
-            const ay = sh.a.y * techZoom + techV.panY
-            const bx = sh.b.x * techZoom + techV.panX
-            const by = sh.b.y * techZoom + techV.panY
-            ctxStatic.beginPath()
-            ctxStatic.moveTo(ax, ay)
-            ctxStatic.lineTo(bx, by)
-            ctxStatic.stroke()
-            // Length label at midpoint, offset perpendicular to the
-            // stroke by 8px so it doesn't overlap the line. Whole inches
-            // render without decimal; non-whole render to one decimal.
-            const mx = (ax + bx) / 2
-            const my = (ay + by) / 2
-            const dx = bx - ax
-            const dy = by - ay
-            const dist = Math.hypot(dx, dy)
-            const nx = dist > 0 ? -dy / dist : 0
-            const ny = dist > 0 ?  dx / dist : -1
-            const lx = mx + nx * 8
-            const ly = my + ny * 8
-            const v = sh.lengthInches
-            const label = Number.isInteger(v) ? `${v}"` : `${v.toFixed(1)}"`
-            ctxStatic.textAlign = 'center'
-            ctxStatic.textBaseline = 'middle'
-            ctxStatic.fillText(label, lx, ly)
+            if (sh.type === 'line') {
+              if (!sh.a || !sh.b) continue
+              const strokeColor = isSelected ? TECH_STROKE_SELECTED : TECH_STROKE
+              ctxStatic.strokeStyle = strokeColor
+              ctxStatic.fillStyle = strokeColor
+              // Transform world coords → canvas px via TECHNICAL viewport.
+              const ax = sh.a.x * techZoom + techV.panX
+              const ay = sh.a.y * techZoom + techV.panY
+              const bx = sh.b.x * techZoom + techV.panX
+              const by = sh.b.y * techZoom + techV.panY
+              ctxStatic.beginPath()
+              ctxStatic.moveTo(ax, ay)
+              ctxStatic.lineTo(bx, by)
+              ctxStatic.stroke()
+              // Phase 2 18e (May 12 2026) — auto-rendered length label
+              // REMOVED. Dimensions are now explicit, operator-placed
+              // annotations. Lines render as pure geometry. Per spec
+              // §"Length labels on lines — REMOVAL".
+            } else if (sh.type === 'dimension') {
+              // Phase 2 18e — dimension render. Apply the TECHNICAL
+              // viewport transform here (translate + scale) so the
+              // renderDimension helper can stay in world coords for
+              // its geometry math. Selection state passes through so
+              // the helper paints orange + grip squares.
+              ctxStatic.save()
+              ctxStatic.translate(techV.panX, techV.panY)
+              ctxStatic.scale(techZoom, techZoom)
+              renderDimension(ctxStatic, sh, storeState.technicalLayers, isSelected)
+              ctxStatic.restore()
+            }
           }
         }
         ctxStatic.restore()
@@ -1317,6 +1323,64 @@ export default function CanvasStage() {
           ctxDynamic.lineTo(hx - r, hy)
           ctxDynamic.closePath()
           ctxDynamic.stroke()
+          ctxDynamic.restore()
+        }
+
+        // Phase 2 18e (May 12 2026) — Dimension command live preview.
+        //
+        // awaitPointB stage: render a small red dot at pointA's captured
+        // position so the operator sees "you placed pointA here, now
+        // click pointB." Snap diamond at cursor renders via existing
+        // techCommandHover path.
+        if (
+          state.techActiveCommand === 'dimension'
+          && state.techDimStage === 'awaitPointB'
+          && state.techDimPointA
+        ) {
+          const pA = state.techDimPointA
+          const px = pA.x * techZoomD + techVD.panX
+          const py = pA.y * techZoomD + techVD.panY
+          ctxDynamic.save()
+          ctxDynamic.fillStyle = '#ef4444'
+          ctxDynamic.strokeStyle = '#ffffff'
+          ctxDynamic.lineWidth = 1
+          ctxDynamic.beginPath()
+          ctxDynamic.arc(px, py, 4, 0, Math.PI * 2)
+          ctxDynamic.fill()
+          ctxDynamic.stroke()
+          ctxDynamic.restore()
+        }
+
+        // awaitPosition stage: full ghost dimension at current cursor.
+        // Orientation chosen by computeDimensionOrientation per spec
+        // §"Orientation algorithm" — diagonal baselines always Aligned,
+        // axis-aligned baselines choose Linear vs Aligned by cursor side.
+        if (
+          state.techActiveCommand === 'dimension'
+          && state.techDimStage === 'awaitPosition'
+          && state.techDimPointA
+          && state.techDimPointB
+        ) {
+          const cursorWorld = {
+            x: (state.cursorX - techVD.panX) / techZoomD,
+            y: (state.cursorY - techVD.panY) / techZoomD,
+          }
+          const { dimType, orientation, offset } = computeDimensionOrientation(
+            state.techDimPointA, state.techDimPointB, cursorWorld,
+          )
+          const previewDim = {
+            type: 'dimension',
+            dimType, orientation,
+            pointA: state.techDimPointA,
+            pointB: state.techDimPointB,
+            offset,
+            textOverride: null,
+          }
+          ctxDynamic.save()
+          ctxDynamic.globalAlpha = 0.5
+          ctxDynamic.translate(techVD.panX, techVD.panY)
+          ctxDynamic.scale(techZoomD, techZoomD)
+          renderDimension(ctxDynamic, previewDim, state.technicalLayers, false)
           ctxDynamic.restore()
         }
 
@@ -2051,6 +2115,83 @@ export default function CanvasStage() {
         dynamicDirty = true
       }
 
+      // Phase 2 18e (May 12 2026) — Dimension command mousemove dispatch.
+      //
+      // Three sub-stages drive different mousemove behavior:
+      //   - awaitPointA / awaitPointB: snap-scan against existing line
+      //     endpoints + midpoints, write techCommandHover so the
+      //     existing diamond render fires.
+      //   - awaitPosition: cursor drives the live-preview orientation
+      //     algorithm; no snap (operator is positioning the dim line,
+      //     not picking another defpoint). dynamicDirty triggers the
+      //     ghost re-render every move.
+      //
+      // Returns at the bottom of each branch so the existing PRIORITY
+      // 1/2/3 chain (grip edit / command-with-basePoint / etc.) doesn't
+      // also fire — dim command has its own state shape and shouldn't
+      // be handled by the generic command branches below.
+      if (
+        store.appMode === 'TECHNICAL'
+        && store.techActiveCommand === 'dimension'
+      ) {
+        const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+        const techZoom = techV.zoom || 1
+        const cursorWorld = { x: (x - techV.panX) / techZoom, y: (y - techV.panY) / techZoom }
+        const stage = store.techDimStage
+        if (stage === 'awaitPointA' || stage === 'awaitPointB') {
+          if (store.techSnapEnabled) {
+            // For awaitPointB, exclude pointA's source shape from snap
+            // candidates so the operator can't snap pointB to the same
+            // endpoint they used for pointA (would collapse the dim to
+            // zero length — already handled by the empty-dim guard in
+            // commitWorkflow2Dimension but better to suppress visually
+            // too).
+            let exclude = null
+            if (stage === 'awaitPointB'
+              && store.techDimPointA
+              && store.techDimPointA.mode === 'attached'
+              && store.techDimPointA.shapeId
+            ) {
+              // No exclude here — pointA's shape is a valid second-point
+              // origin (e.g. dim spans both endpoints of a single line
+              // via 2-point pick, which is just the manual equivalent of
+              // Workflow 1). Pass null and rely on the empty-dim guard
+              // for the truly-degenerate same-coords case.
+              exclude = null
+            }
+            const target = findTechSnapTarget(
+              cursorWorld,
+              [],
+              store.technicalLayers,
+              techV,
+              7,
+              exclude,
+              store.techSnapTypes,
+            )
+            const cur = store.techCommandHover
+            const hoverChanged = (
+              (target && (!cur || cur.x !== target.x || cur.y !== target.y || cur.type !== target.type))
+              || (!target && cur)
+            )
+            if (hoverChanged) store.setTechCommandHover(target)
+          } else if (store.techCommandHover !== null) {
+            store.setTechCommandHover(null)
+          }
+          dynamicDirty = true
+          return
+        }
+        if (stage === 'awaitPosition') {
+          // No snap during position drag — cursor drives orientation +
+          // offset. Clear any stale hover left over from a pre-stage-
+          // change paint cycle (defensive — should already be null).
+          if (store.techCommandHover !== null) {
+            store.setTechCommandHover(null)
+          }
+          dynamicDirty = true
+          return
+        }
+      }
+
       // PRIORITY 1: Grip edit live preview.
       if (store.techGripEdit && store.appMode === 'TECHNICAL') {
         const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
@@ -2315,6 +2456,82 @@ export default function CanvasStage() {
           const cursorWorld = {
             x: (raw.x - techV.panX) / techZoom,
             y: (raw.y - techV.panY) / techZoom,
+          }
+
+          // Phase 2 18e (May 12 2026) — Dimension command click dispatch.
+          // Three sub-stages of the 2-point pick workflow:
+          //   awaitPointA → click captures pointA from cursor+snap,
+          //                 advances stage to awaitPointB.
+          //   awaitPointB → click captures pointB, advances to awaitPosition.
+          //   awaitPosition → click commits via commitWorkflow2Dimension
+          //                   (computes final orientation from cursor side).
+          //
+          // Runs BEFORE the generic PRIORITY 1-5 chain because dim has
+          // its own state shape — never falls through.
+          if (store.techActiveCommand === 'dimension') {
+            const snapHover = store.techCommandHover
+            const useSnap = !!snapHover && store.techSnapEnabled
+            const stage = store.techDimStage
+
+            if (stage === 'awaitPointA' || stage === 'awaitPointB') {
+              // Pre-build the captured point. Endpoint snaps attach
+              // (mode='attached' with shapeId+pointKey). Midpoint or
+              // no-snap commits free (mode='free').
+              const sourceShape = useSnap && snapHover.type === 'endpoint'
+                ? identifySnapSourceShape(snapHover, store.technicalLayers)
+                : null
+              const pickX = useSnap ? snapHover.x : cursorWorld.x
+              const pickY = useSnap ? snapHover.y : cursorWorld.y
+              const picked = sourceShape
+                ? {
+                    mode: 'attached',
+                    shapeId: sourceShape.shapeId,
+                    pointKey: sourceShape.pointKey,
+                    x: pickX,
+                    y: pickY,
+                  }
+                : {
+                    mode: 'free',
+                    shapeId: null,
+                    pointKey: null,
+                    x: pickX,
+                    y: pickY,
+                  }
+              if (stage === 'awaitPointA') {
+                store.setTechDimPointA(picked)
+                store.setTechDimStage('awaitPointB')
+              } else {
+                store.setTechDimPointB(picked)
+                store.setTechDimStage('awaitPosition')
+              }
+              // Clear hover so the diamond doesn't linger on the picked
+              // point as the operator moves to the next click.
+              store.setTechCommandHover(null)
+              dynamicDirty = true
+              return
+            }
+
+            if (stage === 'awaitPosition') {
+              // Final commit. Compute orientation/dimType/offset from
+              // cursor position relative to A-B baseline per spec
+              // §"Orientation algorithm".
+              const pointA = store.techDimPointA
+              const pointB = store.techDimPointB
+              if (pointA && pointB) {
+                const { dimType, orientation, offset } = computeDimensionOrientation(
+                  pointA, pointB, cursorWorld,
+                )
+                const preSnap = store.techCommandPreSnap
+                store.commitWorkflow2Dimension(
+                  pointA, pointB, dimType, orientation, offset, preSnap,
+                )
+                staticDirty = true
+                dynamicDirty = true
+              }
+              return
+            }
+            // Unknown stage — defensive no-op.
+            return
           }
 
           // PRIORITY 1: Grip edit click commit.
@@ -3048,6 +3265,30 @@ export default function CanvasStage() {
             sEscTech.setTechCommandInput(null)
             sEscTech.setTechCommandHover(null)
             staticDirty = true
+            dynamicDirty = true
+            return
+          }
+          // Phase 2 18e (May 12 2026) — Dimension command Escape.
+          //
+          // Single Escape cancels the entire dim workflow regardless of
+          // stage per spec §"Workflow 2" Escape behavior:
+          //   awaitPointA  → no points captured yet, just clear command
+          //   awaitPointB  → discard pointA, clear command
+          //   awaitPosition → discard pointA + pointB, clear command
+          //
+          // Inserted BEFORE the generic command-with-basePoint branch
+          // and the generic "command awaiting base point" branch
+          // because dim has its own state shape (techDimPointA/B/Stage
+          // instead of techCommandBasePoint/OriginShapes). Dim doesn't
+          // mutate parent shapes during preview, so no shape revert
+          // needed.
+          if (sEscTech.techActiveCommand === 'dimension') {
+            sEscTech.setTechActiveCommand(null)
+            sEscTech.setTechDimStage(null)
+            sEscTech.setTechDimPointA(null)
+            sEscTech.setTechDimPointB(null)
+            sEscTech.setTechCommandHover(null)
+            sEscTech.setTechCommandPreSnap(null)
             dynamicDirty = true
             return
           }
