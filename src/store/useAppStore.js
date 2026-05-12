@@ -225,6 +225,19 @@ import { DEFAULT_DIM_OFFSET } from '../utils/dimConstants'
 // pure helper. Kept in dimGeometry alongside the Workflow 2 orientation
 // helpers so all dim-orientation math lives in one module.
 import { pickLinearOrientationFromLine } from '../utils/dimGeometry'
+// Phase 2 18g (May 12 2026) — Spec Table panel state helpers.
+// emptySpecTable + normalizeSpecTable produce the canonical 9-field shape
+// for initial state, hydration, importJSON, and clearAll. todayLongFormat
+// + DRAWN_BY_STORAGE_KEY support the hydrateSpecTableDefaults action.
+// computeIsSpecTableValid is the pure validity helper delegated to by the
+// isSpecTableValid store selector (consumed by 18h JSON export gate).
+import {
+  emptySpecTable,
+  normalizeSpecTable,
+  computeIsSpecTableValid,
+  todayLongFormat,
+  DRAWN_BY_STORAGE_KEY,
+} from '../utils/specTableValidation'
 // Phase 2 18b — default Technical layer name when auto-created on first
 // shape commit. Operator can rename via the layer-panel UI in 18c+.
 export const TECHNICAL_LAYER_NAME_DEFAULT = 'Layer 1'
@@ -398,6 +411,29 @@ const loadFromStorage = () => {
   }
 }
 
+// Phase 2 18g (May 12 2026) — cross-project drawnBy persistence per spec
+// v1.1 §"Cross-project persistence". Separate localStorage key so the
+// operator's name persists across project loads + mode switches. Mirrors
+// the existing loadFromStorage / persist defensive shape (typeof check
+// + try/catch for private-browsing / quota / disabled-storage).
+const loadDrawnByFromStorage = () => {
+  if (typeof localStorage === 'undefined') return null
+  try {
+    return localStorage.getItem(DRAWN_BY_STORAGE_KEY) || null
+  } catch {
+    return null
+  }
+}
+
+const persistDrawnBy = (value) => {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(DRAWN_BY_STORAGE_KEY, value || '')
+  } catch {
+    /* ignore quota / private-browsing errors */
+  }
+}
+
 const persist = (state) => {
   if (typeof localStorage === 'undefined') return
   const slice = {}
@@ -472,7 +508,13 @@ const initialState = {
   // builds the tools that populate them). Initial state is empty for
   // both; v1/v2 migration adds them via importJSON's set() block.
   technicalLayers: hydrated?.technicalLayers || [],
-  specTable: hydrated?.specTable || {},
+  // Phase 2 18g (May 12 2026) — 9-field shape per spec v1.1. Pre-18g
+  // saved projects had `specTable: {}`; normalizeSpecTable fills in the
+  // missing fields with empty strings so SpecTablePanel can safely
+  // assume every field exists. App.jsx mount useEffect runs
+  // hydrateSpecTableDefaults after this point to populate `date` +
+  // `drawnBy` from today() + localStorage.
+  specTable: normalizeSpecTable(hydrated?.specTable),
 
   // ---- UI / app ----
   // `mode` and `activeLayerId` are persisted (Step 10 partial-completion fix)
@@ -2513,6 +2555,66 @@ export const useAppStore = create((set, get) => {
       set({ drawerTab: tab })
     },
 
+    // ============ Phase 2 18g (May 12 2026) — Spec Table actions =============
+    //
+    // setSpecTable(patch): partial-merge update. Undo is NOT pushed here —
+    // SpecTablePanel uses the focus→blur edit-session pattern (capture
+    // on focus, push on blur if changed) so one undo entry covers a full
+    // typing session regardless of keystroke count. Mirrors the
+    // AnnotationPanel pattern.
+    //
+    // drawnBy persistence is coupled at this store boundary: if the patch
+    // includes drawnBy, the value also writes to localStorage per spec
+    // v1.1 §"Cross-project persistence". Single source of truth — any
+    // future setSpecTable call (from import, from a different component)
+    // will still persist correctly.
+    setSpecTable: (patch) => {
+      if (!patch || typeof patch !== 'object') return
+      set((state) => ({
+        specTable: { ...state.specTable, ...patch },
+      }))
+      if (typeof patch.drawnBy === 'string') {
+        persistDrawnBy(patch.drawnBy)
+      }
+    },
+
+    // hydrateSpecTableDefaults: called once from App.jsx mount useEffect
+    // AFTER store-init + PERSIST_KEYS hydration. Two responsibilities:
+    //   1. drawnBy: if empty + localStorage value exists, populate.
+    //   2. date: if empty, auto-populate with today's date in long format.
+    //
+    // Both are initialization (NOT operator edits), so no undo push.
+    // Direct set() bypasses the captureUndoSnapshot/pushCapturedSnapshot
+    // path — per spec v1.1 §"Undo / redo coverage":
+    //   "Date auto-population on app start does NOT push an undo entry."
+    //   "localStorage drawnBy hydration on app start does NOT push an
+    //    undo entry."
+    hydrateSpecTableDefaults: () => {
+      const s = get()
+      const patches = {}
+      if (s.specTable.drawnBy === '') {
+        const stored = loadDrawnByFromStorage()
+        if (typeof stored === 'string' && stored.length > 0) {
+          patches.drawnBy = stored
+        }
+      }
+      if (s.specTable.date === '') {
+        patches.date = todayLongFormat()
+      }
+      if (Object.keys(patches).length === 0) return
+      set((state) => ({ specTable: { ...state.specTable, ...patches } }))
+      // No persistDrawnBy() call — hydration READS from storage; it
+      // doesn't write back. (If we wrote back here, hydrate-then-no-edit
+      // would re-touch localStorage every session for no reason.)
+    },
+
+    // isSpecTableValid: thin store-level selector delegating to the pure
+    // computeIsSpecTableValid helper. Consumed by 18h JSON export gate.
+    // Lives as a function (not a getter) so consumers call
+    // `useAppStore((s) => s.isSpecTableValid())` and re-evaluate when
+    // specTable changes via Zustand's selector subscription.
+    isSpecTableValid: () => computeIsSpecTableValid(get().specTable),
+
     // ============ Job context (Step 15 populates) ===========================
     setJob: (jobContext) => set({ jobContext }),
     clearJob: () => set({ jobContext: null }),
@@ -2803,8 +2905,11 @@ export const useAppStore = create((set, get) => {
         : normalizeViewports(null, obj.viewport)  // v1/v2: legacy single → FIELD
       const migratedTechnicalLayers = Array.isArray(obj.technicalLayers)
         ? obj.technicalLayers : []
-      const migratedSpecTable = (obj.specTable && typeof obj.specTable === 'object')
-        ? obj.specTable : {}
+      // Phase 2 18g — normalize spec table on import so v3 files with a
+      // partial / pre-18g `specTable: {}` always end up with the full
+      // 9-field shape. Imported projects then participate in the
+      // 9-field-assumed render path identically to fresh projects.
+      const migratedSpecTable = normalizeSpecTable(obj.specTable)
 
       set({
         layers,
@@ -3109,8 +3214,12 @@ export const useAppStore = create((set, get) => {
         viewport: { ...DEFAULT_VIEWPORT },
         // Phase 2 18a — wipe Technical Drawing geometry + spec table
         // alongside Field Markup data. Both belong to the prior project.
+        // Phase 2 18g — use emptySpecTable() so all 9 fields are
+        // present as empty strings on the fresh project (matches
+        // 18g initial-state shape; SpecTablePanel doesn't need to
+        // defend against undefined fields).
         technicalLayers: [],
-        specTable: {},
+        specTable: emptySpecTable(),
         // P16 + P38 mini-step (May 8 2026) — wipe perspective grid +
         // rotation alongside the rest of the project state. They're
         // photo-anchored geometry, so they don't survive a New Project.

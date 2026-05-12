@@ -2304,3 +2304,81 @@ body {
   font-size: 11px;
   line-height: 1.35;
 }
+
+/* ============================================================================
+ * Phase 2 18g (May 12 2026) — Spec Table panel.
+ *
+ * Right-drawer body for Technical Drawing mode. 9 input rows + required
+ * fields hint. Mounts inside the TECHNICAL `<aside>` block in App.jsx
+ * (mode-isolated from FIELD drawer at the wrapper level — this CSS
+ * doesn't need to gate on mode).
+ *
+ * Color tokens use existing --rm-* vars for consistency with the rest
+ * of the drawer. Invalid border uses #ef4444 per spec §"Validation".
+ * ============================================================================ */
+
+.spec-table-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.spec-table-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.spec-row {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 12px;
+}
+
+.spec-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--rm-fg);
+  margin-bottom: 4px;
+  letter-spacing: 0.02em;
+}
+
+.spec-required-asterisk {
+  color: #ef4444;
+  font-weight: 700;
+}
+
+.spec-input {
+  background: var(--rm-panel);
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--rm-fg);
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.spec-input:focus {
+  outline: none;
+  border-color: var(--rm-accent);
+}
+
+.spec-input--invalid {
+  border-color: #ef4444 !important;
+}
+
+.spec-input::placeholder {
+  color: var(--rm-fg-dim);
+  opacity: 0.7;
+}
+
+.spec-required-hint {
+  font-size: 10px;
+  color: var(--rm-fg-dim);
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rm-border);
+}

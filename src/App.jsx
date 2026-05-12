@@ -16,6 +16,12 @@ import HeaderMenu from './components/HeaderMenu'
 // See TechInputPanel.jsx header comment for the three-failed-attempts
 // history that motivated the architectural pivot.
 import TechInputPanel from './components/TechInputPanel'
+// Phase 2 18g (May 12 2026) — Spec Table panel for Technical Drawing mode.
+// Lives in the right drawer alongside a single tab ("📋 Spec Table") via
+// a parallel TECHNICAL `<aside>` block (Option A from investigation §1.C).
+// The existing FIELD aside is unchanged; the two drawer blocks are
+// mutually exclusive via appMode gate at the wrapper level.
+import SpecTablePanel from './components/SpecTablePanel'
 import './App.css'
 
 export default function App() {
@@ -115,6 +121,22 @@ export default function App() {
   const handleRedo = () => useAppStore.getState().redo()
   const undoDisabled = undoStack.length === 0
   const redoDisabled = redoStack.length === 0
+
+  // Phase 2 18g (May 12 2026) — Spec Table mount hydration.
+  //
+  // Runs once on mount AFTER store init + PERSIST_KEYS hydration. Two
+  // jobs: (1) populate specTable.drawnBy from localStorage if empty,
+  // (2) auto-populate specTable.date with today's date if empty. Both
+  // are initialization (NOT operator edits), so the store action
+  // intentionally uses raw set() without captureUndoSnapshot — see
+  // hydrateSpecTableDefaults comment for the spec rationale.
+  //
+  // Empty dependency array ensures one-shot execution. Idempotent if
+  // somehow re-fired (only patches empty fields), but the empty deps
+  // guarantee one run anyway.
+  useEffect(() => {
+    useAppStore.getState().hydrateSpecTableDefaults()
+  }, [])
 
   return (
     <div className="app">
@@ -337,6 +359,42 @@ export default function App() {
               : effectiveDrawerTab === 'sequences'
               ? <SequencePanel />
               : <PropertiesPanel />}
+          </div>
+        </aside>
+        )}
+        {/*
+          Phase 2 18g (May 12 2026) — parallel TECHNICAL-mode drawer
+          per spec v1.1 §"UI placement" + investigation Option A. The
+          aside is wholly distinct from the FIELD aside above; only one
+          renders at a time (mode-exclusive). The TECHNICAL aside hosts
+          a single tab — "📋 Spec Table" — and the panel body. No tab
+          fall-back logic needed since this is the only tab.
+          The drawer-toggle button + floating tab handle (lines ~257-
+          278) sit outside both asides so they work in either mode.
+          rightDrawerOpen state persists across mode switches, so the
+          operator's drawer open/closed preference carries over.
+        */}
+        {appMode === 'TECHNICAL' && (
+        <aside
+          className="panel-right"
+          aria-label="Spec Table drawer"
+          aria-hidden={!rightDrawerOpen}
+          id="panel-right"
+          data-testid="drawer-technical"
+        >
+          <div className="drawer-tabs" role="tablist" aria-label="Spec table drawer view">
+            <button
+              type="button"
+              role="tab"
+              className="drawer-tab active"
+              aria-selected="true"
+              data-testid="drawer-tab-spec-table"
+            >
+              📋 Spec Table
+            </button>
+          </div>
+          <div className="drawer-tab-body" role="tabpanel">
+            <SpecTablePanel />
           </div>
         </aside>
         )}
