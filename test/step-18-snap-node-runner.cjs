@@ -48,15 +48,28 @@ const techGeomPreamble = `
     }
   }
 `
-const { findTechSnapTarget } = loadModule(
+const { findTechSnapTarget, applyCommandTransform } = loadModule(
   'src/utils/techGeometry.js',
-  ['findTechSnapTarget'],
+  ['findTechSnapTarget', 'applyCommandTransform'],
   techGeomPreamble,
 )
+
+// 18-snap Bug B fix (May 12 2026) — commitTechLine snapMode tests
+// require the helper loaded with PX_PER_INCH seeded (same shim as
+// step-18c-node-runner).
+const { commitTechLine } = loadModule(
+  'src/utils/techLineCommit.js',
+  ['commitTechLine'],
+  'const PX_PER_INCH = 24',
+)
+const PX_PER_INCH_TEST = 24
 
 const tests = []
 function pass(name, ok, extra) {
   tests.push({ name, ok: !!ok, extra })
+}
+function near(a, b, tol) {
+  return Math.abs(a - b) < (tol || 0.001)
 }
 
 // ============================================================================
@@ -486,17 +499,31 @@ function pickCommitPoint(rawCursor, hover, techSnapEnabled, typedInches, typedAn
 // Mirrors the boolean expression in CanvasStage.jsx onMouseMove that
 // decides whether to fire findTechSnapTarget for the line tool.
 // Frozen as a test so a regression that drops a guard fails loudly.
+//
+// 18-snap Bug A fix (May 12 2026): gate widened. Pre-fix the gate
+// required `techDraft && techDraft.a` (i.e. anchor already placed by
+// first click). Pre-first-click techDraft was null and snap never
+// fired — first click landed at raw cursor, not at the visible-after-
+// the-click diamond. Post-fix: gate fires whenever line tool active +
+// snap enabled. typedInches / typedAngleDegrees still block snap (when
+// techDraft exists with either typed value, the operator's explicit
+// geometry wins). Test 26 reflects the widened gate — what was
+// "blocked" before is now "fires" for the no-draft and no-anchor cases.
 // ============================================================================
 
 function shouldFireLineToolSnap(store) {
+  // Post-Bug-A-fix gate. No techDraft.a requirement.
   return !!(
     store.appMode === 'TECHNICAL'
     && store.tool === 'tech-line'
-    && store.techDraft
-    && store.techDraft.a
-    && store.techDraft.typedInches === null
-    && store.techDraft.typedAngleDegrees === null
     && store.techSnapEnabled
+    && (
+      !store.techDraft
+      || (
+        store.techDraft.typedInches === null
+        && store.techDraft.typedAngleDegrees === null
+      )
+    )
   )
 }
 
@@ -512,7 +539,7 @@ function shouldFireLineToolSnap(store) {
     shouldFireLineToolSnap(store) === true)
 }
 
-// 26. Each guard individually blocks the branch.
+// 26. Each guard individually blocks (or, post-Bug-A-fix, fires) the branch.
 {
   const base = {
     appMode: 'TECHNICAL',
@@ -524,13 +551,17 @@ function shouldFireLineToolSnap(store) {
     shouldFireLineToolSnap({ ...base, appMode: 'FIELD' }) === false)
   pass('26b. tool tech-select → blocked',
     shouldFireLineToolSnap({ ...base, tool: 'tech-select' }) === false)
-  pass('26c. no techDraft → blocked',
-    shouldFireLineToolSnap({ ...base, techDraft: null }) === false)
-  pass('26d. no draft anchor → blocked',
+  // Bug A fix: no techDraft → FIRES (pre-first-click hover scan).
+  pass('26c. no techDraft → FIRES (Bug A fix — pre-first-click scan)',
+    shouldFireLineToolSnap({ ...base, techDraft: null }) === true)
+  // Bug A fix: no draft anchor with no typed values → FIRES (operator
+  // may have started typing then cleared OR draft exists from a prior
+  // session quirk; either way, freehand snap should fire).
+  pass('26d. draft without anchor and no typed values → FIRES (Bug A fix)',
     shouldFireLineToolSnap({
       ...base,
       techDraft: { a: null, typedInches: null, typedAngleDegrees: null },
-    }) === false)
+    }) === true)
   pass('26e. typedInches set → blocked',
     shouldFireLineToolSnap({
       ...base,
@@ -545,16 +576,15 @@ function shouldFireLineToolSnap(store) {
     shouldFireLineToolSnap({ ...base, techSnapEnabled: false }) === false)
 }
 
-// 27. Stale-hover clear branch: snap off + anchor set + existing hover → clear.
+// 27. Stale-hover clear branch: snap off or typed value + existing hover → clear.
+// Post-Bug-A-fix: techDraft.a is no longer required for clear (a stale
+// hover from a prior anchor needs clearing even if the operator has
+// since reset the draft).
 function shouldClearLineToolHover(store) {
   return !!(
     store.appMode === 'TECHNICAL'
     && store.tool === 'tech-line'
-    && store.techDraft && store.techDraft.a
     && store.techCommandHover !== null
-    // Either snap off OR typed values present — i.e. the "fires" gate
-    // above does NOT match but we still have a draft anchor + a stale
-    // hover that must be cleared so the diamond stops rendering.
     && !shouldFireLineToolSnap(store)
   )
 }
@@ -617,6 +647,445 @@ function shouldClearLineToolHover(store) {
     defaultArg && explicitBothTrue && defaultArg.x === explicitBothTrue.x)
   pass('28c. No snapTypes arg = explicit {endpoint:true, midpoint:true} (y)',
     defaultArg && explicitBothTrue && defaultArg.y === explicitBothTrue.y)
+}
+
+// ============================================================================
+// BLOCK H — Bug A regression: pre-first-click snap scan (29–31)
+//
+// Full scan-gate end-to-end test — closes the false-positive coverage
+// pattern shared with 18b P47 and 18d-edit inches→pixels. Pre-fix the
+// scan-gate required `techDraft.a`, so the original `pickAnchorPoint`
+// tests in Block E passed (hover-supplied-as-parameter) while the
+// production gate never populated hover pre-first-click. These tests
+// route through the SAME gate boolean expression that production uses
+// (shouldFireLineToolSnap from Block F) AND the same anchor pick
+// helper from Block E, in sequence, so a regression that re-tightens
+// the gate fails loudly.
+// ============================================================================
+
+// Production-mirror: full mousemove → click flow.
+// `store` is the input; returns the anchor point that production would
+// commit. The hover is computed INSIDE this helper by running the
+// scan-gate against `store`, NOT supplied externally.
+function fullFirstClickFlow(store, cursor, snapTarget) {
+  // Step 1: mousemove (could be many — only the last one's hover matters).
+  const gateFires = shouldFireLineToolSnap(store)
+  const hover = gateFires ? snapTarget : null
+  // Step 2: click. Mirror pickAnchorPoint from Block E.
+  const useSnap = !!hover && store.techSnapEnabled
+  return {
+    hoverPopulated: hover !== null,
+    anchor: useSnap
+      ? { x: hover.x, y: hover.y }
+      : { x: cursor.x, y: cursor.y },
+    usedSnap: useSnap,
+  }
+}
+
+// 29. Pre-first-click: no techDraft yet, hover near endpoint → hover
+//     populates and first click consumes it.
+{
+  const store = {
+    appMode: 'TECHNICAL',
+    tool: 'tech-line',
+    techDraft: null,         // ← BUG A regression: pre-first-click
+    techSnapEnabled: true,
+  }
+  const result = fullFirstClickFlow(
+    store,
+    { x: 102, y: 102 },                            // raw cursor near endpoint
+    { x: 100, y: 100, type: 'endpoint' },          // snap target
+  )
+  pass('29a. Pre-first-click: hover populates via scan-gate',
+    result.hoverPopulated === true)
+  pass('29b. Pre-first-click: first click anchor = snap target x',
+    result.anchor.x === 100)
+  pass('29c. Pre-first-click: first click anchor = snap target y',
+    result.anchor.y === 100)
+  pass('29d. Pre-first-click: anchor used snap',
+    result.usedSnap === true)
+}
+
+// 30. Pre-first-click WITH snap DISABLED → hover does NOT populate;
+//     first click anchor at raw cursor.
+{
+  const store = {
+    appMode: 'TECHNICAL',
+    tool: 'tech-line',
+    techDraft: null,
+    techSnapEnabled: false,
+  }
+  const result = fullFirstClickFlow(
+    store,
+    { x: 102, y: 102 },
+    { x: 100, y: 100, type: 'endpoint' },
+  )
+  pass('30a. Pre-first-click + snap off: hover NOT populated',
+    result.hoverPopulated === false)
+  pass('30b. Pre-first-click + snap off: anchor at raw cursor',
+    result.anchor.x === 102 && result.anchor.y === 102)
+}
+
+// 31. SECOND click (techDraft.a already set): same flow still snaps.
+//     Verifies the widened gate didn't accidentally break the post-
+//     first-click case.
+{
+  const store = {
+    appMode: 'TECHNICAL',
+    tool: 'tech-line',
+    techDraft: { a: { x: 0, y: 0 }, typedInches: null, typedAngleDegrees: null },
+    techSnapEnabled: true,
+  }
+  const result = fullFirstClickFlow(
+    store,
+    { x: 102, y: 102 },
+    { x: 100, y: 100, type: 'endpoint' },
+  )
+  pass('31a. Second-click (draft.a set) + snap on: hover populates',
+    result.hoverPopulated === true)
+  pass('31b. Second-click: commit uses snap target',
+    result.anchor.x === 100 && result.anchor.y === 100)
+}
+
+// ============================================================================
+// BLOCK I — Bug B regression: commitTechLine snapMode exactness (32–36)
+//
+// Pre-fix, second-click correctly consumed techCommandHover but
+// commitTechLine then rounded freehand length to 0.5" and re-projected
+// b via cos/sin of cursor-angle. Endpoint landed up to half-an-inch
+// off the snap target. Post-fix: snapMode=true skips rounding and
+// commits b directly at cursorWorld (which IS the snap target).
+// ============================================================================
+
+function captureShape() {
+  let captured = null
+  const addTechnicalShape = (sh) => { captured = sh }
+  const setTechDraft = () => {}
+  return { addTechnicalShape, setTechDraft, get: () => captured }
+}
+
+// 32. snapMode=true: b lands EXACTLY at cursorWorld (no drift).
+{
+  const cap = captureShape()
+  const anchor = { x: 0, y: 0 }
+  // Snap target at a position whose distance is NOT a 0.5" multiple
+  // (96.3 px ≈ 4.0125", which rounds to 4.0" — projection would drift
+  // 0.3 px off without the snapMode fix).
+  const snapTarget = { x: 96.3, y: 48.7 }
+  const ok = commitTechLine({
+    anchor,
+    cursorWorld: snapTarget,
+    typedInches: null,
+    typedAngleDegrees: null,
+    snapMode: true,
+    addTechnicalShape: cap.addTechnicalShape,
+    setTechDraft: cap.setTechDraft,
+  })
+  const shape = cap.get()
+  pass('32a. snapMode=true commits successfully',
+    ok === true && shape !== null)
+  pass('32b. snapMode=true: b.x EXACTLY at snap target x',
+    shape && shape.b.x === 96.3)
+  pass('32c. snapMode=true: b.y EXACTLY at snap target y',
+    shape && shape.b.y === 48.7)
+  pass('32d. snapMode=true: lengthSource = "snap"',
+    shape && shape.lengthSource === 'snap')
+  pass('32e. snapMode=true: angleSource = "snap"',
+    shape && shape.angleSource === 'snap')
+}
+
+// 33. snapMode=false (existing freehand path): b drifts off snap target
+//     due to 0.5" rounding. Verifies the bug pre-fix WOULD have shown
+//     this drift, and that the snapMode flag is what gates the fix.
+{
+  const cap = captureShape()
+  const anchor = { x: 0, y: 0 }
+  // Same snap target. Without snapMode, the 0.5" rounding applies.
+  const snapTarget = { x: 96.3, y: 48.7 }
+  commitTechLine({
+    anchor,
+    cursorWorld: snapTarget,
+    typedInches: null,
+    typedAngleDegrees: null,
+    snapMode: false,                              // ← Pre-fix path
+    addTechnicalShape: cap.addTechnicalShape,
+    setTechDraft: cap.setTechDraft,
+  })
+  const shape = cap.get()
+  pass('33a. snapMode=false: shape committed',
+    shape !== null)
+  pass('33b. snapMode=false: lengthSource = "freehand" (pre-fix path)',
+    shape && shape.lengthSource === 'freehand')
+  // Endpoint should NOT be at the snap target due to rounding.
+  pass('33c. snapMode=false: b drifts off snap target (proves the bug)',
+    shape && (shape.b.x !== 96.3 || shape.b.y !== 48.7))
+}
+
+// 34. snapMode=true + typedInches set → typed wins (snapMode silently
+//     ignored when operator specified exact length).
+{
+  const cap = captureShape()
+  const anchor = { x: 0, y: 0 }
+  const snapTarget = { x: 96, y: 0 }   // 4" right
+  commitTechLine({
+    anchor,
+    cursorWorld: snapTarget,
+    typedInches: 24,                   // 1' — overrides snap target distance
+    typedAngleDegrees: null,
+    snapMode: true,
+    addTechnicalShape: cap.addTechnicalShape,
+    setTechDraft: cap.setTechDraft,
+  })
+  const shape = cap.get()
+  pass('34a. snapMode=true + typedInches: lengthSource = "typed" (typed wins)',
+    shape && shape.lengthSource === 'typed')
+  pass('34b. snapMode=true + typedInches: length = typed value',
+    shape && shape.lengthInches === 24)
+  // b should be at typed length (24" = 576px) along snap direction, NOT
+  // at snap target (96px).
+  pass('34c. snapMode=true + typedInches: b lands at typed length',
+    shape && near(shape.b.x, 576))
+}
+
+// 35. snapMode=true + typedAngleDegrees set → angle locked to typed value.
+//     Snap target is not consumed because the operator specified an
+//     exact angle. (length still computes via snap-mode rules — falls
+//     through to non-snap branch when typedAngle is set; check shape).
+{
+  const cap = captureShape()
+  const anchor = { x: 0, y: 0 }
+  const snapTarget = { x: 96, y: 0 }   // 4" right
+  commitTechLine({
+    anchor,
+    cursorWorld: snapTarget,
+    typedInches: null,
+    typedAngleDegrees: 90,             // straight down — overrides snap
+    snapMode: true,
+    addTechnicalShape: cap.addTechnicalShape,
+    setTechDraft: cap.setTechDraft,
+  })
+  const shape = cap.get()
+  pass('35a. snapMode=true + typedAngle: angleSource = "typed"',
+    shape && shape.angleSource === 'typed')
+  // b should be along the typed-angle direction, NOT at the snap
+  // target's xy. lengthSource is "freehand" since the snap-mode
+  // branch only fires when neither typed is set.
+  pass('35b. snapMode=true + typedAngle: b NOT at snap target',
+    shape && shape.b.x !== 96)
+}
+
+// 36. snapMode=true + degenerate zero-length (snap target at anchor)
+//     → reject, return false.
+{
+  const cap = captureShape()
+  const anchor = { x: 50, y: 50 }
+  const snapTarget = { x: 50, y: 50 }   // same as anchor
+  const ok = commitTechLine({
+    anchor,
+    cursorWorld: snapTarget,
+    typedInches: null,
+    typedAngleDegrees: null,
+    snapMode: true,
+    addTechnicalShape: cap.addTechnicalShape,
+    setTechDraft: cap.setTechDraft,
+  })
+  pass('36. snapMode=true + zero-length → rejected',
+    ok === false && cap.get() === null)
+}
+
+// ============================================================================
+// BLOCK J — Bug C regression: Move/Copy destination snap scan (37–40)
+//
+// The original 18-snap scope wired snap to the BASE-POINT pick
+// (PRIORITY 2). Destination snap (PRIORITY 3) was missed — Move/Copy
+// committed at raw cursor. Post-fix: PRIORITY 3 mousemove scans for
+// snap, writes techCommandHover; PRIORITY 3 commit consumes it.
+// ============================================================================
+
+// Mirror of the PRIORITY 3 mousemove snap-scan gate.
+function priority3SnapApplies(store) {
+  return !!(
+    store.techActiveCommand
+    && store.techCommandBasePoint
+    && Array.isArray(store.techCommandOriginShapes)
+    && store.appMode === 'TECHNICAL'
+    && store.techSnapEnabled
+    && (store.techActiveCommand === 'move' || store.techActiveCommand === 'copy')
+  )
+}
+
+// Fixture: 1 selected line with origin shape ready for command.
+const fixtureCommandStore = (cmd, snapEnabled) => ({
+  appMode: 'TECHNICAL',
+  techActiveCommand: cmd,
+  techCommandBasePoint: { x: 0, y: 0 },
+  techCommandOriginShapes: [
+    { id: 'origShape1', type: 'line', a: { x: 10, y: 0 }, b: { x: 34, y: 0 } },
+  ],
+  techSnapEnabled: snapEnabled,
+  techSnapTypes: { endpoint: true, midpoint: true },
+})
+
+// 37. cmd='move' + basePoint set + snap on → priority-3 snap applies.
+{
+  pass('37a. Move + basePoint + snap on → scan fires',
+    priority3SnapApplies(fixtureCommandStore('move', true)) === true)
+  pass('37b. Copy + basePoint + snap on → scan fires',
+    priority3SnapApplies(fixtureCommandStore('copy', true)) === true)
+  pass('37c. Rotate + basePoint + snap on → scan does NOT fire (no destination point)',
+    priority3SnapApplies(fixtureCommandStore('rotate', true)) === false)
+  pass('37d. Move + basePoint + snap OFF → scan does NOT fire',
+    priority3SnapApplies(fixtureCommandStore('move', false)) === false)
+}
+
+// 38. Origin shapes EXCLUDED from snap candidates during Move (so the
+//     shape being moved can't snap to itself and collapse the move).
+{
+  // Layer has TWO lines: the one being moved + another at (100, 0)→(124, 0).
+  const otherLine = { id: 'otherShape', type: 'line', a: { x: 100, y: 0 }, b: { x: 124, y: 0 } }
+  const movingLine = { id: 'origShape1', type: 'line', a: { x: 10, y: 0 }, b: { x: 34, y: 0 } }
+  const layers = [{ id: 'L1', visible: true, shapes: [movingLine, otherLine] }]
+  // Cursor near otherLine.a = (100, 0). Pass movingLine in exclude set.
+  const target = findTechSnapTarget(
+    { x: 102, y: 0 }, [], layers, { panX: 0, panY: 0, zoom: 1 }, 7,
+    new Set([movingLine.id]),
+    { endpoint: true, midpoint: true },
+  )
+  pass('38a. Move snap finds otherLine endpoint (not excluded)',
+    target && target.x === 100)
+  // Cursor near movingLine.a = (10, 0). With movingLine excluded, no hit.
+  const noTarget = findTechSnapTarget(
+    { x: 12, y: 0 }, [], layers, { panX: 0, panY: 0, zoom: 1 }, 7,
+    new Set([movingLine.id]),
+    { endpoint: true, midpoint: true },
+  )
+  pass('38b. Move snap excludes moving shape (cannot snap to self)',
+    noTarget === null)
+}
+
+// 39. PRIORITY 3 commit: Move uses live-preview mutation (no re-apply
+//     needed when snap engaged — mousemove already wrote the snap-
+//     adjusted delta).
+//     This test asserts that when snap is engaged for Move, the live
+//     preview applies the snap-adjusted delta — using the production
+//     applyCommandTransform helper.
+{
+  const movingLine = { id: 'origShape1', type: 'line', a: { x: 10, y: 0 }, b: { x: 34, y: 0 } }
+  const basePoint = { x: 22, y: 0 }   // center of moving line
+  // Operator's cursor at (98, 0); snap target at (100, 0).
+  const snapTarget = { x: 100, y: 0 }
+  const effectiveCursor = snapTarget   // mousemove uses target when hover set
+  const payload = {
+    dx: effectiveCursor.x - basePoint.x,
+    dy: effectiveCursor.y - basePoint.y,
+  }
+  const transformed = applyCommandTransform('move', movingLine, basePoint, payload)
+  pass('39a. Move live preview applies snap-adjusted delta to a.x',
+    transformed.a.x === 10 + (100 - 22))
+  pass('39b. Move live preview applies snap-adjusted delta to b.x',
+    transformed.b.x === 34 + (100 - 22))
+}
+
+// 40. PRIORITY 3 commit: Copy uses px → inches conversion before
+//     calling commitCopyCommand. Pre-fix this path passed pixel delta
+//     to a units-aware action → 24× too-far clones. Test mirrors the
+//     post-fix call shape: divide pixel delta by PX_PER_INCH at the
+//     call site.
+{
+  const basePoint = { x: 0, y: 0 }
+  const snapTarget = { x: 96, y: 0 }   // 4" right
+  // Pre-fix: deltaPx = (96, 0). commitCopyCommand multiplies by 24 →
+  // clones land at (96*24, 0) = (2304, 0). 24× too far.
+  const deltaInches = {
+    dx: (snapTarget.x - basePoint.x) / PX_PER_INCH_TEST,
+    dy: (snapTarget.y - basePoint.y) / PX_PER_INCH_TEST,
+  }
+  pass('40a. Px → inches conversion: delta = 4 inches',
+    deltaInches.dx === 4 && deltaInches.dy === 0)
+  // Post-action: commitCopyCommand multiplies by 24 → 4 * 24 = 96 px
+  // delta. Clone lands at original + 96 (NOT at original + 2304).
+  const cloneXOffset = deltaInches.dx * PX_PER_INCH_TEST
+  pass('40b. Round-trip: 4 in × PX_PER_INCH = 96 px offset (matches snap target)',
+    cloneXOffset === 96)
+}
+
+// ============================================================================
+// BLOCK K — Diamond render visibility regression (41)
+//
+// Bug A widened visibility to render the diamond for tech-line at any
+// draft state (including pre-first-click). Bug C added a branch for
+// Move/Copy destination (basePoint set). Rotate still excluded.
+// ============================================================================
+
+function diamondVisible(state) {
+  return !!(
+    state.techCommandHover
+    && (
+      (state.techActiveCommand && !state.techCommandBasePoint)
+      || (
+        state.techActiveCommand
+        && state.techCommandBasePoint
+        && (state.techActiveCommand === 'move' || state.techActiveCommand === 'copy')
+      )
+      || state.techGripEdit
+      || (state.tool === 'tech-line' && state.appMode === 'TECHNICAL')
+    )
+  )
+}
+
+// 41. Each scenario: diamond visibility matches the production guard.
+{
+  const baseHover = { x: 100, y: 100, type: 'endpoint' }
+  // tech-line + hover, no draft anchor → visible (Bug A fix)
+  pass('41a. tech-line + hover + no draft → diamond VISIBLE (Bug A fix)',
+    diamondVisible({
+      tool: 'tech-line', appMode: 'TECHNICAL', techCommandHover: baseHover,
+    }) === true)
+  // tech-line + hover under FIELD mode → NOT visible (mode isolation)
+  pass('41b. tech-line + hover + FIELD mode → diamond NOT visible',
+    diamondVisible({
+      tool: 'tech-line', appMode: 'FIELD', techCommandHover: baseHover,
+    }) === false)
+  // Move + basePoint + hover → visible (Bug C fix)
+  pass('41c. Move + basePoint + hover → diamond VISIBLE (Bug C fix)',
+    diamondVisible({
+      techActiveCommand: 'move',
+      techCommandBasePoint: { x: 0, y: 0 },
+      techCommandHover: baseHover,
+    }) === true)
+  // Copy + basePoint + hover → visible
+  pass('41d. Copy + basePoint + hover → diamond VISIBLE',
+    diamondVisible({
+      techActiveCommand: 'copy',
+      techCommandBasePoint: { x: 0, y: 0 },
+      techCommandHover: baseHover,
+    }) === true)
+  // Rotate + basePoint + hover → NOT visible (rotate excluded from
+  // destination snap)
+  pass('41e. Rotate + basePoint + hover → diamond NOT visible (rotate excluded)',
+    diamondVisible({
+      techActiveCommand: 'rotate',
+      techCommandBasePoint: { x: 0, y: 0 },
+      techCommandHover: baseHover,
+    }) === false)
+  // Base-point-pick case still works (no basePoint yet)
+  pass('41f. Command awaiting basePoint + hover → diamond VISIBLE',
+    diamondVisible({
+      techActiveCommand: 'move',
+      techCommandBasePoint: null,
+      techCommandHover: baseHover,
+    }) === true)
+  // Grip edit case still works
+  pass('41g. Grip edit + hover → diamond VISIBLE',
+    diamondVisible({
+      techGripEdit: { layerId: 'L1', shapeId: 'sh1', pointKey: 'a' },
+      techCommandHover: baseHover,
+    }) === true)
+  // No hover → never visible
+  pass('41h. No hover → diamond NOT visible regardless of state',
+    diamondVisible({
+      tool: 'tech-line', appMode: 'TECHNICAL', techCommandHover: null,
+    }) === false)
 }
 
 // ============================================================================

@@ -1281,22 +1281,26 @@ export default function CanvasStage() {
 
         // Phase 2 18d-edit — snap-target diamond. Renders during base-
         // point pick OR grip edit. Yellow = endpoint, cyan = midpoint.
-        // Phase 2 18-snap (May 12 2026) — visibility extended to the
-        // tech-line freehand draft case: once an anchor is set AND
-        // typed length+angle are both null, the line-tool snap branch
-        // populates techCommandHover and the diamond renders for it.
-        // Typed values clear the hover (else-branch in onMouseMove) so
-        // the diamond automatically vanishes when the operator types.
+        // Phase 2 18-snap (May 12 2026) + Bug A/C fix (May 12 2026):
+        // visibility extended to three Tech-snap consumer scenarios:
+        //   1. tech-line tool active (any draft state — pre-first-click,
+        //      mid-draft, doesn't matter). Bug A: the original guard
+        //      required `techDraft.a`, hiding the diamond pre-first-click.
+        //   2. Active Move/Copy command WITH base point set — destination
+        //      snap diamond. Rotate excluded (destination is an angle,
+        //      not a point).
+        //   3. Existing 18d-edit base-point-pick + grip-edit cases.
         if (
           state.techCommandHover
           && (
             (state.techActiveCommand && !state.techCommandBasePoint)
-            || state.techGripEdit
             || (
-              state.tool === 'tech-line'
-              && state.techDraft
-              && state.techDraft.a
+              state.techActiveCommand
+              && state.techCommandBasePoint
+              && (state.techActiveCommand === 'move' || state.techActiveCommand === 'copy')
             )
+            || state.techGripEdit
+            || (state.tool === 'tech-line' && state.appMode === 'TECHNICAL')
           )
         ) {
           const hover = state.techCommandHover
@@ -1338,6 +1342,13 @@ export default function CanvasStage() {
         // in drawStatic via technicalLayers reference change). Copy
         // must NOT mutate originals — so the preview is rendered here
         // as ghosted (50% alpha, orange) shapes at the cursor offset.
+        //
+        // 18-snap Bug C fix (May 12 2026): when techCommandHover is set
+        // and snap is enabled, the ghost lands at the snap-adjusted
+        // destination so the operator's preview matches what the
+        // click commit will produce. PRIORITY 3 mousemove writes
+        // techCommandHover (Move/Copy only); ghost render consumes it
+        // here.
         if (
           state.techActiveCommand === 'copy'
           && state.techCommandBasePoint
@@ -1347,8 +1358,13 @@ export default function CanvasStage() {
             x: (state.cursorX - techVD.panX) / techZoomD,
             y: (state.cursorY - techVD.panY) / techZoomD,
           }
-          const dx = cursorWorld.x - state.techCommandBasePoint.x
-          const dy = cursorWorld.y - state.techCommandBasePoint.y
+          const snapHover = state.techCommandHover
+          const useSnap = !!snapHover && state.techSnapEnabled
+          const effectiveCursor = useSnap
+            ? { x: snapHover.x, y: snapHover.y }
+            : cursorWorld
+          const dx = effectiveCursor.x - state.techCommandBasePoint.x
+          const dy = effectiveCursor.y - state.techCommandBasePoint.y
           ctxDynamic.save()
           ctxDynamic.strokeStyle = '#e8531a'
           ctxDynamic.globalAlpha = 0.5
@@ -1965,31 +1981,36 @@ export default function CanvasStage() {
       //      (rotate or move: mutate origins; copy: drawDynamic ghost
       //      handles preview, no live mutation here)
 
-      // Phase 2 18-snap (May 12 2026) — Tech-line tool snap scan during
-      // freehand draft. Fires once the operator has anchored the first
-      // endpoint (techDraft.a set) but only if BOTH typed length AND
-      // typed angle are null (pure freehand mode). Typed values bypass
-      // snap entirely — operator specified exact geometry, snap must
-      // not silently override their intent.
+      // Phase 2 18-snap (May 12 2026) — Tech-line tool snap scan.
+      //
+      // Bug A fix (May 12 2026): the original 18-snap gate required
+      // `techDraft.a` to be set, meaning the scan only fired AFTER the
+      // operator's first click. Pre-first-click, hover stayed null and
+      // the first click landed at raw cursor instead of the snap target
+      // — defeating the diamond the operator could see appearing after
+      // their click. Widened gate now fires whenever tool === 'tech-line'
+      // + snap enabled. If techDraft exists, the typed-value bypass
+      // still applies; pre-first-click techDraft is null and the
+      // bypass is moot.
       //
       // Sits before the PRIORITY 1/2/3 chain because line-tool snap is
-      // its own modality (no active command, no grip edit) — the chain
-      // below would never match anyway. Does NOT return: the line tool's
-      // rubber-band render (drawDynamic line 1173 block) still needs to
-      // run downstream this same mousemove.
+      // its own modality. Does NOT return: the line tool's rubber-band
+      // render (drawDynamic line 1173 block) and other downstream
+      // bookkeeping still need to run.
       //
-      // Else-branch: when snap goes off OR typed values appear after a
-      // previous snap pass set techCommandHover, clear the hover so the
-      // diamond doesn't linger past its valid window.
-      if (
+      // Else-branch: when snap goes off OR typed values appear after
+      // a previous snap pass set techCommandHover, clear the hover so
+      // the diamond doesn't linger past its valid window.
+      const techDraftSnap = store.techDraft
+      const lineToolSnapActive =
         store.appMode === 'TECHNICAL'
         && store.tool === 'tech-line'
-        && store.techDraft
-        && store.techDraft.a
-        && store.techDraft.typedInches === null
-        && store.techDraft.typedAngleDegrees === null
         && store.techSnapEnabled
-      ) {
+        && (
+          !techDraftSnap
+          || (techDraftSnap.typedInches === null && techDraftSnap.typedAngleDegrees === null)
+        )
+      if (lineToolSnapActive) {
         const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
         const techZoom = techV.zoom || 1
         const cursorWorld = {
@@ -2020,11 +2041,12 @@ export default function CanvasStage() {
       } else if (
         store.appMode === 'TECHNICAL'
         && store.tool === 'tech-line'
-        && store.techDraft && store.techDraft.a
         && store.techCommandHover !== null
       ) {
-        // Snap disabled, typed values now present, or both — clear
-        // stale hover so the diamond stops rendering.
+        // Snap disabled, typed values now present, or tool not tech-line
+        // — clear stale hover so the diamond stops rendering. Drop the
+        // earlier `techDraft.a` requirement so a stale hover left from
+        // a prior anchor still gets cleared.
         store.setTechCommandHover(null)
         dynamicDirty = true
       }
@@ -2083,24 +2105,65 @@ export default function CanvasStage() {
       // For rotate/move: mutate origins in place (no-undo). For copy:
       // do NOT mutate originals; drawDynamic renders ghost shapes at
       // the offset cursor position for visual feedback.
+      //
+      // 18-snap Bug C fix (May 12 2026): Move/Copy destination scans
+      // for snap targets and writes to techCommandHover. The live
+      // preview (Move) or ghost render (Copy) uses the snap-adjusted
+      // `effectiveCursor` so the operator sees the destination land
+      // exactly on the snap target. Rotate excluded — its destination
+      // is an angle, not a positional point, so snap doesn't apply.
       if (
         store.techActiveCommand
         && store.techCommandBasePoint
         && Array.isArray(store.techCommandOriginShapes)
         && store.appMode === 'TECHNICAL'
       ) {
-        if (store.techActiveCommand === 'copy') {
-          // Copy preview = ghost render in drawDynamic. Just flip dirty.
-          dynamicDirty = true
-          return
-        }
         const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
         const techZoom = techV.zoom || 1
         const cursorWorld = { x: (x - techV.panX) / techZoom, y: (y - techV.panY) / techZoom }
+        const cmd = store.techActiveCommand
+
+        // 18-snap Bug C: snap scan for Move/Copy destination.
+        let effectiveCursor = cursorWorld
+        if ((cmd === 'move' || cmd === 'copy') && store.techSnapEnabled) {
+          // Exclude origin shapes from snap candidates — don't snap to
+          // the shape you're moving (collapses geometry to pre-command
+          // state) or the shape you're copying from (causes overlap).
+          const originIds = new Set(store.techCommandOriginShapes.map((s) => s.id))
+          const target = findTechSnapTarget(
+            cursorWorld,
+            [],
+            store.technicalLayers,
+            techV,
+            7,
+            originIds,
+            store.techSnapTypes,
+          )
+          const cur = store.techCommandHover
+          const hoverChanged = (
+            (target && (!cur || cur.x !== target.x || cur.y !== target.y || cur.type !== target.type))
+            || (!target && cur)
+          )
+          if (hoverChanged) store.setTechCommandHover(target)
+          if (target) effectiveCursor = { x: target.x, y: target.y }
+        } else if (store.techCommandHover !== null) {
+          // Rotate command (no destination snap) OR snap disabled —
+          // clear any stale hover from a prior session.
+          store.setTechCommandHover(null)
+        }
+
+        if (cmd === 'copy') {
+          // Copy preview = ghost render in drawDynamic. Just flip dirty.
+          // The ghost render reads techCommandHover + cursorXY so the
+          // snap-adjusted ghost position is picked up there.
+          dynamicDirty = true
+          return
+        }
+
         const basePoint = store.techCommandBasePoint
         const origins = store.techCommandOriginShapes
         let payload
-        if (store.techActiveCommand === 'rotate') {
+        if (cmd === 'rotate') {
           const firstCentroid = techShapeCentroid(origins[0])
           if (firstCentroid) {
             const baseAngle = Math.atan2(
@@ -2108,17 +2171,17 @@ export default function CanvasStage() {
               firstCentroid.x - basePoint.x,
             )
             const cursorAngle = Math.atan2(
-              cursorWorld.y - basePoint.y,
-              cursorWorld.x - basePoint.x,
+              effectiveCursor.y - basePoint.y,
+              effectiveCursor.x - basePoint.x,
             )
             payload = { angleDegrees: ((cursorAngle - baseAngle) * 180) / Math.PI }
           }
         } else { // move
-          payload = { dx: cursorWorld.x - basePoint.x, dy: cursorWorld.y - basePoint.y }
+          payload = { dx: effectiveCursor.x - basePoint.x, dy: effectiveCursor.y - basePoint.y }
         }
         if (payload) {
           for (const orig of origins) {
-            const transformed = applyCommandTransform(store.techActiveCommand, orig, basePoint, payload)
+            const transformed = applyCommandTransform(cmd, orig, basePoint, payload)
             const selEntry = store.techSelected.find((s) => s.shapeId === orig.id)
             if (selEntry) {
               store.updateTechnicalShapeNoUndo(selEntry.layerId, orig.id, transformed)
@@ -2300,15 +2363,55 @@ export default function CanvasStage() {
             const origins = store.techCommandOriginShapes
             const preSnap = store.techCommandPreSnap
 
+            // 18-snap Bug C fix (May 12 2026): consume the snap target
+            // when present + applicable. Rotate has no destination
+            // point — its destination is an angle — so snap-adjust is
+            // only meaningful for Move/Copy. For Move, the live-preview
+            // mousemove already wrote the snap-adjusted destination
+            // into the live shape (PRIORITY 3 mousemove uses
+            // effectiveCursor for the payload), so the commit branch
+            // just confirms changes happened. For Copy, the live
+            // preview is a ghost render only (no shape mutation); the
+            // commit must therefore compute its OWN snap-adjusted
+            // delta from techCommandHover.
+            const snapHover = store.techCommandHover
+            const useSnap = !!snapHover
+              && store.techSnapEnabled
+              && (cmd === 'move' || cmd === 'copy')
+            const commitPoint = useSnap
+              ? { x: snapHover.x, y: snapHover.y }
+              : cursorWorld
+
             if (cmd === 'copy') {
               // Copy commit: compute delta, add clones via single-undo
               // store action. Originals stay at original position.
-              const delta = { dx: cursorWorld.x - basePoint.x, dy: cursorWorld.y - basePoint.y }
-              store.commitCopyCommand(origins, delta, preSnap)
+              //
+              // 18-snap Bug C fix (May 12 2026) — px → inches
+              // conversion at the call site. commitCopyCommand
+              // multiplies the delta by PX_PER_INCH internally (per
+              // the 18d-edit boundary fix that handles operator-typed
+              // INCHES from parseMoveInput). Click-driven commits are
+              // in PIXELS — divide here so the store action's
+              // multiplication round-trips losslessly. Pre-fix this
+              // path passed pixel-delta to a units-aware action,
+              // producing 24× too-far clones. Discovered while wiring
+              // snap-aware destination but applies to every click-
+              // driven Copy commit.
+              const deltaInches = {
+                dx: (commitPoint.x - basePoint.x) / PX_PER_INCH,
+                dy: (commitPoint.y - basePoint.y) / PX_PER_INCH,
+              }
+              store.commitCopyCommand(origins, deltaInches, preSnap)
             } else {
               // Rotate / Move commit: origins were already mutated via
               // live preview mousemove. Just push the captured snapshot
               // if anything changed, then clear state.
+              //
+              // 18-snap note: when snap is engaged for Move, the live
+              // preview mutation (PRIORITY 3 mousemove) already wrote
+              // the snap-adjusted destination via effectiveCursor.
+              // Nothing to re-apply here — the JSON-compare path picks
+              // up the snap-adjusted geometry naturally.
               let changed = false
               const liveLayers = useAppStore.getState().technicalLayers
               for (const orig of origins) {
@@ -2425,15 +2528,23 @@ export default function CanvasStage() {
           // from anchor). The helper makes the per-axis decision and
           // calls addTechnicalShape + setTechDraft(null).
           // 18-snap: when typed values are absent and snap is engaged,
-          // pass the hover position as cursorWorld so the commit lands
-          // exactly on the snap target. Typed values still override
-          // (commitTechLine prefers typedInches / typedAngleDegrees
-          // over cursorWorld), so snap silently no-ops in that case.
+          // pass the hover position as cursorWorld + snapMode=true so
+          // commitTechLine skips the 0.5" rounding (which would drift
+          // the endpoint off the snap target). Typed values still
+          // override (commitTechLine prefers typedInches /
+          // typedAngleDegrees over cursorWorld + snapMode), so snap
+          // silently no-ops in that case.
+          // Bug B fix (May 12 2026): snapMode flag added. Pre-fix
+          // commits were correctly receiving the snap target as
+          // cursorWorld but commitTechLine then re-rounded length to
+          // 0.5" and re-projected along the cursor angle, drifting b
+          // up to a half inch off the snap target.
           commitTechLine({
             anchor: draft.a,
             cursorWorld: { x: clickX, y: clickY },
             typedInches: draft.typedInches,
             typedAngleDegrees: draft.typedAngleDegrees,
+            snapMode: useSnap,
             addTechnicalShape: store.addTechnicalShape,
             setTechDraft: store.setTechDraft,
           })
