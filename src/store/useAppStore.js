@@ -193,6 +193,11 @@ const PERSIST_KEYS = [
   // specTable default {}. Pre-Phase-2 v2 JSON files have neither field,
   // so importJSON migrates them in memory to v3 shape before set().
   'appMode', 'technicalLayers', 'specTable',
+  // Phase 2 18-snap (May 12 2026) — Technical Drawing per-snap-type
+  // gates (endpoint + midpoint) persist alongside FM `snapTypes`.
+  // `techSnapEnabled` is intentionally NOT persisted (session-only,
+  // mirrors FM `snapEnabled`).
+  'techSnapTypes',
 ]
 // Phase 2 18b (May 10 2026) — Field Markup `mode` slice valid values.
 // Pre-18b the set also included 'TECHNICAL', a stale token left over from
@@ -302,6 +307,19 @@ const SNAP_TYPE_KEYS = ['close', 'grid', 'corner', 'midpoint', 'cline']
 const normalizeSnapTypes = (st) => {
   const out = {}
   for (const k of SNAP_TYPE_KEYS) {
+    out[k] = st && typeof st === 'object' && st[k] === false ? false : true
+  }
+  return out
+}
+
+// Phase 2 18-snap (May 12 2026) — Technical Drawing snap. Independent
+// from FM snap (different shape vocab — tech only has endpoint +
+// midpoint; FM has close/grid/corner/midpoint/cline). Defaults both
+// true; hydration accepts partial object and fills missing keys true.
+const TECH_SNAP_TYPE_KEYS = ['endpoint', 'midpoint']
+const normalizeTechSnapTypes = (st) => {
+  const out = {}
+  for (const k of TECH_SNAP_TYPE_KEYS) {
     out[k] = st && typeof st === 'object' && st[k] === false ? false : true
   }
   return out
@@ -480,6 +498,13 @@ const initialState = {
   // independent (no master cascade — toggling Snap off then on doesn't
   // reset per-type state).
   snapTypes: normalizeSnapTypes(hydrated?.snapTypes),
+  // Phase 2 18-snap (May 12 2026) — Technical Drawing snap. Fully
+  // independent from FM snap (different vocab: endpoint + midpoint
+  // instead of close/grid/corner/midpoint/cline). `techSnapEnabled`
+  // is session-only (NOT in PERSIST_KEYS) — mirrors FM snapEnabled.
+  // `techSnapTypes` IS persisted so per-type chip prefs survive reload.
+  techSnapEnabled: true,
+  techSnapTypes: normalizeTechSnapTypes(hydrated?.techSnapTypes),
   gridEnabled: false,
   // Step 10 / P12+P14 — grid spacing is operator-adjustable AND independently
   // sized on X and Y axes (rectangular grid for standing-seam panel layouts).
@@ -2025,6 +2050,20 @@ export const useAppStore = create((set, get) => {
     setSnapType: (name, enabled) => {
       if (!SNAP_TYPE_KEYS.includes(name)) return
       set((s) => ({ snapTypes: { ...s.snapTypes, [name]: !!enabled } }))
+    },
+    // Phase 2 18-snap (May 12 2026) — Technical Drawing snap toggles.
+    // Three actions mirror the FM snap pattern:
+    //   - toggleTechSnap  → flip master enable
+    //   - setTechSnap     → explicit set master enable
+    //   - setTechSnapType → flip a single per-type gate (endpoint / midpoint).
+    // Validation on the type name follows the FM pattern; unknown
+    // keys are silently rejected (no throw) so a future caller can't
+    // poison the snapTypes object with stray keys.
+    toggleTechSnap: () => set((s) => ({ techSnapEnabled: !s.techSnapEnabled })),
+    setTechSnap: (enabled) => set({ techSnapEnabled: !!enabled }),
+    setTechSnapType: (name, enabled) => {
+      if (!TECH_SNAP_TYPE_KEYS.includes(name)) return
+      set((s) => ({ techSnapTypes: { ...s.techSnapTypes, [name]: !!enabled } }))
     },
     toggleGrid: () => set((s) => ({ gridEnabled: !s.gridEnabled })),
     // P19 (May 7 2026) — grid opacity slider (0.05–0.6). Clamped via

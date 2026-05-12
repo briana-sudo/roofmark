@@ -8,6 +8,7 @@ import {
 } from '../store/viewport'
 import PhotoCropModal from './PhotoCropModal'
 import SnapMenu from './SnapMenu'
+import TechSnapMenu from './TechSnapMenu'
 
 /**
  * DrawingTools — Step 5 of Kickoff Spec §6.
@@ -76,6 +77,11 @@ export default function DrawingTools() {
   const toggleClinesVisibility = useAppStore((s) => s.toggleClinesVisibility)
   const snapEnabled = useAppStore((s) => s.snapEnabled)
   const toggleSnap = useAppStore((s) => s.toggleSnap)
+  // Phase 2 18-snap (May 12 2026) — Technical Drawing snap master toggle.
+  // Independent from FM snapEnabled. Read here so the new Technical
+  // toolbar group can drive its active-state class + onClick.
+  const techSnapEnabled = useAppStore((s) => s.techSnapEnabled)
+  const toggleTechSnap = useAppStore((s) => s.toggleTechSnap)
   const gridEnabled = useAppStore((s) => s.gridEnabled)
   const toggleGrid = useAppStore((s) => s.toggleGrid)
   // Step 10 / P12+P14 — operator-adjustable rectangular grid spacing.
@@ -502,6 +508,31 @@ export default function DrawingTools() {
           <span className="tool-name">Line</span>
         </button>
       </div>
+
+      <span className="tool-divider" aria-hidden="true" />
+
+      {/* Phase 2 18-snap (May 12 2026) — Technical Drawing snap group.
+          Master Snap button + chevron-driven TechSnapMenu (2 chips:
+          Endpoint, Midpoint). Lives entirely inside the TECHNICAL
+          render block so the controls disappear under FIELD — mode
+          isolation enforced at the JSX level so FM operators never
+          see Tech snap UI and vice versa. State is fully independent
+          from FM `snapEnabled` / `snapTypes`. */}
+      <div className="tool-group" data-tool-group="tech-snap-grid">
+        <button
+          type="button"
+          className={techSnapEnabled ? 'tool-btn snap-toggle active' : 'tool-btn snap-toggle'}
+          onClick={toggleTechSnap}
+          title={techSnapEnabled ? 'Disable snap' : 'Enable snap'}
+          aria-pressed={techSnapEnabled}
+          data-testid="btn-tech-snap"
+        >
+          <span className="tool-icon" aria-hidden="true">⊞</span>
+          <span className="tool-name">Snap</span>
+        </button>
+        <TechSnapMenu />
+      </div>
+
       <span className="tool-divider" aria-hidden="true" />
       </>
       )}

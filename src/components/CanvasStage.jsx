@@ -1281,9 +1281,23 @@ export default function CanvasStage() {
 
         // Phase 2 18d-edit — snap-target diamond. Renders during base-
         // point pick OR grip edit. Yellow = endpoint, cyan = midpoint.
+        // Phase 2 18-snap (May 12 2026) — visibility extended to the
+        // tech-line freehand draft case: once an anchor is set AND
+        // typed length+angle are both null, the line-tool snap branch
+        // populates techCommandHover and the diamond renders for it.
+        // Typed values clear the hover (else-branch in onMouseMove) so
+        // the diamond automatically vanishes when the operator types.
         if (
           state.techCommandHover
-          && ((state.techActiveCommand && !state.techCommandBasePoint) || state.techGripEdit)
+          && (
+            (state.techActiveCommand && !state.techCommandBasePoint)
+            || state.techGripEdit
+            || (
+              state.tool === 'tech-line'
+              && state.techDraft
+              && state.techDraft.a
+            )
+          )
         ) {
           const hover = state.techCommandHover
           const hx = hover.x * techZoomD + techVD.panX
@@ -1618,9 +1632,15 @@ export default function CanvasStage() {
         }
       }
 
-      // Snap indicator (Spec §8 colors + shapes)
+      // Snap indicator (Spec §8 colors + shapes).
+      // Phase 2 18-snap (May 12 2026) — appMode === 'FIELD' guard.
+      // computeSnap is already call-site-gated under FIELD (onMouseMove),
+      // but the previous frame's snapPt could still be in store when
+      // appMode flips mid-frame. The defensive guard here makes mode
+      // isolation visible in the render path, not just inferred from
+      // the engine gate.
       const snapPt = state.snapPt
-      if (snapPt) {
+      if (state.appMode === 'FIELD' && snapPt) {
         const sx = snapPt.x
         const sy = snapPt.y
         ctxDynamic.lineWidth = 1.5
@@ -1879,38 +1899,56 @@ export default function CanvasStage() {
       // Section 7.A — pass viewport + effective photo size so snap math
       // operates in canvas px regardless of pan/zoom (operator-tolerance
       // is screen-pixel based).
+      // Phase 2 18-snap (May 12 2026) — FM snap engine is now appMode-gated
+      // at the call site. Pre-18-snap, computeSnap fired every mousemove
+      // regardless of appMode and could (a) burn cycles walking FM layers
+      // under TECHNICAL and (b) paint a stray snap diamond if the FM
+      // viewport differed from TECHNICAL. The gate plus the else-branch
+      // setSnap(null) clears any stale FM snap target on mode switch.
+      // `let snapPt = null` preserves the binding for the editDrag
+      // consumer below (which only fires under FIELD anyway — editDrag
+      // is set by FM tool dispatch).
       const cwLocal = container.clientWidth
       const chLocal = container.clientHeight
       const photoSizeLocal = effectivePhotoSize(store.photoMeta, cwLocal, chLocal)
-      const snapPt = computeSnap({
-        cursorX: x, cursorY: y,
-        layers: store.layers,
-        clines: store.clines,
-        snapEnabled: store.snapEnabled,
-        // P2 (May 7 2026) — per-snap-type gates threaded into computeSnap
-        // so each of the 5 type branches can independently skip.
-        snapTypes: store.snapTypes,
-        gridEnabled: store.gridEnabled,
-        gridSize: store.gridSize,
-        snapTolerance: store.snapTolerance,
-        draft,
-        tool: store.tool,
-        clinesVisible: store.clinesVisible,
-        viewport: store.viewport,
-        photoSize: photoSizeLocal,
-        // P16 + P38 (May 8 2026) — perspective grid + grid rotation
-        // threaded so the GRID-snap branch can match the render-path
-        // transform (Option Y: perspective dominates when active).
-        perspectiveCorners: store.perspectiveCorners,
-        gridRotation: store.gridRotation,
-      })
-      // Avoid spurious store mutations when the snap result is unchanged
-      // (cursor moved a pixel but snap target stayed the same).
-      const prev = store.snapPt
-      const same = (prev && snapPt
-        && prev.x === snapPt.x && prev.y === snapPt.y && prev.type === snapPt.type)
-        || (prev === null && snapPt === null)
-      if (!same) store.setSnap(snapPt)
+      let snapPt = null
+      if (store.appMode === 'FIELD') {
+        snapPt = computeSnap({
+          cursorX: x, cursorY: y,
+          layers: store.layers,
+          clines: store.clines,
+          snapEnabled: store.snapEnabled,
+          // P2 (May 7 2026) — per-snap-type gates threaded into computeSnap
+          // so each of the 5 type branches can independently skip.
+          snapTypes: store.snapTypes,
+          gridEnabled: store.gridEnabled,
+          gridSize: store.gridSize,
+          snapTolerance: store.snapTolerance,
+          draft,
+          tool: store.tool,
+          clinesVisible: store.clinesVisible,
+          viewport: store.viewport,
+          photoSize: photoSizeLocal,
+          // P16 + P38 (May 8 2026) — perspective grid + grid rotation
+          // threaded so the GRID-snap branch can match the render-path
+          // transform (Option Y: perspective dominates when active).
+          perspectiveCorners: store.perspectiveCorners,
+          gridRotation: store.gridRotation,
+        })
+        // Avoid spurious store mutations when the snap result is unchanged
+        // (cursor moved a pixel but snap target stayed the same).
+        const prev = store.snapPt
+        const same = (prev && snapPt
+          && prev.x === snapPt.x && prev.y === snapPt.y && prev.type === snapPt.type)
+          || (prev === null && snapPt === null)
+        if (!same) store.setSnap(snapPt)
+      } else if (store.snapPt !== null) {
+        // Under TECHNICAL: FM snap engine doesn't fire. Clear any stale
+        // snapPt left over from a prior FIELD session so the indicator
+        // render (which is also appMode-gated as a defensive belt below)
+        // can't paint a ghost target.
+        store.setSnap(null)
+      }
 
       // Spec §9 — edit-mode handle drag. Section 7.A — viewport-aware
       // movePoint / moveBody convert canvas-px deltas to photo-normalized
@@ -1926,6 +1964,70 @@ export default function CanvasStage() {
       //   3. Active command with base point set → live preview
       //      (rotate or move: mutate origins; copy: drawDynamic ghost
       //      handles preview, no live mutation here)
+
+      // Phase 2 18-snap (May 12 2026) — Tech-line tool snap scan during
+      // freehand draft. Fires once the operator has anchored the first
+      // endpoint (techDraft.a set) but only if BOTH typed length AND
+      // typed angle are null (pure freehand mode). Typed values bypass
+      // snap entirely — operator specified exact geometry, snap must
+      // not silently override their intent.
+      //
+      // Sits before the PRIORITY 1/2/3 chain because line-tool snap is
+      // its own modality (no active command, no grip edit) — the chain
+      // below would never match anyway. Does NOT return: the line tool's
+      // rubber-band render (drawDynamic line 1173 block) still needs to
+      // run downstream this same mousemove.
+      //
+      // Else-branch: when snap goes off OR typed values appear after a
+      // previous snap pass set techCommandHover, clear the hover so the
+      // diamond doesn't linger past its valid window.
+      if (
+        store.appMode === 'TECHNICAL'
+        && store.tool === 'tech-line'
+        && store.techDraft
+        && store.techDraft.a
+        && store.techDraft.typedInches === null
+        && store.techDraft.typedAngleDegrees === null
+        && store.techSnapEnabled
+      ) {
+        const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+        const techZoom = techV.zoom || 1
+        const cursorWorld = {
+          x: (x - techV.panX) / techZoom,
+          y: (y - techV.panY) / techZoom,
+        }
+        // Line tool has no priority-1 context shape set (it's not a
+        // command-pattern operation). Pass [] for contextShapes so all
+        // visible technical lines feed priority 3 (endpoints) + the
+        // per-type filter is consulted via store.techSnapTypes.
+        const target = findTechSnapTarget(
+          cursorWorld,
+          [],
+          store.technicalLayers,
+          techV,
+          7,
+          null,
+          store.techSnapTypes,
+        )
+        const cur = store.techCommandHover
+        const hoverChanged = (
+          (target && (!cur || cur.x !== target.x || cur.y !== target.y || cur.type !== target.type))
+          || (!target && cur)
+        )
+        if (hoverChanged) store.setTechCommandHover(target)
+        dynamicDirty = true
+        // NO return — rubber-band render must continue.
+      } else if (
+        store.appMode === 'TECHNICAL'
+        && store.tool === 'tech-line'
+        && store.techDraft && store.techDraft.a
+        && store.techCommandHover !== null
+      ) {
+        // Snap disabled, typed values now present, or both — clear
+        // stale hover so the diamond stops rendering.
+        store.setTechCommandHover(null)
+        dynamicDirty = true
+      }
 
       // PRIORITY 1: Grip edit live preview.
       if (store.techGripEdit && store.appMode === 'TECHNICAL') {
@@ -2285,6 +2387,16 @@ export default function CanvasStage() {
           const worldX = (raw.x - techV.panX) / techZoom
           const worldY = (raw.y - techV.panY) / techZoom
           const draft = store.techDraft
+          // Phase 2 18-snap (May 12 2026) — consume snap target when
+          // present. The onMouseMove tech-line snap branch wrote the
+          // candidate to store.techCommandHover already; use it for
+          // the click point when snap is enabled. Typed-length / typed-
+          // angle clicks skip this by design (the snap branch above
+          // doesn't run when typed values are present).
+          const snapHover = store.techCommandHover
+          const useSnap = !!snapHover && store.techSnapEnabled
+          const clickX = useSnap ? snapHover.x : worldX
+          const clickY = useSnap ? snapHover.y : worldY
           if (!draft || !draft.a) {
             // First click — capture anchor. 18c docked pivot: the panel
             // is already mounted (whenever tool === 'tech-line'), so the
@@ -2292,11 +2404,16 @@ export default function CanvasStage() {
             // sitting in techDraft.typedInches / typedAngleDegrees. Spread
             // any existing draft to preserve those pre-fills; only the
             // anchor is brand new at this point.
+            // 18-snap: anchor consumes hover when snap is active.
             const cur = draft || { typedInches: null, typedAngleDegrees: null }
             store.setTechDraft({
               ...cur,
-              a: { x: worldX, y: worldY },
+              a: { x: clickX, y: clickY },
             })
+            // Clear the hover so the second click starts a fresh snap
+            // pass (next mousemove will repopulate techCommandHover for
+            // the second endpoint, independent of the anchor pick).
+            if (useSnap) store.setTechCommandHover(null)
             dynamicDirty = true
             return
           }
@@ -2307,14 +2424,21 @@ export default function CanvasStage() {
           // click distance rounded to 0.5", angle = cursor direction
           // from anchor). The helper makes the per-axis decision and
           // calls addTechnicalShape + setTechDraft(null).
+          // 18-snap: when typed values are absent and snap is engaged,
+          // pass the hover position as cursorWorld so the commit lands
+          // exactly on the snap target. Typed values still override
+          // (commitTechLine prefers typedInches / typedAngleDegrees
+          // over cursorWorld), so snap silently no-ops in that case.
           commitTechLine({
             anchor: draft.a,
-            cursorWorld: { x: worldX, y: worldY },
+            cursorWorld: { x: clickX, y: clickY },
             typedInches: draft.typedInches,
             typedAngleDegrees: draft.typedAngleDegrees,
             addTechnicalShape: store.addTechnicalShape,
             setTechDraft: store.setTechDraft,
           })
+          // Clear hover so the diamond doesn't linger after commit.
+          if (useSnap) store.setTechCommandHover(null)
           dynamicDirty = true
           return
         }

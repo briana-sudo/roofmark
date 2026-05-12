@@ -215,9 +215,21 @@ export function resolveTechPivot(techPivot, selectedShapes) {
  *                                        should be SKIPPED entirely
  *                                        (grip edit excludes its own
  *                                        shape's other endpoint)
+ * @param {{endpoint: boolean, midpoint: boolean}} [snapTypes] - 18-snap
+ *                                        (May 12 2026) per-type filter.
+ *                                        Defaults to both true so the
+ *                                        3 existing call sites (command
+ *                                        base-point pick, grip-edit ×2)
+ *                                        continue to behave unchanged
+ *                                        without passing the new arg.
+ *                                        When endpoint=false: P1 + P3
+ *                                        endpoint pushes skipped. When
+ *                                        midpoint=false: P2 midpoint
+ *                                        pushes skipped. Both false →
+ *                                        no candidates → null.
  * @returns {{x, y, type: 'endpoint' | 'midpoint'} | null}
  */
-export function findTechSnapTarget(cursorWorld, contextShapes, allTechnicalLayers, techViewport, tolPx, excludeShapeIds) {
+export function findTechSnapTarget(cursorWorld, contextShapes, allTechnicalLayers, techViewport, tolPx, excludeShapeIds, snapTypes) {
   const tol = typeof tolPx === 'number' ? tolPx : 7
   const zoom = (techViewport && techViewport.zoom) || 1
   const panX = (techViewport && techViewport.panX) || 0
@@ -230,32 +242,42 @@ export function findTechSnapTarget(cursorWorld, contextShapes, allTechnicalLayer
     ? excludeShapeIds
     : new Set(Array.isArray(excludeShapeIds) ? excludeShapeIds : [])
 
+  // Phase 2 18-snap — per-type enable flags. Undefined / null defaults
+  // both to true so the 3 existing call sites stay backward-compatible.
+  // Only an explicit `false` disables a type.
+  const allowEndpoint = !(snapTypes && snapTypes.endpoint === false)
+  const allowMidpoint = !(snapTypes && snapTypes.midpoint === false)
+
   const candidates = []
   const ctx = Array.isArray(contextShapes) ? contextShapes : []
 
   // Priority 1: context shape endpoints (excludes any in `exclude`).
-  for (const sh of ctx) {
-    if (!sh || sh.type !== 'line' || !sh.a || !sh.b) continue
-    if (exclude.has(sh.id)) continue
-    candidates.push({ worldX: sh.a.x, worldY: sh.a.y, type: 'endpoint', priority: 1 })
-    candidates.push({ worldX: sh.b.x, worldY: sh.b.y, type: 'endpoint', priority: 1 })
+  if (allowEndpoint) {
+    for (const sh of ctx) {
+      if (!sh || sh.type !== 'line' || !sh.a || !sh.b) continue
+      if (exclude.has(sh.id)) continue
+      candidates.push({ worldX: sh.a.x, worldY: sh.a.y, type: 'endpoint', priority: 1 })
+      candidates.push({ worldX: sh.b.x, worldY: sh.b.y, type: 'endpoint', priority: 1 })
+    }
   }
 
   // Priority 2: context shape midpoints (excludes any in `exclude`).
-  for (const sh of ctx) {
-    if (!sh || sh.type !== 'line' || !sh.a || !sh.b) continue
-    if (exclude.has(sh.id)) continue
-    candidates.push({
-      worldX: (sh.a.x + sh.b.x) / 2,
-      worldY: (sh.a.y + sh.b.y) / 2,
-      type: 'midpoint',
-      priority: 2,
-    })
+  if (allowMidpoint) {
+    for (const sh of ctx) {
+      if (!sh || sh.type !== 'line' || !sh.a || !sh.b) continue
+      if (exclude.has(sh.id)) continue
+      candidates.push({
+        worldX: (sh.a.x + sh.b.x) / 2,
+        worldY: (sh.a.y + sh.b.y) / 2,
+        type: 'midpoint',
+        priority: 2,
+      })
+    }
   }
 
   // Priority 3: non-context, non-excluded visible line endpoints.
   const contextIds = new Set(ctx.map((s) => s && s.id).filter(Boolean))
-  if (Array.isArray(allTechnicalLayers)) {
+  if (allowEndpoint && Array.isArray(allTechnicalLayers)) {
     for (const layer of allTechnicalLayers) {
       if (!layer || layer.visible === false) continue
       for (const sh of layer.shapes || []) {
