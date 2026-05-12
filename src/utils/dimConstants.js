@@ -21,9 +21,16 @@
 export const DIMEXO = 3              // extension line offset from origin (1/8" = 3 px)
 export const DIMEXE = 3              // extension line extends beyond dim line (1/8" = 3 px)
 export const DIMASZ = 6              // arrowhead tick length (1/4" = 6 px)
-export const DIMTXT = 10             // text height in px
+// Phase 2 18e style bump (May 12 2026) — DIMTXT raised from 10 → 14
+// (40% larger, readable at typical zoom). DIM_COLOR bumped from
+// '#1f2937' dark-gray (matched line color, blended visually) → KCC
+// orange '#e8531a' (matches selected-line + selected-dim accent —
+// operator-friendly "attention" color). Selected-line + dim now
+// share orange; future operator-adjustable style (18e.3a) can
+// re-separate if real-job use demands it.
+export const DIMTXT = 14             // text height in px
 export const DIMGAP = 2              // gap between text and dim line
-export const DIM_COLOR = '#1f2937'   // dark gray, matches existing tech-line color
+export const DIM_COLOR = '#e8531a'   // KCC orange, distinct from unselected line gray
 export const DIM_PRECISION = 8       // 1/8" precision (fractional eighths)
 export const DIM_PRECISION_INCHES = 1 / 8
 

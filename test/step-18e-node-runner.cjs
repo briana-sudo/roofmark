@@ -57,9 +57,9 @@ const dimGeomPreamble = `
   const DIMEXO = 3
   const DIMEXE = 3
   const DIMASZ = 6
-  const DIMTXT = 10
+  const DIMTXT = 14
   const DIMGAP = 2
-  const DIM_COLOR = '#1f2937'
+  const DIM_COLOR = '#e8531a'
   // Inline formatArchitecturalLength (compact mirror of the production
   // module). Only the hit-test code path consumes this — geometry tests
   // don't exercise text formatting via dimGeometry, so the format result
@@ -1761,6 +1761,33 @@ function simulateHandleDim(store, commandKey, wf1DimType) {
     /handleDimAligned/.test(sliceBetween))
   pass('90b. handleDimLinear button outside selectionHasDimension gate',
     /handleDimLinear/.test(sliceBetween))
+}
+
+// ============================================================================
+// BLOCK L — Phase 2 18e style bump (May 12 2026) — DIM_COLOR + DIMTXT
+// constants. Operator-reported readability fix.
+//
+// Source-grep tests on src/utils/dimConstants.js so the test catches a
+// constant drift even if future code change forgets to update the test
+// preamble. Production values are the source of truth; this block
+// pins both constants to the spec-bumped values.
+// ============================================================================
+{
+  const dimConstantsSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'utils', 'dimConstants.js'),
+    'utf-8',
+  )
+  // Match `export const DIM_COLOR = '#e8531a'` (any whitespace).
+  const colorMatch = dimConstantsSrc.match(
+    /export\s+const\s+DIM_COLOR\s*=\s*'([^']+)'/
+  )
+  const textMatch = dimConstantsSrc.match(
+    /export\s+const\s+DIMTXT\s*=\s*(\d+)/
+  )
+  pass('91a. DIM_COLOR === "#e8531a" (KCC orange)',
+    colorMatch && colorMatch[1] === '#e8531a')
+  pass('91b. DIMTXT === 14 (style-bump readable size)',
+    textMatch && Number(textMatch[1]) === 14)
 }
 
 // ============================================================================
