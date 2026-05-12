@@ -22,6 +22,7 @@
 // ============================================================================
 
 import { SPEC_TABLE_FIELDS } from './specTableValidation'
+import { formatArchitecturalLength } from './formatArchitecturalLength'
 
 /**
  * Convert a RoofMark technicalLayers shape to the v1.1 shape contract.
@@ -76,21 +77,28 @@ function dimensionFromRoofMarkDim(dim) {
   const A = dim.pointA && { x: dim.pointA.x, y: dim.pointA.y }
   const B = dim.pointB && { x: dim.pointB.x, y: dim.pointB.y }
   if (!A || !B) return null
-  // v1.1 expects a `value` string for the dim label. RoofMark renders
-  // formatArchitecturalLength at canvas-draw time; for the PDF payload
-  // we send the computed length string so v1.1's render path uses it
-  // verbatim (no recompute on the Python side). Resolved length math
-  // mirrors 18e dimGeometry.computeDimensionLengthInches.
+  // v1.1 expects a `value` string for the dim label. v1.1 honors whatever
+  // string we send — empty string skips the label render entirely (the
+  // dim lines + arrows still render but the operator-visible inches text
+  // is gone). Resolved length math mirrors 18e
+  // dimGeometry.computeDimensionLengthInches.
   let pxDist
   if (dim.orientation === 'horizontal') pxDist = Math.abs(B.x - A.x)
   else if (dim.orientation === 'vertical') pxDist = Math.abs(B.y - A.y)
   else pxDist = Math.hypot(B.x - A.x, B.y - A.y)
-  // Format: leave to v1.1's display layer (we don't import the architectural
-  // formatter here to avoid coupling). v1.1 reads the `value` field as a
-  // string — pass the raw pixel distance with units inferred. Operator can
-  // override at the RoofMark canvas in a future 18i amendment.
-  // For now: empty string lets v1.1 fall through to its default behavior.
-  const value = '' // v1.1 skips the label render when value is empty
+  // 18h Bug 3 fix (May 12 2026): compute value via
+  // formatArchitecturalLength to match the SVG preview's dimLabel()
+  // behavior. Pre-fix shipped value='' which silently dropped every dim
+  // label in the PDF (operator-perceived as "dims missing"). Honor
+  // textOverride when the operator sets a non-empty override (preserves
+  // the 18e contract for the future override editor); empty-string
+  // textOverride is treated as not-set so computed value wins.
+  const override = typeof dim.textOverride === 'string'
+    ? dim.textOverride.trim()
+    : ''
+  const value = override !== ''
+    ? override
+    : (formatArchitecturalLength(pxDist / 24.0) || '')
   return { x1: A.x, y1: A.y, x2: B.x, y2: B.y, value, pxDist }
 }
 

@@ -86,8 +86,20 @@ const {
   ['SPEC_TABLE_FIELDS', 'emptySpecTable'],
 )
 
+// formatArchitecturalLength — 18h Bug 3 fix (May 12 2026) imports this
+// in specTableJSON.dimensionFromRoofMarkDim so the dim value emits a
+// real label instead of empty string. Load it first so the
+// specTableJSON shim can stub-inject the function reference.
+const {
+  formatArchitecturalLength,
+} = loadModule(
+  'src/utils/formatArchitecturalLength.js',
+  ['formatArchitecturalLength'],
+)
+
 const specTableJSONPreamble = `
   const SPEC_TABLE_FIELDS = ${JSON.stringify(SPEC_TABLE_FIELDS)}
+  ${formatArchitecturalLength.toString()}
 `
 const {
   buildShopDrawingPayload, slugify, shopDrawingFilename,
@@ -1108,6 +1120,76 @@ pass('62. I.3 deploy-state — live bundle __BUILD_SHA__ matches local HEAD',
     !('id' in p.layers[0].shapes[0])
     && !('lengthSource' in p.layers[0].shapes[0])
     && !('angleSource' in p.layers[0].shapes[0]))
+}
+
+// 65. Bug 3 regression — dim value must carry the formatted
+// architectural length, not an empty string. Pre-fix, every dim
+// emitted value='' which silently dropped the amber label in the v1.1
+// PDF (operator-perceived as "dims missing"). textOverride wins when
+// non-empty (preserves the 18e contract for the future override
+// editor); empty-string textOverride is treated as not-set so the
+// computed value still wins.
+{
+  const mkDim = (pointA, pointB, orientation, textOverride) => ({
+    id: 'tech-shape-1',
+    type: 'dimension',
+    dimType: orientation === 'aligned' ? 'aligned' : 'linear',
+    orientation,
+    pointA: { mode: 'free', x: pointA.x, y: pointA.y, shapeId: null, pointKey: null },
+    pointB: { mode: 'free', x: pointB.x, y: pointB.y, shapeId: null, pointKey: null },
+    offset: 24,
+    textOverride,
+  })
+  const mkStoreFromDim = (dim) => mkStoreState({
+    technicalLayers: [{
+      id: 'tech-layer-1', visible: true, name: 'Layer 1',
+      color: '#1A2F4A', order: 0,
+      shapes: [dim],
+    }],
+  })
+
+  // Coordinate convention: v1.1 internalScale is 24 px per inch, so
+  // 288 px = 12 inches = 1'-0" and 228 px = 9.5 inches = 9 1/2".
+
+  // J.65a — horizontal 288px dim (= 1 foot) → "1'-0\""
+  {
+    const store = mkStoreFromDim(
+      mkDim({ x: 0, y: 0 }, { x: 288, y: 0 }, 'horizontal', null)
+    )
+    const p = buildShopDrawingPayload(store, {})
+    pass('65a. dim value is formatted architectural length not empty string',
+      p.layers[0].dimensions[0].value === "1'-0\"")
+  }
+
+  // J.65b — vertical 228px dim (= 9.5 inches) → "9 1/2\""
+  {
+    const store = mkStoreFromDim(
+      mkDim({ x: 0, y: 0 }, { x: 0, y: 228 }, 'vertical', null)
+    )
+    const p = buildShopDrawingPayload(store, {})
+    pass('65b. dim value uses formatted length for vertical dims',
+      p.layers[0].dimensions[0].value === '9 1/2"')
+  }
+
+  // J.65c — textOverride wins when set
+  {
+    const store = mkStoreFromDim(
+      mkDim({ x: 0, y: 0 }, { x: 288, y: 0 }, 'horizontal', 'CUSTOM')
+    )
+    const p = buildShopDrawingPayload(store, {})
+    pass('65c. dim value honors textOverride when set',
+      p.layers[0].dimensions[0].value === 'CUSTOM')
+  }
+
+  // J.65d — empty-string textOverride is treated as not-set
+  {
+    const store = mkStoreFromDim(
+      mkDim({ x: 0, y: 0 }, { x: 288, y: 0 }, 'horizontal', '')
+    )
+    const p = buildShopDrawingPayload(store, {})
+    pass('65d. dim value falls back to computed when textOverride is empty string',
+      p.layers[0].dimensions[0].value === "1'-0\"")
+  }
 }
 
 // 64. Bug 2 regression — PDF_BETA must include both Anthropic betas.
