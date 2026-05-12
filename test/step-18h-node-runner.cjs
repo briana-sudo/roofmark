@@ -229,14 +229,11 @@ function mkStoreState(overrides) {
   pass('6b. Layer.visible stripped', !('visible' in p.layers[0]))
   pass('6c. Layer.name preserved', p.layers[0].name === 'Layer 1')
   pass('6d. Layer.color preserved', p.layers[0].color === '#1A2F4A')
-  // Note: RoofMark stores lines with a/b — the stripShape function only
-  // copies `pts` arrays. So lines without a pts array drop their geometry.
-  // 18h scope: line shapes from CanvasStage tech-line tool always have pts.
-  // (Our test fixture uses a/b which is RoofMark's old convention; new
-  // techLineCommit writes shapes with `a` and `b` directly. The stripper
-  // covers poly/tri/rect/circ which use pts/cx-cy-r explicitly. Shapes
-  // without recognized geometry contribute no points but the layer still
-  // emits.)
+  // 18h Bug 1 fix (May 12 2026): stripShape now bridges the canonical
+  // RoofMark tech-line {a, b} → v1.1 pts[] form, so the {a,b} line in
+  // the fixture above DOES survive with a 2-point pts array. Block J
+  // below exercises the bridge in isolation with a commitTechLine-shaped
+  // fixture.
 }
 
 // 7. Invisible layers are filtered out.
@@ -1062,6 +1059,56 @@ if (SKIP_DEPLOY) {
 }
 pass('62. I.3 deploy-state — live bundle __BUILD_SHA__ matches local HEAD',
   deployStateOk, { detail: deployStateDetail })
+
+// ============================================================================
+// BLOCK J — Operator-flow regressions (63-64)
+// ============================================================================
+// Bug-class tests for issues discovered during live operator integration
+// (May 12 2026). Each test maps to a specific operator-observable failure
+// the source-grep + synthetic-fixture tests didn't catch.
+
+// 63. Bug 1 regression — RoofMark stores tech-lines as {type:'line',
+// a:{x,y}, b:{x,y}, lengthInches, lengthSource, angleSource} per
+// techLineCommit.js:132-139. specTableJSON.stripShape must bridge that
+// to the v1.1 pts:[a, b] form or the SVG renderer + Python script both
+// silently drop the geometry. Operator-visible symptom: preview shows
+// dimensions only, no shape lines.
+{
+  const techLineShape = {
+    id: 'tech-shape-1',
+    type: 'line',
+    a: { x: 100, y: 200 },
+    b: { x: 124, y: 200 },
+    lengthInches: 1.0,
+    lengthSource: 'freehand',
+    angleSource: 'freehand',
+  }
+  const store = mkStoreState({
+    technicalLayers: [{
+      id: 'tech-layer-1', visible: true, name: 'Layer 1',
+      color: '#1A2F4A', order: 0,
+      shapes: [techLineShape],
+    }],
+  })
+  const p = buildShopDrawingPayload(store, {})
+  pass('63a. tech-line {a, b} input produces v1.1-compatible pts array',
+    Array.isArray(p.layers[0].shapes[0].pts)
+    && p.layers[0].shapes[0].pts.length === 2)
+  pass('63b. bridged pts[0] carries numeric x/y from shape.a',
+    typeof p.layers[0].shapes[0].pts[0].x === 'number'
+    && typeof p.layers[0].shapes[0].pts[0].y === 'number'
+    && p.layers[0].shapes[0].pts[0].x === 100
+    && p.layers[0].shapes[0].pts[0].y === 200)
+  pass('63c. bridged pts[1] carries numeric x/y from shape.b',
+    typeof p.layers[0].shapes[0].pts[1].x === 'number'
+    && typeof p.layers[0].shapes[0].pts[1].y === 'number'
+    && p.layers[0].shapes[0].pts[1].x === 124
+    && p.layers[0].shapes[0].pts[1].y === 200)
+  pass('63d. internal fields (id, lengthSource) stripped from v1.1 output',
+    !('id' in p.layers[0].shapes[0])
+    && !('lengthSource' in p.layers[0].shapes[0])
+    && !('angleSource' in p.layers[0].shapes[0]))
+}
 
 // ============================================================================
 // SUMMARY

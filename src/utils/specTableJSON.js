@@ -31,8 +31,23 @@ import { SPEC_TABLE_FIELDS } from './specTableValidation'
 function stripShape(shape) {
   if (!shape) return null
   const out = { type: shape.type }
-  // Geometry by type
-  if (shape.type === 'circ') {
+  // Geometry by type.
+  //
+  // 18h Bug 1 bridge (May 12 2026): RoofMark's Technical Drawing line
+  // tool (techLineCommit.js) stores lines as {type:'line', a:{x,y},
+  // b:{x,y}, ...}. The v1.1 Python contract + the SVG preview renderer
+  // both expect pts:[{x,y},{x,y}] for line shapes. Bridge a/b → pts
+  // here so the rest of the pipeline (renderer + Python) sees the
+  // canonical pts form. Future tech-rect / tech-arc / tech-circ shape
+  // primitives shipped in 18i+ will need similar bridges if they don't
+  // store pts natively.
+  if (shape.type === 'line' && shape.a && shape.b
+    && typeof shape.a.x === 'number' && typeof shape.b.x === 'number') {
+    out.pts = [
+      { x: shape.a.x, y: shape.a.y },
+      { x: shape.b.x, y: shape.b.y },
+    ]
+  } else if (shape.type === 'circ') {
     if (typeof shape.cx === 'number') out.cx = shape.cx
     if (typeof shape.cy === 'number') out.cy = shape.cy
     if (typeof shape.r === 'number') out.r = shape.r
