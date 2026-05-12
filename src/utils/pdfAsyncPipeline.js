@@ -30,10 +30,18 @@ import {
 export const FF5B_START = '# <<FF5B_TEMPLATE_START>>'
 export const FF5B_END   = '# <<FF5B_TEMPLATE_END>>'
 
-// Anthropic Messages API config
+// Anthropic Messages API config.
+//
+// 18h Bug 2 fix (May 12 2026): PDF_BETA must include BOTH betas. The
+// proxy's claude-async-background.js forwards the client's anthropic-
+// beta header verbatim on the /v1/files/{id}/content retrieval call,
+// and Anthropic's Files API endpoints require files-api-2025-04-14.
+// Without that beta, file retrieval 404s even though the sandbox
+// produced a valid file_id. Shingle-roof-condition's working pipeline
+// (index.html:1095) sends both betas; RoofMark matches.
 export const PDF_MODEL = 'claude-sonnet-4-20250514'
 export const PDF_MAX_TOKENS = 8000
-export const PDF_BETA = 'code-execution-2025-08-25'
+export const PDF_BETA = 'code-execution-2025-08-25,files-api-2025-04-14'
 
 // Poll cadence per shingle-roof-condition precedent
 export const POLL_BASE_MS = 4000

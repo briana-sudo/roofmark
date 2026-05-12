@@ -1110,6 +1110,33 @@ pass('62. I.3 deploy-state — live bundle __BUILD_SHA__ matches local HEAD',
     && !('angleSource' in p.layers[0].shapes[0]))
 }
 
+// 64. Bug 2 regression — PDF_BETA must include both Anthropic betas.
+// Source-grep against pdfAsyncPipeline.js so a future drift back to
+// single-beta is caught at test time, not at the operator's PDF retry.
+// Anthropic's /v1/files/{id}/content endpoint requires files-api-
+// 2025-04-14; the proxy forwards the client beta verbatim on that
+// retrieval call. Single-beta → 404 even though the sandbox produced
+// a valid file_id.
+{
+  const pipelineSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'utils', 'pdfAsyncPipeline.js'),
+    'utf-8',
+  )
+  const pdfBetaMatch = pipelineSrc.match(/export\s+const\s+PDF_BETA\s*=\s*['"]([^'"]+)['"]/)
+  pass('64a. PDF_BETA declaration present in pdfAsyncPipeline.js',
+    !!pdfBetaMatch)
+  if (pdfBetaMatch) {
+    const betaStr = pdfBetaMatch[1]
+    pass('64b. PDF_BETA includes code-execution-2025-08-25',
+      betaStr.includes('code-execution-2025-08-25'))
+    pass('64c. PDF_BETA includes files-api-2025-04-14 (Bug 2 regression)',
+      betaStr.includes('files-api-2025-04-14'))
+  } else {
+    pass('64b. PDF_BETA includes code-execution-2025-08-25', false)
+    pass('64c. PDF_BETA includes files-api-2025-04-14 (Bug 2 regression)', false)
+  }
+}
+
 // ============================================================================
 // SUMMARY
 // ============================================================================
