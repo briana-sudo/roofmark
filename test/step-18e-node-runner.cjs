@@ -95,10 +95,17 @@ const dimGeomPreamble = `
     return sign + feet + "'-" + inchPart
   }
 `
+// Phase 2 18e-dim-split (May 12 2026) — computeDimensionOrientation DELETED
+// per spec v1.2. Replaced by computeAlignedOrientation +
+// computeLinearOrientation. pickLinearOrientationFromLine is the Workflow 1
+// Linear helper. isDimensionCommand centralizes the dim-command predicate.
 const {
   resolveDimensionPoints,
   identifySnapSourceShape,
-  computeDimensionOrientation,
+  computeAlignedOrientation,
+  computeLinearOrientation,
+  pickLinearOrientationFromLine,
+  isDimensionCommand,
   computeDimensionLengthInches,
   computeDimensionGeometry,
   hitTestDimension,
@@ -106,7 +113,9 @@ const {
 } = loadModule(
   'src/utils/dimGeometry.js',
   [
-    'resolveDimensionPoints', 'identifySnapSourceShape', 'computeDimensionOrientation',
+    'resolveDimensionPoints', 'identifySnapSourceShape',
+    'computeAlignedOrientation', 'computeLinearOrientation',
+    'pickLinearOrientationFromLine', 'isDimensionCommand',
     'computeDimensionLengthInches', 'computeDimensionGeometry', 'hitTestDimension',
     'distanceFromSegment2',
   ],
@@ -273,125 +282,133 @@ pass('18c. formatArchitecturalLength(Infinity) === null',
 // ============================================================================
 // BLOCK C — Orientation algorithm (19–28)
 //
-// Per spec §"Orientation algorithm". Tests cover the full decision tree:
-// diagonal baselines → always aligned; horizontal baselines → linear-H
-// when cursor is perp-dominant, else aligned; vertical mirror.
-// Boundary case at exactly 22.5° verified.
+// Phase 2 18e-dim-split (May 12 2026) — spec v1.2. The original
+// computeDimensionOrientation collapsed DIMLINEAR + DIMALIGNED under a
+// single drag-to-discover gate. Operator-reported friction → split into
+// two explicit pure functions:
+//   - computeAlignedOrientation (Workflow 2 Aligned): always aligned,
+//     offset only, no decision tree.
+//   - computeLinearOrientation (Workflow 2 Linear): world-axis-relative
+//     cursor side picks H/V. No aligned outcome.
+// Block C is split into C1 + C2.
 // ============================================================================
 
-// 19. Horizontal baseline (0°) + cursor above midpoint → LINEAR-HORIZONTAL.
+// ----- BLOCK C1 — computeAlignedOrientation (19–21) ------------------------
+//
+// Drag chooses offset + side only. Orientation is always 'aligned' (no
+// orientation field on the result). Offset is signed perpendicular
+// projection of cursor from baseline midpoint.
+
+// 19. Horizontal baseline + cursor below → positive offset.
 {
   const A = { x: 0, y: 0 }, B = { x: 100, y: 0 }
-  // Cursor at (50, 50): perpComponent = 50 (down in canvas Y), alongComponent = 0.
-  // perp dominates → linear-horizontal.
-  const result = computeDimensionOrientation(A, B, { x: 50, y: 50 })
-  pass('19a. Horizontal baseline + cursor below → dimType linear',
-    result.dimType === 'linear')
-  pass('19b. → orientation horizontal',
-    result.orientation === 'horizontal')
-  pass('19c. → offset = perpComponent (positive Y in canvas convention)',
+  // perpUnit for horizontal baseline is (0, 1); cursor (50, 50) →
+  // perpComponent = 50 (positive).
+  const result = computeAlignedOrientation(A, B, { x: 50, y: 50 })
+  pass('19a. Aligned: cursor below horizontal baseline → positive offset',
     result.offset === 50)
+  pass('19b. Aligned: result has no orientation field (always aligned)',
+    !('orientation' in result))
 }
 
-// 20. Horizontal baseline + cursor above → LINEAR-HORIZONTAL, negative offset.
+// 20. Horizontal baseline + cursor above → negative offset (mirror sign).
 {
   const A = { x: 0, y: 0 }, B = { x: 100, y: 0 }
-  const result = computeDimensionOrientation(A, B, { x: 50, y: -50 })
-  pass('20a. Horizontal baseline + cursor above → linear-horizontal',
-    result.dimType === 'linear' && result.orientation === 'horizontal')
-  pass('20b. → negative offset (above baseline)',
-    result.offset === -50)
+  const above = computeAlignedOrientation(A, B, { x: 50, y: -50 })
+  const below = computeAlignedOrientation(A, B, { x: 50, y: 50 })
+  pass('20a. Aligned: cursor above → negative offset', above.offset === -50)
+  pass('20b. Aligned: opposite sides mirror sign',
+    Math.sign(above.offset) === -Math.sign(below.offset)
+    && Math.abs(above.offset) === Math.abs(below.offset))
 }
 
-// 21. Horizontal baseline + cursor far right along baseline → ALIGNED.
-{
-  const A = { x: 0, y: 0 }, B = { x: 100, y: 0 }
-  // Cursor at (200, 5): alongComponent = 150, perpComponent = 5.
-  // along dominates → aligned.
-  const result = computeDimensionOrientation(A, B, { x: 200, y: 5 })
-  pass('21a. Horizontal baseline + along-dominant cursor → aligned',
-    result.dimType === 'aligned' && result.orientation === 'aligned')
-  pass('21b. → offset still perpComponent',
-    result.offset === 5)
-}
-
-// 22. Vertical baseline + cursor to the right → LINEAR-VERTICAL.
-{
-  const A = { x: 0, y: 0 }, B = { x: 0, y: 100 }
-  // Cursor at (50, 50): perpUnit is (-1, 0) (90° CCW from (0,1)).
-  // perpComponent = (50)*(-1) + (50)*(0) = -50.
-  // alongComponent = (50)*(0) + (50)*(1) = 50.
-  // |perp|=50, |along|=50 — NOT perp-dominant (equal). With strict > we
-  // get aligned at the boundary. Use cursor clearly off to one side.
-  const result = computeDimensionOrientation(A, B, { x: 80, y: 50 })
-  pass('22a. Vertical baseline + cursor far right → linear-vertical',
-    result.dimType === 'linear' && result.orientation === 'vertical')
-}
-
-// 23. Vertical baseline + cursor above along axis → ALIGNED.
-{
-  const A = { x: 0, y: 0 }, B = { x: 0, y: 100 }
-  // Cursor at (5, 200): along baseline by 150, perp by -5. along dominates.
-  const result = computeDimensionOrientation(A, B, { x: 5, y: 200 })
-  pass('23. Vertical baseline + along-dominant cursor → aligned',
-    result.dimType === 'aligned' && result.orientation === 'aligned')
-}
-
-// 24. Diagonal baseline (45°) + cursor on either side → ALIGNED.
+// 21. Diagonal baseline (45°) + cursor on either side → aligned with
+//     signed offset proportional to perpendicular distance from baseline.
 {
   const A = { x: 0, y: 0 }, B = { x: 100, y: 100 }
-  const upperLeft = computeDimensionOrientation(A, B, { x: 0, y: 80 })
-  const lowerRight = computeDimensionOrientation(A, B, { x: 80, y: 0 })
-  pass('24a. Diagonal baseline + cursor upper-left → aligned',
-    upperLeft.dimType === 'aligned' && upperLeft.orientation === 'aligned')
-  pass('24b. Diagonal baseline + cursor lower-right → aligned',
-    lowerRight.dimType === 'aligned' && lowerRight.orientation === 'aligned')
-  pass('24c. Opposite cursor sides produce opposite offset signs',
+  const upperLeft = computeAlignedOrientation(A, B, { x: 0, y: 80 })
+  const lowerRight = computeAlignedOrientation(A, B, { x: 80, y: 0 })
+  pass('21a. Aligned: diagonal baseline cursor upper-left has signed offset',
+    typeof upperLeft.offset === 'number')
+  pass('21b. Aligned: diagonal baseline opposite cursor sides flip sign',
     Math.sign(upperLeft.offset) !== Math.sign(lowerRight.offset))
 }
 
-// 25. Boundary case: baseline at exactly 22.5° (just outside horizontal threshold).
-{
-  // Compute B.y using precise tan() so atan2 lands at exactly 22.5°.
-  const A = { x: 0, y: 0 }
-  const B = { x: 100, y: 100 * Math.tan(22.5 * Math.PI / 180) }
-  const result = computeDimensionOrientation(A, B, { x: 50, y: -30 })
-  // baselineDeg = atan2(B.y, 100) === 22.5° exactly; "roughly horizontal"
-  // requires < 22.5 strictly, so 22.5° is NOT roughly horizontal → ALIGNED.
-  pass('25. Baseline at exactly 22.5° → outside horizontal threshold → aligned',
-    result.dimType === 'aligned')
-}
+// ----- BLOCK C2 — computeLinearOrientation (22–27) -------------------------
+//
+// World-axis-relative cursor side picks horizontal vs vertical. NO
+// aligned outcome possible. Tie-break (|dx| === |dy|) → vertical (else).
 
-// 26. Boundary case: baseline at 15° (inside horizontal threshold).
-{
-  // 15° → (100, tan(15°)*100) ≈ (100, 26.79)
-  const A = { x: 0, y: 0 }, B = { x: 100, y: 26.79 }
-  // Cursor far perp-dominant to ensure linear classification fires.
-  const result = computeDimensionOrientation(A, B, { x: 50, y: -200 })
-  pass('26. Baseline at 15° + perp cursor → linear-horizontal (inside threshold)',
-    result.dimType === 'linear' && result.orientation === 'horizontal')
-}
-
-// 27. Diagonal baseline 60°: roughly vertical (60° is > 67.5? No, 60° is < 67.5,
-//     so it's NEITHER horizontal NOR vertical → diagonal → always aligned).
-{
-  const A = { x: 0, y: 0 }, B = { x: 50, y: 86.6 } // 60° from horizontal
-  const result = computeDimensionOrientation(A, B, { x: 100, y: 0 })
-  pass('27. Baseline at 60° (diagonal, not in either threshold) → aligned',
-    result.dimType === 'aligned')
-}
-
-// 28. Offset sign reflects cursor side of baseline.
+// 22. Cursor above midpoint (|dy| > |dx|) → horizontal.
 {
   const A = { x: 0, y: 0 }, B = { x: 100, y: 0 }
-  const above = computeDimensionOrientation(A, B, { x: 50, y: -30 })
-  const below = computeDimensionOrientation(A, B, { x: 50, y: 30 })
-  pass('28a. Cursor above horizontal baseline → negative offset',
-    above.offset < 0)
-  pass('28b. Cursor below horizontal baseline → positive offset',
-    below.offset > 0)
-  pass('28c. Offsets are mirror values',
-    Math.abs(above.offset) === Math.abs(below.offset))
+  // Midpoint = (50, 0); cursor (50, -100) → dy = -100, dx = 0 → |dy|>|dx|.
+  const result = computeLinearOrientation(A, B, { x: 50, y: -100 })
+  pass('22a. Linear: cursor above midpoint → horizontal',
+    result.orientation === 'horizontal')
+  pass('22b. Linear: horizontal offset = dy',
+    result.offset === -100)
+}
+
+// 23. Cursor below midpoint → horizontal with positive offset.
+{
+  const A = { x: 0, y: 0 }, B = { x: 100, y: 0 }
+  const result = computeLinearOrientation(A, B, { x: 50, y: 100 })
+  pass('23a. Linear: cursor below midpoint → horizontal',
+    result.orientation === 'horizontal')
+  pass('23b. Linear: positive offset',
+    result.offset === 100)
+}
+
+// 24. Cursor right of midpoint (|dx| > |dy|) → vertical.
+{
+  const A = { x: 0, y: 0 }, B = { x: 100, y: 0 }
+  // Midpoint = (50, 0); cursor (200, 10) → dx = 150, dy = 10 → |dx|>|dy|.
+  const result = computeLinearOrientation(A, B, { x: 200, y: 10 })
+  pass('24a. Linear: cursor right of midpoint → vertical',
+    result.orientation === 'vertical')
+  pass('24b. Linear: vertical offset = dx',
+    result.offset === 150)
+}
+
+// 25. Cursor left of midpoint → vertical with negative offset.
+{
+  const A = { x: 0, y: 0 }, B = { x: 100, y: 0 }
+  const result = computeLinearOrientation(A, B, { x: -100, y: 5 })
+  pass('25a. Linear: cursor left of midpoint → vertical',
+    result.orientation === 'vertical')
+  pass('25b. Linear: negative offset',
+    result.offset === -150)
+}
+
+// 26. Near-45° cursor with |dy| slightly > |dx| → horizontal.
+{
+  const A = { x: 0, y: 0 }, B = { x: 100, y: 0 }
+  // Midpoint = (50, 0); cursor (101, -52) → dx=51, dy=-52 → |dy|>|dx|.
+  const result = computeLinearOrientation(A, B, { x: 101, y: -52 })
+  pass('26. Linear: near-45° cursor with |dy|>|dx| → horizontal',
+    result.orientation === 'horizontal')
+}
+
+// 27. Exact-tie cursor (|dx| === |dy|) → vertical (else branch).
+{
+  const A = { x: 0, y: 0 }, B = { x: 100, y: 0 }
+  // Midpoint = (50, 0); cursor (100, -50) → dx=50, dy=-50 → tie.
+  // Math.abs(dy) > Math.abs(dx) is false (equal) → else → vertical.
+  const result = computeLinearOrientation(A, B, { x: 100, y: -50 })
+  pass('27a. Linear: |dx|===|dy| tie-breaks to vertical',
+    result.orientation === 'vertical')
+  pass('27b. Linear: tied case offset is dx',
+    result.offset === 50)
+}
+
+// 28. Cursor at exact midpoint (dx === dy === 0) → tie → vertical, offset 0.
+{
+  const A = { x: 0, y: 0 }, B = { x: 100, y: 0 }
+  const result = computeLinearOrientation(A, B, { x: 50, y: 0 })
+  pass('28a. Linear: cursor at midpoint → vertical (tie)',
+    result.orientation === 'vertical')
+  pass('28b. Linear: zero offset', result.offset === 0)
 }
 
 // ============================================================================
@@ -418,19 +435,30 @@ function makeMockStore() {
     techCommandHover: null,
     techCommandPreSnap: null,
   }
-  // Production-mirror commitWorkflow1Dimension (logic per useAppStore.js).
-  const commitWorkflow1Dimension = (lineId, layerId, preSnap) => {
+  // Production-mirror commitWorkflow1Dimension (logic per useAppStore.js,
+  // post 18e-dim-split v1.2). `dimType` parameter selects aligned vs
+  // linear; linear path resolves orientation via pickLinearOrientationFromLine.
+  const commitWorkflow1Dimension = (lineId, layerId, dimType, preSnap) => {
     const layer = state.technicalLayers.find((l) => l.id === layerId)
     const line = layer && layer.shapes.find((sh) => sh.id === lineId)
     if (!line || line.type !== 'line' || !line.a || !line.b) return
     const dx = line.b.x - line.a.x
     const dy = line.b.y - line.a.y
     if (Math.hypot(dx, dy) === 0) return
+    let resolvedDimType
+    let resolvedOrientation
+    if (dimType === 'linear') {
+      resolvedDimType = 'linear'
+      resolvedOrientation = pickLinearOrientationFromLine(line)
+    } else {
+      resolvedDimType = 'aligned'
+      resolvedOrientation = 'aligned'
+    }
     const dim = {
       id: newId(),
       type: 'dimension',
-      dimType: 'aligned',
-      orientation: 'aligned',
+      dimType: resolvedDimType,
+      orientation: resolvedOrientation,
       pointA: { mode: 'attached', shapeId: lineId, pointKey: 'a', x: line.a.x, y: line.a.y },
       pointB: { mode: 'attached', shapeId: lineId, pointKey: 'b', x: line.b.x, y: line.b.y },
       offset: DEFAULT_DIM_OFFSET_TEST,
@@ -452,7 +480,7 @@ function makeMockStore() {
     { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 10, 20, 34, 20)] },
   ]
   s.state.techSelected = [{ layerId: 'L1', shapeId: 'sh1' }]
-  s.commitWorkflow1Dimension('sh1', 'L1', 'preSnapMarker')
+  s.commitWorkflow1Dimension('sh1', 'L1', 'aligned', 'preSnapMarker')
   const dims = s.state.technicalLayers[0].shapes.filter((sh) => sh.type === 'dimension')
   pass('29. Workflow 1 commit adds exactly one dimension', dims.length === 1)
 }
@@ -463,7 +491,7 @@ function makeMockStore() {
   s.state.technicalLayers = [
     { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 10, 20, 34, 20)] },
   ]
-  s.commitWorkflow1Dimension('sh1', 'L1', 'preSnap')
+  s.commitWorkflow1Dimension('sh1', 'L1', 'aligned', 'preSnap')
   const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
   pass('30a. pointA.shapeId === line.id', dim.pointA.shapeId === 'sh1')
   pass('30b. pointA.pointKey === "a"', dim.pointA.pointKey === 'a')
@@ -479,7 +507,7 @@ function makeMockStore() {
   s.state.technicalLayers = [
     { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 24, 0)] },
   ]
-  s.commitWorkflow1Dimension('sh1', 'L1', 'preSnap')
+  s.commitWorkflow1Dimension('sh1', 'L1', 'aligned', 'preSnap')
   const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
   pass('31. Workflow 1 default offset = 24', dim.offset === 24)
 }
@@ -491,7 +519,7 @@ function makeMockStore() {
     { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 24, 0)] },
   ]
   const lenBefore = s.state.undoStack.length
-  s.commitWorkflow1Dimension('sh1', 'L1', 'preSnapMarker')
+  s.commitWorkflow1Dimension('sh1', 'L1', 'aligned', 'preSnapMarker')
   pass('32a. undoStack grew by 1', s.state.undoStack.length === lenBefore + 1)
   pass('32b. last entry is the passed preSnap',
     s.state.undoStack[s.state.undoStack.length - 1] === 'preSnapMarker')
@@ -504,7 +532,7 @@ function makeMockStore() {
     { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 24, 0)] },
   ]
   s.state.techSelected = [{ layerId: 'L1', shapeId: 'sh1' }]
-  s.commitWorkflow1Dimension('sh1', 'L1', 'preSnap')
+  s.commitWorkflow1Dimension('sh1', 'L1', 'aligned', 'preSnap')
   pass('33. techSelected empty after commit', s.state.techSelected.length === 0)
 }
 
@@ -515,7 +543,7 @@ function makeMockStore() {
     { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 5, 5, 5, 5)] },
   ]
   const lenBefore = s.state.undoStack.length
-  s.commitWorkflow1Dimension('sh1', 'L1', 'preSnap')
+  s.commitWorkflow1Dimension('sh1', 'L1', 'aligned', 'preSnap')
   pass('34a. Zero-length line → no dim added',
     s.state.technicalLayers[0].shapes.filter((sh) => sh.type === 'dimension').length === 0)
   pass('34b. Zero-length line → no undo pushed',
@@ -525,7 +553,7 @@ function makeMockStore() {
 // ============================================================================
 // BLOCK E — Workflow 2 state machine (35–44)
 //
-// Mock the state-machine transitions: setTechActiveCommand('dimension')
+// Mock the state-machine transitions: setTechActiveCommand('dim-aligned')
 // + setTechDimStage('awaitPointA') → click captures pointA → advance
 // → click captures pointB → advance → click commits.
 // ============================================================================
@@ -575,7 +603,21 @@ function makeWorkflow2Store() {
         s.setTechCommandPreSnap(null)
         return
       }
-      const { dimType, orientation, offset } = computeDimensionOrientation(pointA, pointB, cursorWorld)
+      // Phase 2 18e-dim-split: orientation helper switches on command.
+      const isAligned = s.state.techActiveCommand === 'dim-aligned'
+      let dimType
+      let orientation
+      let offset
+      if (isAligned) {
+        dimType = 'aligned'
+        orientation = 'aligned'
+        offset = computeAlignedOrientation(pointA, pointB, cursorWorld).offset
+      } else {
+        dimType = 'linear'
+        const linear = computeLinearOrientation(pointA, pointB, cursorWorld)
+        orientation = linear.orientation
+        offset = linear.offset
+      }
       // Determine target layer from pointA's attachment if any.
       let layerId = null
       if (pointA.mode === 'attached' && pointA.shapeId) {
@@ -609,7 +651,12 @@ function makeWorkflow2Store() {
     }
   }
   s.simulateEscape = () => {
-    if (s.state.techActiveCommand === 'dimension') {
+    // Phase 2 18e-dim-split: accept either dim command (mirrors
+    // isDimensionCommand from production dimGeometry).
+    if (
+      s.state.techActiveCommand === 'dim-aligned'
+      || s.state.techActiveCommand === 'dim-linear'
+    ) {
       s.setTechActiveCommand(null)
       s.setTechDimStage(null)
       s.setTechDimPointA(null)
@@ -624,7 +671,7 @@ function makeWorkflow2Store() {
 // 35. awaitPointA click → captures pointA, advances to awaitPointB.
 {
   const s = makeWorkflow2Store()
-  s.setTechActiveCommand('dimension')
+  s.setTechActiveCommand('dim-aligned')
   s.setTechDimStage('awaitPointA')
   s.setTechCommandPreSnap('preSnap1')
   s.simulateDimClick({ x: 10, y: 20 }, null, false)
@@ -642,7 +689,7 @@ function makeWorkflow2Store() {
   s.state.technicalLayers = [
     { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 100, 100, 200, 100)] },
   ]
-  s.setTechActiveCommand('dimension')
+  s.setTechActiveCommand('dim-aligned')
   s.setTechDimStage('awaitPointA')
   // Simulate snap target at sh1's endpoint a
   s.simulateDimClick({ x: 102, y: 102 }, { x: 100, y: 100, type: 'endpoint' }, true)
@@ -659,7 +706,7 @@ function makeWorkflow2Store() {
   s.state.technicalLayers = [
     { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 100, 0)] },
   ]
-  s.setTechActiveCommand('dimension')
+  s.setTechActiveCommand('dim-aligned')
   s.setTechDimStage('awaitPointA')
   // Snap target with type 'midpoint' — not an endpoint, so identifySnapSourceShape returns null
   s.simulateDimClick({ x: 50, y: 5 }, { x: 50, y: 0, type: 'midpoint' }, true)
@@ -674,7 +721,7 @@ function makeWorkflow2Store() {
 {
   const s = makeWorkflow2Store()
   s.state.technicalLayers = []
-  s.setTechActiveCommand('dimension')
+  s.setTechActiveCommand('dim-aligned')
   s.setTechDimStage('awaitPointA')
   s.simulateDimClick({ x: 0, y: 0 }, null, false)
   s.simulateDimClick({ x: 100, y: 0 }, null, false)
@@ -690,7 +737,7 @@ function makeWorkflow2Store() {
   s.state.technicalLayers = [
     { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 100, 0)] },
   ]
-  s.setTechActiveCommand('dimension')
+  s.setTechActiveCommand('dim-aligned')
   s.setTechDimStage('awaitPointA')
   s.setTechCommandPreSnap('snap-commit')
   s.simulateDimClick({ x: 0, y: 0 }, null, false)
@@ -709,7 +756,7 @@ function makeWorkflow2Store() {
 // 40. Escape at awaitPointA → command cleared, no shape created.
 {
   const s = makeWorkflow2Store()
-  s.setTechActiveCommand('dimension')
+  s.setTechActiveCommand('dim-aligned')
   s.setTechDimStage('awaitPointA')
   s.setTechCommandPreSnap('preSnap')
   s.simulateEscape()
@@ -721,7 +768,7 @@ function makeWorkflow2Store() {
 // 41. Escape at awaitPointB → command cleared, pointA discarded.
 {
   const s = makeWorkflow2Store()
-  s.setTechActiveCommand('dimension')
+  s.setTechActiveCommand('dim-aligned')
   s.setTechDimStage('awaitPointA')
   s.simulateDimClick({ x: 10, y: 10 }, null, false)
   pass('41a. After first click: pointA captured', s.state.techDimPointA !== null)
@@ -732,7 +779,7 @@ function makeWorkflow2Store() {
 // 42. Escape at awaitPosition → command cleared, both points discarded.
 {
   const s = makeWorkflow2Store()
-  s.setTechActiveCommand('dimension')
+  s.setTechActiveCommand('dim-aligned')
   s.setTechDimStage('awaitPointA')
   s.simulateDimClick({ x: 0, y: 0 }, null, false)
   s.simulateDimClick({ x: 100, y: 0 }, null, false)
@@ -746,7 +793,7 @@ function makeWorkflow2Store() {
 {
   const s = makeWorkflow2Store()
   s.state.technicalLayers = [{ id: 'L1', visible: true, shapes: [] }]
-  s.setTechActiveCommand('dimension')
+  s.setTechActiveCommand('dim-aligned')
   s.setTechDimStage('awaitPointA')
   s.setTechCommandPreSnap('preSnap')
   s.simulateDimClick({ x: 50, y: 50 }, null, false)
@@ -767,7 +814,7 @@ function makeWorkflow2Store() {
   s.state.technicalLayers = [
     { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 100, 100, 200, 100)] },
   ]
-  s.setTechActiveCommand('dimension')
+  s.setTechActiveCommand('dim-aligned')
   s.setTechDimStage('awaitPointA')
   // Snap hover present but techSnapEnabled=false → useSnap is false → falls to cursor
   s.simulateDimClick({ x: 102, y: 102 }, { x: 100, y: 100, type: 'endpoint' }, false)
@@ -1300,6 +1347,420 @@ function cascadeDimensionDeletion(technicalLayers, deletedShapeIds) {
     !hasLengthInchesRead)
   pass('72b. drawStatic TECHNICAL branch: no `fillText(label, ...)` call',
     !hasLabelFillText)
+}
+
+// ============================================================================
+// BLOCK I — Phase 2 18e-dim-split (73–82) — Workflow 1 Linear via
+// pickLinearOrientationFromLine + parameterized commitWorkflow1Dimension.
+//
+// Spec v1.2: Workflow 1 LINEAR commit picks orientation purely from the
+// line's baseline angle (no cursor). Production-mirror commit (declared
+// in makeMockStore above) routes through pickLinearOrientationFromLine
+// when dimType === 'linear'.
+// ============================================================================
+
+// 73. Workflow 1 Linear on horizontal line → orientation 'horizontal'.
+{
+  const s = makeMockStore()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 100, 0)] },
+  ]
+  s.commitWorkflow1Dimension('sh1', 'L1', 'linear', 'preSnap')
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('73a. Workflow 1 Linear on horizontal line → dimType linear',
+    dim && dim.dimType === 'linear')
+  pass('73b. → orientation horizontal',
+    dim && dim.orientation === 'horizontal')
+}
+
+// 74. Workflow 1 Linear on vertical line → orientation 'vertical'.
+{
+  const s = makeMockStore()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 0, 100)] },
+  ]
+  s.commitWorkflow1Dimension('sh1', 'L1', 'linear', 'preSnap')
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('74a. Workflow 1 Linear on vertical line → dimType linear',
+    dim && dim.dimType === 'linear')
+  pass('74b. → orientation vertical',
+    dim && dim.orientation === 'vertical')
+}
+
+// 75. Workflow 1 Linear on near-horizontal line (5.7°) → 'horizontal'
+//     (within ±22.5° threshold).
+{
+  const s = makeMockStore()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 100, 10)] },
+  ]
+  s.commitWorkflow1Dimension('sh1', 'L1', 'linear', 'preSnap')
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('75. Workflow 1 Linear on 5.7° line → horizontal',
+    dim && dim.orientation === 'horizontal')
+}
+
+// 76. Workflow 1 Linear on 30° diagonal (more horizontal than vertical)
+//     → 'horizontal' via longer-projection diagonal fallback.
+{
+  const s = makeMockStore()
+  // 30° from horizontal: dx=50, dy=25 → |dx|>|dy| → 'horizontal'.
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 50, 25)] },
+  ]
+  s.commitWorkflow1Dimension('sh1', 'L1', 'linear', 'preSnap')
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('76. Workflow 1 Linear on 30° diagonal → horizontal (longer projection)',
+    dim && dim.orientation === 'horizontal')
+}
+
+// 77. Workflow 1 Linear on 60° diagonal (more vertical than horizontal)
+//     → 'vertical'.
+{
+  const s = makeMockStore()
+  // 60° from horizontal: dx=25, dy=43.3 → |dy|>|dx| → 'vertical'.
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 25, 43.3)] },
+  ]
+  s.commitWorkflow1Dimension('sh1', 'L1', 'linear', 'preSnap')
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('77. Workflow 1 Linear on 60° diagonal → vertical (longer projection)',
+    dim && dim.orientation === 'vertical')
+}
+
+// 78. Workflow 1 Linear on 45° diagonal exact tie → 'vertical'
+//     (|dx| === |dy|, else branch of pickLinearOrientationFromLine fires).
+{
+  const s = makeMockStore()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 50, 50)] },
+  ]
+  s.commitWorkflow1Dimension('sh1', 'L1', 'linear', 'preSnap')
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('78. Workflow 1 Linear on 45° diagonal tie → vertical (else branch)',
+    dim && dim.orientation === 'vertical')
+}
+
+// 79. pickLinearOrientationFromLine — boundary at exactly 22.5°.
+{
+  const line = {
+    type: 'line',
+    a: { x: 0, y: 0 },
+    b: { x: 100, y: 100 * Math.tan(22.5 * Math.PI / 180) },
+  }
+  // baselineDeg = 22.5 exactly; "< 22.5" is strict false, "> 157.5" false,
+  // 67.5 ≤ 22.5 ≤ 112.5 false → falls to longer-projection fallback.
+  // |dx|=100, |dy|≈41.42 → |dx|>|dy| → 'horizontal'.
+  const result = pickLinearOrientationFromLine(line)
+  pass('79. pickLinearOrientationFromLine at exactly 22.5° → horizontal (longer projection)',
+    result === 'horizontal')
+}
+
+// 80. pickLinearOrientationFromLine — invalid input falls back to horizontal.
+{
+  pass('80a. pickLinearOrientationFromLine(null) → "horizontal" (defensive)',
+    pickLinearOrientationFromLine(null) === 'horizontal')
+  pass('80b. pickLinearOrientationFromLine(non-line) → "horizontal"',
+    pickLinearOrientationFromLine({ type: 'dimension' }) === 'horizontal')
+}
+
+// 81. Workflow 1 Aligned still works after dim-split (regression).
+//     With dimType='aligned', orientation is always 'aligned' regardless
+//     of line angle (matches pre-split behavior).
+{
+  const s = makeMockStore()
+  // Vertical line — would be 'vertical' under Linear, but Aligned forces aligned.
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 0, 100)] },
+  ]
+  s.commitWorkflow1Dimension('sh1', 'L1', 'aligned', 'preSnap')
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('81a. Workflow 1 Aligned on vertical line → dimType aligned',
+    dim && dim.dimType === 'aligned')
+  pass('81b. → orientation aligned (NOT vertical)',
+    dim && dim.orientation === 'aligned')
+}
+
+// 82. Workflow 1 Linear zero-length line → silent fail (same as Aligned).
+{
+  const s = makeMockStore()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 50, 50, 50, 50)] },
+  ]
+  const undoLenBefore = s.state.undoStack.length
+  s.commitWorkflow1Dimension('sh1', 'L1', 'linear', 'preSnap')
+  pass('82a. Zero-length Linear → no dim added',
+    s.state.technicalLayers[0].shapes.filter((sh) => sh.type === 'dimension').length === 0)
+  pass('82b. → no undo pushed',
+    s.state.undoStack.length === undoLenBefore)
+}
+
+// ============================================================================
+// BLOCK J — Phase 2 18e-dim-split (83–87) — Workflow 2 awaitPosition
+// orientation per command. The makeWorkflow2Store's simulateDimClick
+// production mirror switches on techActiveCommand: 'dim-aligned' calls
+// computeAlignedOrientation; 'dim-linear' calls computeLinearOrientation.
+// ============================================================================
+
+// 83. Workflow 2 'dim-aligned' awaitPosition commit → always aligned
+//     regardless of cursor side.
+{
+  const s = makeWorkflow2Store()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 100, 0)] },
+  ]
+  s.setTechActiveCommand('dim-aligned')
+  s.setTechDimStage('awaitPointA')
+  s.setTechCommandPreSnap('preSnap')
+  // Click A, B at line endpoints, then click cursor far above midpoint —
+  // would be linear-horizontal under old single-Dim model, but Aligned
+  // overrides.
+  s.simulateDimClick({ x: 0, y: 0 }, null, false)
+  s.simulateDimClick({ x: 100, y: 0 }, null, false)
+  s.simulateDimClick({ x: 50, y: -200 }, null, false)
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('83a. dim-aligned commit → dimType aligned',
+    dim && dim.dimType === 'aligned')
+  pass('83b. → orientation aligned',
+    dim && dim.orientation === 'aligned')
+}
+
+// 84. Workflow 2 'dim-linear' awaitPosition with cursor above midpoint
+//     → linear-horizontal (NEVER aligned under Linear).
+{
+  const s = makeWorkflow2Store()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 100, 0)] },
+  ]
+  s.setTechActiveCommand('dim-linear')
+  s.setTechDimStage('awaitPointA')
+  s.setTechCommandPreSnap('preSnap')
+  s.simulateDimClick({ x: 0, y: 0 }, null, false)
+  s.simulateDimClick({ x: 100, y: 0 }, null, false)
+  s.simulateDimClick({ x: 50, y: -100 }, null, false)
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('84a. dim-linear + cursor above → dimType linear',
+    dim && dim.dimType === 'linear')
+  pass('84b. → orientation horizontal',
+    dim && dim.orientation === 'horizontal')
+}
+
+// 85. Workflow 2 'dim-linear' with cursor right of midpoint → linear-vertical.
+{
+  const s = makeWorkflow2Store()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 100, 0)] },
+  ]
+  s.setTechActiveCommand('dim-linear')
+  s.setTechDimStage('awaitPointA')
+  s.setTechCommandPreSnap('preSnap')
+  s.simulateDimClick({ x: 0, y: 0 }, null, false)
+  s.simulateDimClick({ x: 100, y: 0 }, null, false)
+  s.simulateDimClick({ x: 250, y: 5 }, null, false)
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('85. dim-linear + cursor right → orientation vertical',
+    dim && dim.orientation === 'vertical')
+}
+
+// 86. dim-linear commit produces 'linear' dimType regardless of baseline
+//     angle (the orientation algorithm doesn't consult baseline angle —
+//     spec v1.2 §"Workflow 2 Linear" world-axis interpretation).
+{
+  const s = makeWorkflow2Store()
+  s.state.technicalLayers = []
+  s.setTechActiveCommand('dim-linear')
+  s.setTechDimStage('awaitPointA')
+  s.setTechCommandPreSnap('preSnap')
+  // Diagonal A→B baseline
+  s.simulateDimClick({ x: 0, y: 0 }, null, false)
+  s.simulateDimClick({ x: 100, y: 100 }, null, false)
+  // Cursor far above midpoint → horizontal
+  s.simulateDimClick({ x: 50, y: -200 }, null, false)
+  const layers = s.state.technicalLayers
+  const dim = layers[0] && layers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('86a. dim-linear + diagonal baseline + cursor above → dimType linear',
+    dim && dim.dimType === 'linear')
+  pass('86b. → orientation horizontal (cursor side, NOT baseline angle)',
+    dim && dim.orientation === 'horizontal')
+}
+
+// 87. Escape works for both dim-aligned and dim-linear.
+{
+  const sAligned = makeWorkflow2Store()
+  sAligned.setTechActiveCommand('dim-aligned')
+  sAligned.setTechDimStage('awaitPointA')
+  sAligned.simulateEscape()
+  pass('87a. dim-aligned + Escape → command cleared',
+    sAligned.state.techActiveCommand === null)
+
+  const sLinear = makeWorkflow2Store()
+  sLinear.setTechActiveCommand('dim-linear')
+  sLinear.setTechDimStage('awaitPointB')
+  sLinear.setTechDimPointA({ mode: 'free', x: 0, y: 0 })
+  sLinear.simulateEscape()
+  pass('87b. dim-linear + Escape mid-workflow → command + pointA cleared',
+    sLinear.state.techActiveCommand === null && sLinear.state.techDimPointA === null)
+}
+
+// ============================================================================
+// BLOCK K — Phase 2 18e-dim-split (88–90) — isDimensionCommand predicate
+// + dispatch via handleDimAligned/handleDimLinear simulation.
+// ============================================================================
+
+// 88. isDimensionCommand returns true for both dim commands, false otherwise.
+{
+  pass('88a. isDimensionCommand("dim-aligned") === true',
+    isDimensionCommand('dim-aligned') === true)
+  pass('88b. isDimensionCommand("dim-linear") === true',
+    isDimensionCommand('dim-linear') === true)
+  pass('88c. isDimensionCommand("dimension") === false (legacy value rejected)',
+    isDimensionCommand('dimension') === false)
+  pass('88d. isDimensionCommand("rotate") === false',
+    isDimensionCommand('rotate') === false)
+  pass('88e. isDimensionCommand(null) === false',
+    isDimensionCommand(null) === false)
+  pass('88f. isDimensionCommand(undefined) === false',
+    isDimensionCommand(undefined) === false)
+}
+
+// 89. Workflow 1 dispatch by handler — production-mirror of TechInputPanel
+//     handleDimAligned + handleDimLinear (single line selected → Workflow 1).
+//
+// Mirror of `startDimCommand` in TechInputPanel.jsx. The helper accepts
+// the commandKey + wf1DimType params; the test confirms that
+// handleDimAligned routes through commitWorkflow1Dimension with
+// 'aligned' and handleDimLinear with 'linear'.
+function simulateHandleDim(store, commandKey, wf1DimType) {
+  // workflow1Eligible: selection.length === 1 && selection[0].type === 'line'
+  const sel = store.state.techSelected
+  const shapes = sel
+    .map((e) => {
+      for (const l of store.state.technicalLayers) {
+        const sh = l.shapes.find((s) => s.id === e.shapeId)
+        if (sh) return sh
+      }
+      return null
+    })
+    .filter(Boolean)
+  const workflow1Eligible = shapes.length === 1 && shapes[0].type === 'line'
+  if (workflow1Eligible) {
+    const lineShape = shapes[0]
+    const layer = store.state.technicalLayers.find((l) =>
+      l.shapes.some((sh) => sh.id === lineShape.id)
+    )
+    store.commitWorkflow1Dimension(lineShape.id, layer.id, wf1DimType, 'preSnap')
+  } else {
+    // Workflow 2 entry — set the active command.
+    store.state.techActiveCommand = commandKey
+    store.state.techDimStage = 'awaitPointA'
+    store.state.techDimPointA = null
+    store.state.techDimPointB = null
+  }
+}
+
+// 89a. Single line + handleDimAligned → Workflow 1 aligned dim created.
+{
+  const s = makeMockStore()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 100, 0)] },
+  ]
+  s.state.techSelected = [{ layerId: 'L1', shapeId: 'sh1' }]
+  simulateHandleDim(s, 'dim-aligned', 'aligned')
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('89a. handleDimAligned + single line → Workflow 1 aligned',
+    dim && dim.dimType === 'aligned' && dim.orientation === 'aligned')
+}
+
+// 89b. Single horizontal line + handleDimLinear → Workflow 1 linear-horizontal.
+{
+  const s = makeMockStore()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [mkLineShape('sh1', 0, 0, 100, 0)] },
+  ]
+  s.state.techSelected = [{ layerId: 'L1', shapeId: 'sh1' }]
+  simulateHandleDim(s, 'dim-linear', 'linear')
+  const dim = s.state.technicalLayers[0].shapes.find((sh) => sh.type === 'dimension')
+  pass('89b. handleDimLinear + horizontal line → Workflow 1 linear-horizontal',
+    dim && dim.dimType === 'linear' && dim.orientation === 'horizontal')
+}
+
+// 89c. Empty selection + handleDimAligned → Workflow 2 'dim-aligned'.
+{
+  const s = makeMockStore()
+  s.state.techSelected = []
+  simulateHandleDim(s, 'dim-aligned', 'aligned')
+  pass('89c. Empty selection + handleDimAligned → techActiveCommand "dim-aligned"',
+    s.state.techActiveCommand === 'dim-aligned' && s.state.techDimStage === 'awaitPointA')
+}
+
+// 89d. Empty selection + handleDimLinear → Workflow 2 'dim-linear'.
+{
+  const s = makeMockStore()
+  s.state.techSelected = []
+  simulateHandleDim(s, 'dim-linear', 'linear')
+  pass('89d. Empty selection + handleDimLinear → techActiveCommand "dim-linear"',
+    s.state.techActiveCommand === 'dim-linear' && s.state.techDimStage === 'awaitPointA')
+}
+
+// 89e. Multi-select + handleDimAligned → Workflow 2 starts (not Workflow 1).
+{
+  const s = makeMockStore()
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [
+      mkLineShape('sh1', 0, 0, 100, 0),
+      mkLineShape('sh2', 0, 100, 100, 100),
+    ] },
+  ]
+  s.state.techSelected = [
+    { layerId: 'L1', shapeId: 'sh1' },
+    { layerId: 'L1', shapeId: 'sh2' },
+  ]
+  simulateHandleDim(s, 'dim-aligned', 'aligned')
+  const dims = s.state.technicalLayers[0].shapes.filter((sh) => sh.type === 'dimension')
+  pass('89e. Multi-select + handleDimAligned → Workflow 2 (no Workflow 1 commit)',
+    dims.length === 0 && s.state.techActiveCommand === 'dim-aligned')
+}
+
+// 89f. Selection contains dimension + handleDimLinear → Workflow 2 starts.
+{
+  const s = makeMockStore()
+  const existingDim = {
+    id: 'dimExisting', type: 'dimension', dimType: 'aligned', orientation: 'aligned',
+    pointA: { mode: 'free', shapeId: null, pointKey: null, x: 0, y: 0 },
+    pointB: { mode: 'free', shapeId: null, pointKey: null, x: 100, y: 0 },
+    offset: 24, textOverride: null,
+  }
+  s.state.technicalLayers = [
+    { id: 'L1', visible: true, shapes: [existingDim] },
+  ]
+  s.state.techSelected = [{ layerId: 'L1', shapeId: 'dimExisting' }]
+  simulateHandleDim(s, 'dim-linear', 'linear')
+  pass('89f. Selection contains dim + handleDimLinear → Workflow 2',
+    s.state.techActiveCommand === 'dim-linear'
+    // Existing dim still present (no new shape from Workflow 1).
+    && s.state.technicalLayers[0].shapes.length === 1)
+}
+
+// 90. Both Dim buttons visible when selection contains a dim (NO `hide`
+//     gate per spec v1.2 §"Selection composition rules"). This is a
+//     source-grep test on TechInputPanel.jsx — the existing
+//     `selectionHasDimension && Rotate/Move/Copy` gate exists but Dim
+//     buttons sit OUTSIDE it.
+{
+  const panelSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'components', 'TechInputPanel.jsx'),
+    'utf-8',
+  )
+  // Find the {!selectionHasDimension && ...} fragment that wraps R/M/C.
+  // Both Dim buttons (Aligned + Linear X/Y) should appear OUTSIDE this
+  // block, between the closing `</>)}` and the Delete button.
+  const fragmentEndIdx = panelSrc.indexOf('</>')
+  const deleteBtnIdx = panelSrc.indexOf('cmd-danger', fragmentEndIdx)
+  const sliceBetween = panelSrc.slice(fragmentEndIdx, deleteBtnIdx)
+  pass('90a. handleDimAligned button outside selectionHasDimension gate',
+    /handleDimAligned/.test(sliceBetween))
+  pass('90b. handleDimLinear button outside selectionHasDimension gate',
+    /handleDimLinear/.test(sliceBetween))
 }
 
 // ============================================================================

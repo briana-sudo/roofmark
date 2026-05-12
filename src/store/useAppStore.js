@@ -219,6 +219,12 @@ export const PX_PER_INCH = PX_PER_INCH_CONST
 // (single-line shortcut) and Workflow 2 initial preview before the operator
 // drags. 24 px = 1 inch at zoom 1.0 per spec §"Default offset".
 import { DEFAULT_DIM_OFFSET } from '../utils/dimConstants'
+// Phase 2 18e-dim-split (May 12 2026) — Workflow 1 Linear orientation pick
+// per spec v1.2. commitWorkflow1Dimension takes a dimType parameter; the
+// 'linear' branch resolves orientation from line baseline angle via this
+// pure helper. Kept in dimGeometry alongside the Workflow 2 orientation
+// helpers so all dim-orientation math lives in one module.
+import { pickLinearOrientationFromLine } from '../utils/dimGeometry'
 // Phase 2 18b — default Technical layer name when auto-created on first
 // shape commit. Operator can rename via the layer-panel UI in 18c+.
 export const TECHNICAL_LAYER_NAME_DEFAULT = 'Layer 1'
@@ -570,18 +576,24 @@ const initialState = {
   techCommandInput: null,
   techCommandHover: null,
   techGripEdit: null,
-  // Phase 2 18e (May 12 2026) — Dimension command 3-stage state machine.
-  // All transient (NOT in PERSIST_KEYS, NOT in dataSnapshot). Cleared at
-  // the same 6 sites as other tech-command state (setAppMode, setTool away
-  // from tech-select, clearTechSelection, importJSON, clearAll, dim
-  // commit/cancel via commitWorkflow2Dimension / Escape chain).
+  // Phase 2 18e (May 12 2026), v1.2 split (May 12 2026) — Dimension
+  // command 3-stage state machine. All transient (NOT in PERSIST_KEYS,
+  // NOT in dataSnapshot). Cleared at the same 6 sites as other tech-
+  // command state (setAppMode, setTool away from tech-select,
+  // clearTechSelection, importJSON, clearAll, dim commit/cancel via
+  // commitWorkflow2Dimension / Escape chain).
   //   techDimStage:    null | 'awaitPointA' | 'awaitPointB' | 'awaitPosition'
   //   techDimPointA:   null | { mode, shapeId, pointKey, x, y }
   //   techDimPointB:   null | { mode, shapeId, pointKey, x, y }
-  // techActiveCommand === 'dimension' is the outer gate; stage drives
-  // sub-state inside the command. mode === 'attached' means the point
-  // follows a line endpoint (DIMASSOC=2 associativity); mode === 'free'
-  // means cached coords only (snap was a midpoint OR snap was off).
+  // Outer gate: techActiveCommand ∈ { 'dim-aligned', 'dim-linear' } per
+  // spec v1.2. Both share this state machine + Escape chain + diamond
+  // visibility + snap-scan branches; only the orientation algorithm
+  // differs at awaitPosition (computeAlignedOrientation vs
+  // computeLinearOrientation). Use isDimensionCommand(cmd) from
+  // dimGeometry to check either.
+  // mode === 'attached' means the point follows a line endpoint
+  // (DIMASSOC=2 associativity); mode === 'free' means cached coords
+  // only (snap was a midpoint OR snap was off).
   techDimStage: null,
   techDimPointA: null,
   techDimPointB: null,
@@ -2186,7 +2198,13 @@ export const useAppStore = create((set, get) => {
     //
     // Both push exactly ONE undo snapshot (the preSnap captured when the
     // workflow began) so Cmd+Z removes the dim cleanly.
-    commitWorkflow1Dimension: (lineId, layerId, preSnap) => {
+    // Phase 2 18e-dim-split (May 12 2026) — `dimType` parameter added per
+    // spec v1.2. Aligned path produces dim with both dimType+orientation
+    // set to 'aligned' (existing behavior). Linear path resolves
+    // orientation from line baseline angle via pickLinearOrientationFromLine
+    // — same axis thresholds as Workflow 2 Linear so the two paths stay
+    // visually consistent.
+    commitWorkflow1Dimension: (lineId, layerId, dimType, preSnap) => {
       const s = get()
       const layer = s.technicalLayers.find((l) => l.id === layerId)
       const line = layer && (layer.shapes || []).find((sh) => sh.id === lineId)
@@ -2196,11 +2214,25 @@ export const useAppStore = create((set, get) => {
       const dy = line.b.y - line.a.y
       const dist = Math.hypot(dx, dy)
       if (dist === 0) return
+
+      let resolvedDimType
+      let resolvedOrientation
+      if (dimType === 'linear') {
+        resolvedDimType = 'linear'
+        resolvedOrientation = pickLinearOrientationFromLine(line)
+      } else {
+        // Default to aligned (also matches the pre-split single-Dim shape
+        // schema, so callers that pass undefined/'aligned' produce the
+        // original behavior).
+        resolvedDimType = 'aligned'
+        resolvedOrientation = 'aligned'
+      }
+
       const dim = {
         id: newTechShapeId(),
         type: 'dimension',
-        dimType: 'aligned',
-        orientation: 'aligned',
+        dimType: resolvedDimType,
+        orientation: resolvedOrientation,
         pointA: {
           mode: 'attached',
           shapeId: lineId,

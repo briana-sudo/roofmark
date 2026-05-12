@@ -304,17 +304,24 @@ export default function TechInputPanel() {
     clearTechSelection()
   }
 
-  // ===== Phase 2 18e dimension handlers =====
+  // ===== Phase 2 18e-dim-split (May 12 2026) — dimension handlers =====
   //
-  // Dim button dispatch per spec §"Decision flags" #12:
-  //   - Workflow 1: exactly one line selected → instant placement of
-  //                 an aligned dim attached to that line's a/b.
-  //   - Workflow 2: empty selection, multi-select, or selection
-  //                 contains a dimension → enter 3-click state machine.
+  // Per spec v1.2: two explicit commands (Aligned + Linear) replace the
+  // single-Dim drag-to-discover model. Both share the state machine; the
+  // only difference is which orientation algorithm fires at awaitPosition
+  // (CanvasStage handles that switch via isDimensionCommand). Both
+  // handlers are shape-identical aside from the dimType value passed to
+  // commitWorkflow1Dimension AND the techActiveCommand value set for
+  // Workflow 2.
   //
   // captureUndoSnapshot at start of either workflow so Cmd+Z removes
   // the dim cleanly (matches single-undo-per-logical-command convention).
-  const handleDim = () => {
+
+  // Internal helper — DRY between handleDimAligned and handleDimLinear.
+  // `commandKey` is the techActiveCommand value to set when Workflow 2
+  // is reached; `wf1DimType` is the dimType param passed to the
+  // Workflow 1 commit.
+  const startDimCommand = (commandKey, wf1DimType) => {
     if (workflow1Eligible) {
       const lineShape = selectionShapes[0]
       const layer = technicalLayers.find((l) =>
@@ -322,19 +329,21 @@ export default function TechInputPanel() {
       )
       if (!layer) return
       const preSnap = captureUndoSnapshot()
-      commitWorkflow1Dimension(lineShape.id, layer.id, preSnap)
+      commitWorkflow1Dimension(lineShape.id, layer.id, wf1DimType, preSnap)
     } else {
       // Workflow 2: capture pre-command snapshot then enter state machine.
       // CanvasStage's onMouseDown handles the 3 clicks; this handler
       // just starts the command.
       const preSnap = captureUndoSnapshot()
       setTechCommandPreSnap(preSnap)
-      setTechActiveCommand('dimension')
+      setTechActiveCommand(commandKey)
       setTechDimStage('awaitPointA')
       setTechDimPointA(null)
       setTechDimPointB(null)
     }
   }
+  const handleDimAligned = () => startDimCommand('dim-aligned', 'aligned')
+  const handleDimLinear = () => startDimCommand('dim-linear', 'linear')
 
   // Cancel button during dim command — equivalent to Escape per spec.
   // Cleans up all transient state regardless of stage.
@@ -470,16 +479,23 @@ export default function TechInputPanel() {
   }
 
   // Phase 2 18e — Dimension command branch (Workflow 2 state machine).
-  // Three stage-specific prompts plus a Cancel button. CanvasStage's
-  // mousedown drives the state machine; this panel just displays where
-  // the operator is in the flow.
-  if (techActiveCommand === 'dimension') {
+  // Phase 2 18e-dim-split (May 12 2026) — Two command values accepted:
+  //   'dim-aligned' → aligned dim, drag chooses offset+side only
+  //   'dim-linear'  → linear (H/V) dim, cursor side picks orientation
+  // Prompts differ per command — operator needs to know HOW the cursor
+  // drag maps to the final shape.
+  if (techActiveCommand === 'dim-aligned' || techActiveCommand === 'dim-linear') {
+    const isAligned = techActiveCommand === 'dim-aligned'
+    const cmdLabel = isAligned ? 'Aligned dimension' : 'Linear dimension'
+    const positionPrompt = isAligned
+      ? 'drag to set offset; click to commit'
+      : 'drag above/below for horizontal, left/right for vertical; click to commit'
     const dimPrompts = {
-      awaitPointA: 'Dimension: click first point (snap-aware)',
-      awaitPointB: 'Dimension: click second point',
-      awaitPosition: 'Dimension: drag to position dimension line; click to commit',
+      awaitPointA: `${cmdLabel}: click first point (snap-aware)`,
+      awaitPointB: `${cmdLabel}: click second point`,
+      awaitPosition: `${cmdLabel}: ${positionPrompt}`,
     }
-    const promptText = dimPrompts[techDimStage] || 'Dimension'
+    const promptText = dimPrompts[techDimStage] || cmdLabel
     return (
       <div className="tech-input-panel" role="toolbar" data-testid="tech-input-panel">
         <span className="cmd-prompt" data-testid="tech-dim-prompt">{promptText}</span>
@@ -542,13 +558,22 @@ export default function TechInputPanel() {
         <button
           type="button"
           className="cmd-btn"
-          onClick={handleDim}
-          data-testid="tech-dim-button"
+          onClick={handleDimAligned}
+          data-testid="tech-dim-aligned-button"
         >
           📏 Dim
         </button>
+        <button
+          type="button"
+          className="cmd-btn"
+          onClick={handleDimLinear}
+          data-testid="tech-dim-linear-button"
+        >
+          📐 Dim X/Y
+        </button>
         <span className="placeholder-hint">
-          Click Dim to start a 2-point dimension, or select a shape to edit it.
+          Click Dim for aligned, Dim X/Y for horizontal/vertical,
+          or select a shape to edit it.
         </span>
       </div>
     )
@@ -592,10 +617,18 @@ export default function TechInputPanel() {
       <button
         type="button"
         className="cmd-btn"
-        onClick={handleDim}
-        data-testid="tech-dim-button"
+        onClick={handleDimAligned}
+        data-testid="tech-dim-aligned-button"
       >
         📏 Dim
+      </button>
+      <button
+        type="button"
+        className="cmd-btn"
+        onClick={handleDimLinear}
+        data-testid="tech-dim-linear-button"
+      >
+        📐 Dim X/Y
       </button>
       <button
         type="button"

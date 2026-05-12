@@ -35,10 +35,16 @@ import {
   findTechSnapTarget, applyCommandTransform, techShapeCentroid,
 } from '../utils/techGeometry'
 // Phase 2 18e (May 12 2026) — Dimension callouts.
+// Phase 2 18e-dim-split (May 12 2026) — single-Dim orientation helper
+// retired; replaced by computeAlignedOrientation + computeLinearOrientation
+// (per spec v1.2 split). isDimensionCommand centralizes the dim-command
+// predicate so every consumer accepts both 'dim-aligned' and 'dim-linear'.
 import {
   renderDimension,
-  computeDimensionOrientation,
+  computeAlignedOrientation,
+  computeLinearOrientation,
   identifySnapSourceShape,
+  isDimensionCommand,
 } from '../utils/dimGeometry'
 
 /**
@@ -1333,7 +1339,7 @@ export default function CanvasStage() {
         // click pointB." Snap diamond at cursor renders via existing
         // techCommandHover path.
         if (
-          state.techActiveCommand === 'dimension'
+          isDimensionCommand(state.techActiveCommand)
           && state.techDimStage === 'awaitPointB'
           && state.techDimPointA
         ) {
@@ -1356,7 +1362,7 @@ export default function CanvasStage() {
         // §"Orientation algorithm" — diagonal baselines always Aligned,
         // axis-aligned baselines choose Linear vs Aligned by cursor side.
         if (
-          state.techActiveCommand === 'dimension'
+          isDimensionCommand(state.techActiveCommand)
           && state.techDimStage === 'awaitPosition'
           && state.techDimPointA
           && state.techDimPointB
@@ -1365,9 +1371,28 @@ export default function CanvasStage() {
             x: (state.cursorX - techVD.panX) / techZoomD,
             y: (state.cursorY - techVD.panY) / techZoomD,
           }
-          const { dimType, orientation, offset } = computeDimensionOrientation(
-            state.techDimPointA, state.techDimPointB, cursorWorld,
-          )
+          // Phase 2 18e-dim-split (May 12 2026) — orientation helper
+          // switches on command:
+          //   dim-aligned → computeAlignedOrientation (offset only)
+          //   dim-linear  → computeLinearOrientation (orientation + offset)
+          const isAligned = state.techActiveCommand === 'dim-aligned'
+          let dimType
+          let orientation
+          let offset
+          if (isAligned) {
+            dimType = 'aligned'
+            orientation = 'aligned'
+            offset = computeAlignedOrientation(
+              state.techDimPointA, state.techDimPointB, cursorWorld,
+            ).offset
+          } else {
+            dimType = 'linear'
+            const linear = computeLinearOrientation(
+              state.techDimPointA, state.techDimPointB, cursorWorld,
+            )
+            orientation = linear.orientation
+            offset = linear.offset
+          }
           const previewDim = {
             type: 'dimension',
             dimType, orientation,
@@ -2132,7 +2157,7 @@ export default function CanvasStage() {
       // be handled by the generic command branches below.
       if (
         store.appMode === 'TECHNICAL'
-        && store.techActiveCommand === 'dimension'
+        && isDimensionCommand(store.techActiveCommand)
       ) {
         const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
         const techZoom = techV.zoom || 1
@@ -2468,7 +2493,7 @@ export default function CanvasStage() {
           //
           // Runs BEFORE the generic PRIORITY 1-5 chain because dim has
           // its own state shape — never falls through.
-          if (store.techActiveCommand === 'dimension') {
+          if (isDimensionCommand(store.techActiveCommand)) {
             const snapHover = store.techCommandHover
             const useSnap = !!snapHover && store.techSnapEnabled
             const stage = store.techDimStage
@@ -2512,15 +2537,27 @@ export default function CanvasStage() {
             }
 
             if (stage === 'awaitPosition') {
-              // Final commit. Compute orientation/dimType/offset from
-              // cursor position relative to A-B baseline per spec
-              // §"Orientation algorithm".
+              // Final commit. Phase 2 18e-dim-split (May 12 2026) —
+              // orientation helper switches on command:
+              //   dim-aligned → computeAlignedOrientation
+              //   dim-linear  → computeLinearOrientation
               const pointA = store.techDimPointA
               const pointB = store.techDimPointB
               if (pointA && pointB) {
-                const { dimType, orientation, offset } = computeDimensionOrientation(
-                  pointA, pointB, cursorWorld,
-                )
+                const isAligned = store.techActiveCommand === 'dim-aligned'
+                let dimType
+                let orientation
+                let offset
+                if (isAligned) {
+                  dimType = 'aligned'
+                  orientation = 'aligned'
+                  offset = computeAlignedOrientation(pointA, pointB, cursorWorld).offset
+                } else {
+                  dimType = 'linear'
+                  const linear = computeLinearOrientation(pointA, pointB, cursorWorld)
+                  orientation = linear.orientation
+                  offset = linear.offset
+                }
                 const preSnap = store.techCommandPreSnap
                 store.commitWorkflow2Dimension(
                   pointA, pointB, dimType, orientation, offset, preSnap,
@@ -3282,7 +3319,7 @@ export default function CanvasStage() {
           // instead of techCommandBasePoint/OriginShapes). Dim doesn't
           // mutate parent shapes during preview, so no shape revert
           // needed.
-          if (sEscTech.techActiveCommand === 'dimension') {
+          if (isDimensionCommand(sEscTech.techActiveCommand)) {
             sEscTech.setTechActiveCommand(null)
             sEscTech.setTechDimStage(null)
             sEscTech.setTechDimPointA(null)

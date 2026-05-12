@@ -94,62 +94,124 @@ export function identifySnapSourceShape(snapTarget, technicalLayers, tolPx) {
   return null
 }
 
+// ============================================================================
+// Phase 2 18e-dim-split (May 12 2026) — spec v1.2.
+//
+// The original `computeDimensionOrientation` (single-Dim model, retired
+// here) collapsed AutoCAD's DIMLINEAR + DIMALIGNED into a single drag-to-
+// discover UI. Operator-reported friction (`b52c9f5` ship): the perp-vs-
+// along dominance gate to escape Aligned default required precise drag
+// aim. Spec v1.2 splits back to two explicit commands matching AutoCAD's
+// pattern.
+//
+// Three new pure functions replace the deleted helper:
+//   - computeAlignedOrientation: Workflow 2 Aligned awaitPosition.
+//     Returns { offset } only. Orientation is always 'aligned'.
+//   - computeLinearOrientation: Workflow 2 Linear awaitPosition.
+//     Returns { orientation: 'horizontal' | 'vertical', offset }.
+//     World-axis-relative (NOT baseline-relative) cursor side
+//     determines H vs V — operator-friendly for axis-aligned baselines.
+//   - pickLinearOrientationFromLine: Workflow 1 Linear. No cursor
+//     input — orientation derived purely from line baseline angle.
+//
+// Plus one helper:
+//   - isDimensionCommand: shared by all dim-state-aware code paths.
+// ============================================================================
+
 /**
- * Per spec §"Orientation algorithm" — compute dimType, orientation,
- * and offset for the 2-point pick live preview.
+ * Workflow 2 Aligned awaitPosition orientation computation.
  *
- * Decision tree:
- *   - Baseline diagonal (not within ±22.5° of horizontal OR vertical)
- *       → ALIGNED, offset = perpComponent
- *   - Baseline roughly horizontal:
- *       cursor perp-dominant   → LINEAR-HORIZONTAL, offset = perpComponent
- *       cursor along-dominant  → ALIGNED,           offset = perpComponent
- *   - Baseline roughly vertical:
- *       cursor perp-dominant   → LINEAR-VERTICAL,   offset = perpComponent
- *       cursor along-dominant  → ALIGNED,           offset = perpComponent
+ * Drag chooses offset + side only — orientation is always 'aligned',
+ * dim line parallel to the A→B baseline. Offset is the signed
+ * perpendicular projection of cursor from baseline midpoint (positive =
+ * one side, negative = other).
  *
- * "Roughly horizontal" = baseline angle within ±22.5° of 0° or 180°.
- * "Roughly vertical"   = baseline angle within ±22.5° of 90° or -90°.
- *
- * @param {{x, y}} pointA - first dimension origin (world coords)
- * @param {{x, y}} pointB - second dimension origin
- * @param {{x, y}} cursorWorld - current cursor position
- * @returns {{dimType: 'linear' | 'aligned', orientation, offset}}
+ * @param {{x, y}} pointA
+ * @param {{x, y}} pointB
+ * @param {{x, y}} cursorWorld
+ * @returns {{offset: number}}
  */
-export function computeDimensionOrientation(pointA, pointB, cursorWorld) {
+export function computeAlignedOrientation(pointA, pointB, cursorWorld) {
   const M = { x: (pointA.x + pointB.x) / 2, y: (pointA.y + pointB.y) / 2 }
   const baselineAngleRad = Math.atan2(pointB.y - pointA.y, pointB.x - pointA.x)
   const baselineUnit = { x: Math.cos(baselineAngleRad), y: Math.sin(baselineAngleRad) }
   const perpUnit = { x: -baselineUnit.y, y: baselineUnit.x } // 90° CCW
   const cursorVec = { x: cursorWorld.x - M.x, y: cursorWorld.y - M.y }
-  const alongComponent = cursorVec.x * baselineUnit.x + cursorVec.y * baselineUnit.y
-  const perpComponent = cursorVec.x * perpUnit.x + cursorVec.y * perpUnit.y
+  const offset = cursorVec.x * perpUnit.x + cursorVec.y * perpUnit.y
+  return { offset }
+}
 
-  // Normalize baseline angle into [0, 180) for axis-aligned detection.
-  // baselineAngleRad ∈ (-π, π], so its mod-180° wraps the 4 cardinal
-  // directions into a single semicircle (0° and 180° collapse onto 0°,
-  // 90° and -90° collapse onto 90°).
-  let baselineDeg = (baselineAngleRad * 180 / Math.PI) % 180
+/**
+ * Workflow 2 Linear awaitPosition orientation computation.
+ *
+ * Cursor side relative to baseline midpoint in WORLD coords determines
+ * horizontal vs vertical. NO aligned outcome possible.
+ *   - |cursor.y - mid.y| > |cursor.x - mid.x|
+ *       → 'horizontal' (dim line horizontal, measures X-distance)
+ *   - else
+ *       → 'vertical' (dim line vertical, measures Y-distance)
+ *
+ * Tie-break (|dx| === |dy|): falls into else branch → 'vertical'.
+ *
+ * Offset is signed distance from midpoint along the chosen
+ * perpendicular axis:
+ *   - horizontal: offset = cursor.y - mid.y
+ *   - vertical:   offset = cursor.x - mid.x
+ *
+ * @param {{x, y}} pointA
+ * @param {{x, y}} pointB
+ * @param {{x, y}} cursorWorld
+ * @returns {{orientation: 'horizontal' | 'vertical', offset: number}}
+ */
+export function computeLinearOrientation(pointA, pointB, cursorWorld) {
+  const M = { x: (pointA.x + pointB.x) / 2, y: (pointA.y + pointB.y) / 2 }
+  const dx = cursorWorld.x - M.x
+  const dy = cursorWorld.y - M.y
+  if (Math.abs(dy) > Math.abs(dx)) {
+    return { orientation: 'horizontal', offset: dy }
+  }
+  return { orientation: 'vertical', offset: dx }
+}
+
+/**
+ * Workflow 1 Linear orientation pick — no cursor input.
+ *
+ * Uses the same ±22.5° thresholds as Workflow 2 Linear's world-axis
+ * decision so the two paths stay visually consistent:
+ *   - baseline within ±22.5° of horizontal → 'horizontal'
+ *   - baseline within ±22.5° of vertical → 'vertical'
+ *   - diagonal (22.5°–67.5° band): longer projection wins
+ *       (|dx| > |dy| → 'horizontal', else 'vertical')
+ *
+ * Defensive: invalid input (no line or no a/b) defaults to 'horizontal'.
+ *
+ * @param {Object} line - tech-line shape with a + b endpoints
+ * @returns {'horizontal' | 'vertical'}
+ */
+export function pickLinearOrientationFromLine(line) {
+  if (!line || line.type !== 'line' || !line.a || !line.b) return 'horizontal'
+  const dx = line.b.x - line.a.x
+  const dy = line.b.y - line.a.y
+  let baselineDeg = (Math.atan2(dy, dx) * 180 / Math.PI) % 180
   if (baselineDeg < 0) baselineDeg += 180
+  if (baselineDeg < 22.5 || baselineDeg > 157.5) return 'horizontal'
+  if (baselineDeg >= 67.5 && baselineDeg <= 112.5) return 'vertical'
+  return Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical'
+}
 
-  const baselineIsRoughlyHorizontal = baselineDeg < 22.5 || baselineDeg > 157.5
-  const baselineIsRoughlyVertical = baselineDeg >= 67.5 && baselineDeg <= 112.5
-  const cursorIsPerpDominant = Math.abs(perpComponent) > Math.abs(alongComponent)
-
-  if (!baselineIsRoughlyHorizontal && !baselineIsRoughlyVertical) {
-    return { dimType: 'aligned', orientation: 'aligned', offset: perpComponent }
-  }
-  if (baselineIsRoughlyHorizontal) {
-    if (cursorIsPerpDominant) {
-      return { dimType: 'linear', orientation: 'horizontal', offset: perpComponent }
-    }
-    return { dimType: 'aligned', orientation: 'aligned', offset: perpComponent }
-  }
-  // Vertical
-  if (cursorIsPerpDominant) {
-    return { dimType: 'linear', orientation: 'vertical', offset: perpComponent }
-  }
-  return { dimType: 'aligned', orientation: 'aligned', offset: perpComponent }
+/**
+ * Shared predicate — true iff `cmd` is one of the dim command values.
+ *
+ * Used by all dim-state-aware call sites (drawDynamic visibility, snap-
+ * scan gate, onMouseDown dispatch, Escape chain, TechInputPanel render
+ * branch). Centralizing the literal-string list here means adding a
+ * future dim command type (angular, radial) is a one-line change.
+ *
+ * @param {string | null | undefined} cmd
+ * @returns {boolean}
+ */
+export function isDimensionCommand(cmd) {
+  return cmd === 'dim-aligned' || cmd === 'dim-linear'
 }
 
 /**
