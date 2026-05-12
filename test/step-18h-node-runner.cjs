@@ -920,6 +920,150 @@ pass('59c. TechnicalPreview imports scriptSource via ?raw',
   /tooling\/kcc-shop-drawing\.py\?raw/.test(techPreviewSrc))
 
 // ============================================================================
+// BLOCK I — Deploy-state gates (60-62)
+// ============================================================================
+// These tests catch failures the source-grep tests in Block H miss:
+//   I.1 — work is committed (catches "uncommitted on local")
+//   I.2 — production bundle contains 18h strings (catches "ran tests but
+//          didn't rebuild")
+//   I.3 — Pages-deployed SHA matches local HEAD (catches "built but
+//          didn't deploy")
+//
+// Why these exist: §21.18h shipped with 127/127 source-grep PASS but the
+// Preview button was invisible on the live URL because the 18h commit
+// was never pushed. Block I makes ship-state a test concern, not a
+// human-discipline concern.
+//
+// I.3 can be slow (HTTP fetch to GitHub Pages) and depends on the
+// network, so the runner honors a CLI flag --skip-deploy-check that
+// bypasses I.3. I.1 and I.2 always run; they're local-only and fast.
+const { execSync } = require('child_process')
+const SKIP_DEPLOY = process.argv.includes('--skip-deploy-check')
+
+// 18h paths — must be clean (committed + tracked) for I.1 to PASS.
+const PATHS_18H = [
+  'src/App.css',
+  'src/App.jsx',
+  'src/components/DrawingTools.jsx',
+  'src/components/TechnicalPreview.jsx',
+  'src/hooks/useShopDrawingPdf.js',
+  'src/store/useAppStore.js',
+  'src/utils/kccProxy.js',
+  'src/utils/pdfAsyncPipeline.js',
+  'src/utils/shopDrawingSvgMath.js',
+  'src/utils/shopDrawingSvgRender.jsx',
+  'src/utils/specTableJSON.js',
+  'src/utils/specTableValidation.js',
+  'test/step-18h-node-runner.cjs',
+  'tooling/kcc-shop-drawing.py',
+]
+
+const repoRoot = path.join(__dirname, '..')
+const gitOpts = { cwd: repoRoot, encoding: 'utf-8' }
+
+// I.1 — Build-state: all 18h paths committed + tracked.
+let buildStateOk = true
+let buildStateDetail = ''
+try {
+  // git status --porcelain returns lines like " M file" or "?? file".
+  // We want zero output for any 18h path. (PATHS_18H is whitelisted —
+  // if a 18h file shows up dirty/untracked, the test fails.)
+  const status = execSync(
+    'git status --porcelain -- ' + PATHS_18H.map((p) => '"' + p + '"').join(' '),
+    gitOpts,
+  )
+  if (status.trim().length > 0) {
+    buildStateOk = false
+    buildStateDetail = status.trim()
+  }
+} catch (e) {
+  buildStateOk = false
+  buildStateDetail = 'git status failed: ' + (e && e.message)
+}
+pass('60. I.1 build-state — all 18h paths committed + tracked',
+  buildStateOk, { detail: buildStateDetail })
+
+// I.2 — Bundle-state: dist bundle contains 18h markers.
+// Build is expensive (~5s); skip if SKIP_BUILD is set (CI hint).
+let bundleStateOk = true
+let bundleStateDetail = ''
+const SKIP_BUILD = process.argv.includes('--skip-build')
+if (SKIP_BUILD) {
+  bundleStateDetail = 'skipped (--skip-build)'
+} else {
+  try {
+    execSync('npm run build', { ...gitOpts, stdio: 'pipe' })
+    const distDir = path.join(repoRoot, 'dist', 'assets')
+    const bundles = fs.readdirSync(distDir).filter((f) => /^index-.*\.js$/.test(f))
+    if (bundles.length !== 1) {
+      bundleStateOk = false
+      bundleStateDetail = 'expected 1 index-*.js bundle, found ' + bundles.length
+    } else {
+      const bundleSrc = fs.readFileSync(path.join(distDir, bundles[0]), 'utf-8')
+      const markers = ['btn-tech-preview', 'openPreview', 'kcc-proxy.netlify.app']
+      const missing = markers.filter((m) => !bundleSrc.includes(m))
+      if (missing.length > 0) {
+        bundleStateOk = false
+        bundleStateDetail = 'missing in bundle: ' + missing.join(', ')
+      }
+    }
+  } catch (e) {
+    bundleStateOk = false
+    bundleStateDetail = 'build failed: ' + (e && e.message ? e.message.slice(0, 200) : e)
+  }
+}
+pass('61. I.2 bundle-state — dist/index-*.js contains 18h markers',
+  bundleStateOk, { detail: bundleStateDetail })
+
+// I.3 — Deploy-state: live Pages bundle's __BUILD_SHA__ matches local HEAD.
+// Honors --skip-deploy-check for local dev / pre-deploy runs.
+let deployStateOk = true
+let deployStateDetail = ''
+if (SKIP_DEPLOY) {
+  deployStateDetail = 'skipped (--skip-deploy-check)'
+} else {
+  try {
+    const localSha = execSync('git rev-parse --short=7 HEAD', gitOpts).trim()
+    // Fetch the deployed index.html, then the linked bundle, then look
+    // for the SHA marker Vite injects via __BUILD_SHA__ define.
+    const idxHtml = execSync(
+      'curl -fsSL https://briana-sudo.github.io/roofmark/',
+      gitOpts,
+    )
+    const bundleMatch = idxHtml.match(/assets\/index-[A-Za-z0-9_-]+\.js/)
+    if (!bundleMatch) {
+      deployStateOk = false
+      deployStateDetail = 'index.html missing bundle link'
+    } else {
+      const bundleUrl = 'https://briana-sudo.github.io/roofmark/' + bundleMatch[0]
+      const bundle = execSync('curl -fsSL "' + bundleUrl + '"', gitOpts)
+      // Bundle injects `__BUILD_SHA__` as a string literal. Vite minifies
+      // the JSX `Build: {sha}` to e.g. ``Build: ${sha}`` — search for a
+      // 7-char hex SHA following the "Build: " marker, allowing for
+      // backtick / template-literal punctuation.
+      const shaMatch = bundle.match(/Build:\s*[`"',\\\s]*([0-9a-f]{7})/)
+      if (!shaMatch) {
+        deployStateOk = false
+        deployStateDetail = 'live bundle has no Build: SHA marker'
+      } else {
+        const deployedSha = shaMatch[1]
+        if (deployedSha !== localSha) {
+          deployStateOk = false
+          deployStateDetail = 'local=' + localSha + ' deployed=' + deployedSha
+        } else {
+          deployStateDetail = 'sha=' + deployedSha
+        }
+      }
+    }
+  } catch (e) {
+    deployStateOk = false
+    deployStateDetail = 'deploy check failed: ' + (e && e.message ? e.message.slice(0, 200) : e)
+  }
+}
+pass('62. I.3 deploy-state — live bundle __BUILD_SHA__ matches local HEAD',
+  deployStateOk, { detail: deployStateDetail })
+
+// ============================================================================
 // SUMMARY
 // ============================================================================
 // Block E tests use async fetch mocks. Need to wait for the microtask
