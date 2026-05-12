@@ -639,6 +639,42 @@ const initialState = {
   techDimStage: null,
   techDimPointA: null,
   techDimPointB: null,
+  // Phase 2 18h (May 12 2026) — Technical Drawing preview state +
+  // PDF-generation job state. All transient (NOT in PERSIST_KEYS,
+  // NOT in dataSnapshot). Cleared on appMode change away from
+  // TECHNICAL and on clearAll. Preview controls default to v1.1
+  // Python script's defaults so first-open shows a regression-safe
+  // landscape / 0° / auto / 1.0× layout matching v1.0 output.
+  //
+  //   previewState.isOpen          — full-screen preview overlay mounted?
+  //   previewState.pageOrientation — 'landscape' | 'portrait'
+  //   previewState.geometryRotation — 0 | 90 | 180 | 270
+  //   previewState.fitMode         — 'auto' | '1:1' | 'custom'
+  //   previewState.customScale     — number > 0, only used when fitMode='custom'
+  //
+  //   pdfJob.phase — 'idle' | 'submitting' | 'polling' | 'fetching' | 'done' | 'error'
+  //   pdfJob.error — string | null (error_detail from proxy or local fail)
+  //   pdfJob.elapsedSec — float (most recent poll's elapsed-since-submit)
+  //   pdfJob.warning — bool (set true once 90s threshold crossed)
+  //   pdfJob.filename — string | null (composed at job start)
+  //
+  // pdfJob mirrors useShopDrawingPdf hook state. Components that don't
+  // directly use the hook (e.g., DrawingTools' Preview button disabled
+  // state) read from the store mirror.
+  previewState: {
+    isOpen: false,
+    pageOrientation: 'landscape',
+    geometryRotation: 0,
+    fitMode: 'auto',
+    customScale: 1.0,
+  },
+  pdfJob: {
+    phase: 'idle',
+    error: null,
+    elapsedSec: 0,
+    warning: false,
+    filename: null,
+  },
   // Phase 2 18b/18c — Technical Drawing line-tool draft state.
   // Transient. NOT in PERSIST_KEYS. null when no draft in progress.
   // Active shape:
@@ -1663,6 +1699,13 @@ export const useAppStore = create((set, get) => {
           techDimStage: null,
           techDimPointA: null,
           techDimPointB: null,
+          // Phase 2 18h — close preview when switching modes. Operator
+          // leaving Technical Drawing should not return to find a stale
+          // preview overlay covering Field Markup. previewState's
+          // controls (orientation, rotation, fitMode, customScale)
+          // persist across close — operator returns to their last choices
+          // next time they open Preview.
+          previewState: { ...s.previewState, isOpen: false },
         }
       })
     },
@@ -2024,6 +2067,50 @@ export const useAppStore = create((set, get) => {
     setTechDimStage: (stage) => set({ techDimStage: stage }),
     setTechDimPointA: (p) => set({ techDimPointA: p }),
     setTechDimPointB: (p) => set({ techDimPointB: p }),
+
+    // ============ Phase 2 18h (May 12 2026) — Preview + PDF gen ===========
+    //
+    // previewState actions: open/close + the 4 v1.1 control mutators.
+    // setPageOrientation accepts 'landscape' | 'portrait'.
+    // cycleRotation steps 0 → 90 → 180 → 270 → 0.
+    // setFitMode accepts 'auto' | '1:1' | 'custom'.
+    // setCustomScale validates > 0; rejects bad input silently (UI handles
+    // bounds — store stays defensive).
+    openPreview: () => set((s) => ({
+      previewState: { ...s.previewState, isOpen: true },
+    })),
+    closePreview: () => set((s) => ({
+      previewState: { ...s.previewState, isOpen: false },
+    })),
+    setPageOrientation: (orientation) => {
+      if (orientation !== 'landscape' && orientation !== 'portrait') return
+      set((s) => ({
+        previewState: { ...s.previewState, pageOrientation: orientation },
+      }))
+    },
+    cycleRotation: () => set((s) => {
+      const order = [0, 90, 180, 270]
+      const idx = order.indexOf(s.previewState.geometryRotation)
+      const next = order[(idx + 1) % order.length]
+      return { previewState: { ...s.previewState, geometryRotation: next } }
+    }),
+    setFitMode: (mode) => {
+      if (mode !== 'auto' && mode !== '1:1' && mode !== 'custom') return
+      set((s) => ({ previewState: { ...s.previewState, fitMode: mode } }))
+    },
+    setCustomScale: (n) => {
+      const v = Number(n)
+      if (!Number.isFinite(v) || v <= 0) return
+      set((s) => ({ previewState: { ...s.previewState, customScale: v } }))
+    },
+    // pdfJob mirror — the hook updates this from its progress callbacks.
+    setPdfJob: (patch) => {
+      if (!patch || typeof patch !== 'object') return
+      set((s) => ({ pdfJob: { ...s.pdfJob, ...patch } }))
+    },
+    resetPdfJob: () => set({
+      pdfJob: { phase: 'idle', error: null, elapsedSec: 0, warning: false, filename: null },
+    }),
 
     // 18d-edit commit actions (May 11 2026 addendum) — single source of
     // truth for command semantics. All five commit paths (Rotate, Move,

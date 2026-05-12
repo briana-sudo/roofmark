@@ -3,10 +3,12 @@
 kcc-shop-drawing.py — KCC RoofMark Locked Shop Drawing Template
 ================================================================================
 
-Status      : LOCKED — v1.0 — April 28 2026
+Status      : LOCKED — v1.1 — May 12 2026
 Authority   : Approved title block layout draft v3 (Webster Groves session)
+              + 18h decision-flag pass May 12 2026 (Brian, locked).
 Spec        : RoofMark Kickoff Spec v1.0, Section 21 — Technical Drawing Mode
               https://www.notion.so/33eca70abea681668644c1dc03228839
+18h spec    : https://www.notion.so/35eca70abea68142854ad4c62cb5dab1
 Branding    : KCC Operational Standards — navy / orange / Arial-equivalent
               https://www.notion.so/33dca70abea681c48ce8ff448587bfe4
 
@@ -17,6 +19,19 @@ Technical Drawing JSON export, calls render_shop_drawing(data, out_dir),
 and gets back a finished, fabricator-ready PDF. No layout iteration. No
 template variables. Every position, font size, color, and proportion is a
 hardcoded constant in this file.
+
+v1.0 → v1.1 changes
+-------------------
+v1.1 adds 4 OPTIONAL input fields. When omitted, v1.1 produces output
+visually identical to v1.0 (regression-safe per 18h locked decision D11):
+- pageOrientation: 'landscape' (default) | 'portrait'
+- geometryRotation: 0 (default) | 90 | 180 | 270  (degrees clockwise)
+- fitMode: 'auto' (default) | '1:1' | 'custom'
+- customScale: number > 0 (default 1.0, used only when fitMode == 'custom')
+
+Reference-PDF alignment (CLIENT / STATUS / PROFILE-description / REV /
+SHEET / notes block / length-into-page callout / finish callout) is
+OUT OF SCOPE for v1.1. Visual style is unchanged.
 
 Input contract
 --------------
@@ -37,19 +52,25 @@ data = {
             "name":       str,
             "color":      str,                 # hex, e.g. "#374151"
             "order":      int,                 # 0 = bottom, drawn first
-            "shapes":     [ shape, ... ],      # see shape spec below
-            "dimensions": [ dim, ... ],        # see dimension spec below
-            "callouts":   [ callout, ... ],    # see callout spec below
+            "shapes":     [ shape, ... ],
+            "dimensions": [ dim, ... ],
+            "callouts":   [ callout, ... ],
         },
         ...
     ],
-    "drawingType":   "profile" | "assembly_stack",
-    "internalScale": 24,                       # px per inch — fixed, never changes
+    "drawingType":     "profile" | "assembly_stack",
+    "internalScale":   24,                     # px per inch — fixed, never changes
+
+    # v1.1 (May 12 2026) — all 4 optional:
+    "pageOrientation": "landscape" | "portrait",   # default "landscape"
+    "geometryRotation": 0 | 90 | 180 | 270,        # default 0, degrees CW
+    "fitMode":         "auto" | "1:1" | "custom",  # default "auto"
+    "customScale":     number > 0,                 # default 1.0, used only when fitMode == "custom"
 }
 
 Shape object
 ------------
-Same as RoofMark canvas shape:
+Same as RoofMark canvas shape (unchanged in v1.1):
     { "id": str, "type": "poly"|"tri"|"rect"|"circ"|"line",
       "pts": [{"x": float, "y": float}, ...]   # used by poly/tri/rect/line
       "cx": float, "cy": float, "r": float,    # circ only
@@ -65,19 +86,18 @@ Callout object
 --------------
     { "id": str, "tipX": float, "tipY": float, "tailX": float, "tailY": float,
       "num": int, "textEN": str }
-(Spanish text is not rendered on the shop drawing — fabricators read the
-fabrication-shop language only. textES is ignored here.)
 
 Output
 ------
 PDF written to:  out_dir / [drawingNo]_[partName-slug].pdf
-Filename slug rule: partName has spaces -> hyphens, all non-alphanumeric/
-underscore/hyphen characters dropped, double hyphens collapsed.
-Returns the absolute path of the produced PDF as a string.
+Filename pattern is UNCHANGED across orientation / rotation / fitMode
+(decision D12). PDF page geometry differs.
 
 Page format
 -----------
-Letter landscape (11.0in x 8.5in = 792pt x 612pt). Origin at bottom-left.
+Default landscape letter (11.0in x 8.5in = 792pt x 612pt). Portrait
+selected via pageOrientation == 'portrait' switches to 8.5in x 11.0in
+(612pt x 792pt) with 2-cols × 4-rows spec table per decision D7.
 
 ================================================================================
 """
@@ -88,19 +108,25 @@ import re
 from pathlib import Path
 
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib.pagesizes import letter, landscape, portrait
 from reportlab.lib.colors import HexColor, white, black, Color
 
 
 # =============================================================================
 # LOCKED LAYOUT CONSTANTS — DO NOT EDIT WITHOUT A NEW DESIGN SESSION
+#
+# These module-level constants document the v1.0 LANDSCAPE layout. v1.1
+# computes a per-orientation layout dict in `_layout(orientation)` below
+# which mirrors these values for landscape and re-flows for portrait per
+# 18h decision D7 (2 cols × 4 rows spec table) and D8 (138 pt spec table
+# height). Renderer reads from the dict, NOT these constants.
 # =============================================================================
 
-# ---- Page ------------------------------------------------------------------
+# ---- Page (landscape default) ----------------------------------------------
 PAGE_W = 792.0     # 11.0 in
 PAGE_H = 612.0     # 8.5 in
 
-# ---- Brand colors ----------------------------------------------------------
+# ---- Brand colors (orientation-independent) --------------------------------
 KCC_NAVY        = HexColor("#1A2F4A")
 KCC_ORANGE      = HexColor("#E8630A")
 LIGHT_GRAY_BG   = HexColor("#ECEEF2")
@@ -110,62 +136,40 @@ TEXT_DIM        = HexColor("#666666")
 HEADER_SUB_TEXT = HexColor("#C8D8E8")
 DIM_AMBER       = HexColor("#B8860B")   # dimension labels (print-friendly amber)
 
-# ---- Sheet frame -----------------------------------------------------------
+# ---- Sheet frame (orientation-independent magnitudes) ----------------------
 MARGIN          = 25.2     # 0.35 in — perimeter inset
-
-SHEET_X0        = MARGIN
-SHEET_Y0        = MARGIN
-SHEET_X1        = PAGE_W - MARGIN
-SHEET_Y1        = PAGE_H - MARGIN
-
 SHEET_BORDER_SW = 1.0      # navy perimeter line weight
 
-# ---- Header bar ------------------------------------------------------------
+# ---- Header bar (orientation-independent heights) --------------------------
 HEADER_H        = 39.6     # 0.55 in
 HDR_LEFT_PAD    = 14.4     # 0.20 in
 HDR_RIGHT_PAD   = 14.4     # 0.20 in
 
-HDR_Y1          = SHEET_Y1
-HDR_Y0          = HDR_Y1 - HEADER_H
-
-# Header LEFT — primary line (company)
-HDR_L_PRIMARY_Y       = HDR_Y0 + HEADER_H * 0.58   # baseline
 HDR_L_PRIMARY_FONT    = "Helvetica-Bold"
 HDR_L_PRIMARY_SIZE    = 13
 HDR_L_PRIMARY_COLOR   = white
 HDR_L_PRIMARY_TEXT    = "KOSAREK CONSTRUCTION CO."
 
-# Header LEFT — secondary line (license / tagline)
-HDR_L_SECONDARY_Y     = HDR_Y0 + HEADER_H * 0.20
 HDR_L_SECONDARY_FONT  = "Helvetica"
 HDR_L_SECONDARY_SIZE  = 7.5
 HDR_L_SECONDARY_COLOR = HEADER_SUB_TEXT
 HDR_L_SECONDARY_TEXT  = "Illinois Unlimited Roofing License  |  Engineered Roofing Precision"
 
-# Header RIGHT — small label "SHOP DRAWING" (orange)
-HDR_R_LABEL_Y         = HDR_Y0 + HEADER_H * 0.62
 HDR_R_LABEL_FONT      = "Helvetica-Bold"
 HDR_R_LABEL_SIZE      = 8
 HDR_R_LABEL_COLOR     = KCC_ORANGE
 HDR_R_LABEL_TEXT      = "SHOP DRAWING"
 
-# Header RIGHT — primary identifier (drawing number, white, large)
-HDR_R_DWGNO_Y         = HDR_Y0 + HEADER_H * 0.18
 HDR_R_DWGNO_FONT      = "Helvetica-Bold"
 HDR_R_DWGNO_SIZE      = 15
 HDR_R_DWGNO_COLOR     = white
 
 # ---- Orange accent stripe --------------------------------------------------
 ACCENT_H        = 4.3      # 0.06 in
-ACC_Y1          = HDR_Y0
-ACC_Y0          = ACC_Y1 - ACCENT_H
 
 # ---- Footer bar ------------------------------------------------------------
 FOOTER_H        = 21.6     # 0.30 in
-FTR_Y0          = SHEET_Y0
-FTR_Y1          = FTR_Y0 + FOOTER_H
 
-FTR_TEXT_Y      = FTR_Y0 + FOOTER_H * 0.32
 FTR_LEFT_FONT   = "Helvetica-Bold"
 FTR_LEFT_SIZE   = 7
 FTR_LEFT_COLOR  = white
@@ -174,19 +178,14 @@ FTR_LEFT_TEXT   = "KCC ROOFMARK  |  AEROSPACE-GRADE PROCESS DISCIPLINE FOR ROOFI
 FTR_RIGHT_FONT  = "Helvetica"
 FTR_RIGHT_SIZE  = 7
 FTR_RIGHT_COLOR = HEADER_SUB_TEXT
-FTR_RIGHT_TEXT  = "kcc-shop-drawing.py v1.0  |  internal scale 24 px / inch"
+# v1.0 → v1.1: footer right text updated to reflect script version.
+FTR_RIGHT_TEXT  = "kcc-shop-drawing.py v1.1  |  internal scale 24 px / inch"
 
-# ---- Spec table ------------------------------------------------------------
-SPEC_TABLE_H    = 75.6     # 1.05 in
-SPEC_Y0         = FTR_Y1
-SPEC_Y1         = SPEC_Y0 + SPEC_TABLE_H
+# ---- Spec table — landscape layout (4 cols × 2 rows) -----------------------
+SPEC_TABLE_H_LANDSCAPE = 75.6    # 1.05 in
+ST_BAR_H        = 12.96          # 0.18 in
+ST_BAR_TEXT_OFFSET_RATIO = 0.30  # text y relative to bar height
 
-# Top stripe of spec table (navy bar with section title)
-ST_BAR_H        = 12.96    # 0.18 in
-ST_BAR_Y0       = SPEC_Y1 - ST_BAR_H
-ST_BAR_Y1       = SPEC_Y1
-
-ST_BAR_TEXT_Y   = ST_BAR_Y0 + ST_BAR_H * 0.30
 ST_BAR_L_FONT   = "Helvetica-Bold"
 ST_BAR_L_SIZE   = 8
 ST_BAR_L_COLOR  = white
@@ -197,17 +196,10 @@ ST_BAR_R_SIZE   = 7
 ST_BAR_R_COLOR  = HEADER_SUB_TEXT
 ST_BAR_R_TEXT   = "KCC RoofMark — Locked Title Block"
 
-# Spec field grid: 4 columns x 2 rows = 8 fields
-SPEC_COLS       = 4
-SPEC_ROWS       = 2
-SPEC_GRID_Y0    = SPEC_Y0
-SPEC_GRID_Y1    = ST_BAR_Y0
-SPEC_COL_W      = (SHEET_X1 - SHEET_X0) / SPEC_COLS
-SPEC_ROW_H      = (SPEC_GRID_Y1 - SPEC_GRID_Y0) / SPEC_ROWS
-
 SPEC_DIVIDER_SW = 0.4
 
-# Field order, row-major (top row left-to-right, then bottom row left-to-right)
+# Field order, row-major. 9th field (drawingNo) lives in the header
+# (decision D9 — unchanged from v1.0).
 SPEC_FIELDS = (
     ("PART NAME",     "partName"),
     ("MATERIAL",      "material"),
@@ -231,15 +223,15 @@ SPEC_VALUE_COLOR     = KCC_NAVY
 SPEC_VALUE_PAD_X     = 8
 SPEC_VALUE_OFFSET_Y  = 8    # above cell bottom
 
+# ---- Spec table — portrait layout (2 cols × 4 rows per decision D7) --------
+# Total height 138 pt = navy stripe 12.96 + 4 rows × 31.26 (decision D8).
+SPEC_TABLE_H_PORTRAIT = 138.0
+SPEC_ROW_H_PORTRAIT   = 31.26    # matches landscape row height to within 0.06 pt
+
 # ---- Drawing area ----------------------------------------------------------
 DRAW_TOP_PAD    = 7.2      # 0.10 in
 DRAW_BOT_PAD    = 7.2      # 0.10 in
 DRAW_SIDE_PAD   = 7.2
-
-DRAW_X0         = SHEET_X0 + DRAW_SIDE_PAD
-DRAW_X1         = SHEET_X1 - DRAW_SIDE_PAD
-DRAW_Y0         = SPEC_Y1 + DRAW_BOT_PAD
-DRAW_Y1         = ACC_Y0  - DRAW_TOP_PAD
 
 DRAW_BORDER_SW  = 0.5
 DRAW_GRID_SPACING = 36.0   # 0.5 in faint grid lines
@@ -249,10 +241,10 @@ DRAW_GRID_SW    = 0.25
 CROSSHAIR_LEN   = 10
 CROSSHAIR_SW    = 1.0
 
-# Auto-fit scaling — geometry from JSON is in pixels at 24 px/in.
-# Scale factor is computed at render time so the drawing fills the area
-# while preserving aspect ratio. Margin inside the drawing area:
-DRAW_FIT_MARGIN = 18.0     # pt — reserves space for dimension lines and labels
+# Auto-fit scaling margin (inside drawing area) — reserves space for
+# dimension lines and labels. Used by both 'auto' and overflow checks
+# for '1:1' / 'custom'.
+DRAW_FIT_MARGIN = 18.0     # pt
 
 # ---- Geometry rendering ----------------------------------------------------
 DEFAULT_FILL_OPACITY    = 0.25
@@ -261,8 +253,8 @@ DEFAULT_STROKE_WEIGHT   = 1.6
 DEFAULT_FILL_ON         = True
 DEFAULT_STROKE_ON       = True
 
-# Dimension line styling (matches RoofMark amber but print-friendly)
-DIM_EXTENSION_OFFSET    = 14.0   # pt offset of extension line from endpoint
+# Dimension line styling
+DIM_EXTENSION_OFFSET    = 14.0
 DIM_LINE_SW             = 0.8
 DIM_ARROW_LEN           = 6.0
 DIM_ARROW_HALF_W        = 2.5
@@ -271,7 +263,7 @@ DIM_LABEL_SIZE          = 8
 DIM_LABEL_PAD           = 3.0
 DIM_LABEL_BG_PAD        = 2.0
 
-# Callout styling (numbered tip + text bubble)
+# Callout styling
 CALLOUT_TIP_R           = 8.0
 CALLOUT_TIP_FILL        = KCC_ORANGE
 CALLOUT_TIP_STROKE      = white
@@ -290,25 +282,313 @@ CALLOUT_BOX_SW          = 0.6
 CALLOUT_BOX_PAD_X       = 5.0
 CALLOUT_BOX_PAD_Y       = 3.0
 
-# Layer label (component name printed near the layer in assembly stack mode)
+# Layer label (assembly stack mode)
 LAYER_LABEL_FONT        = "Helvetica-Bold"
 LAYER_LABEL_SIZE        = 7.5
 
+# v1.1 (18h decision D2) — 1:1 scale interpretation: real-world.
+# 24 JSON pixels = 1 inch on paper = 72 PDF points. So pixel→point
+# scale at 1:1 is 72.0 / 24.0 = 3.0.
+ONE_TO_ONE_SCALE = 72.0 / 24.0   # = 3.0
+
 
 # =============================================================================
-# RENDER FUNCTION (the one entry point)
+# v1.1 — LAYOUT FUNCTION
+#
+# Returns a dict of all positional constants for the requested orientation.
+# Per 18h IMPLEMENTATION NOTES §2: renderer pulls from this dict rather
+# than the module-level constants, so portrait re-flow is data-driven.
+# Module-level constants stay as v1.0-landscape fallback documentation.
+# =============================================================================
+
+def _layout(orientation: str) -> dict:
+    """Build the positional-constant dict for the requested page orientation.
+
+    Decisions D7 + D8 (May 12 2026): portrait spec table is 2 cols × 4 rows,
+    138 pt tall. All other vertical components (header, accent, footer)
+    keep their landscape heights; the drawing area absorbs the
+    orientation-driven slack.
+    """
+    if orientation == "portrait":
+        page_w, page_h = 612.0, 792.0
+        spec_table_h = SPEC_TABLE_H_PORTRAIT
+        spec_cols = 2
+        spec_rows = 4
+    else:
+        # 'landscape' (default + v1.0 behavior)
+        page_w, page_h = 792.0, 612.0
+        spec_table_h = SPEC_TABLE_H_LANDSCAPE
+        spec_cols = 4
+        spec_rows = 2
+
+    sheet_x0 = MARGIN
+    sheet_y0 = MARGIN
+    sheet_x1 = page_w - MARGIN
+    sheet_y1 = page_h - MARGIN
+
+    hdr_y1   = sheet_y1
+    hdr_y0   = hdr_y1 - HEADER_H
+
+    acc_y1   = hdr_y0
+    acc_y0   = acc_y1 - ACCENT_H
+
+    ftr_y0   = sheet_y0
+    ftr_y1   = ftr_y0 + FOOTER_H
+
+    spec_y0  = ftr_y1
+    spec_y1  = spec_y0 + spec_table_h
+
+    st_bar_y0 = spec_y1 - ST_BAR_H
+    st_bar_y1 = spec_y1
+
+    spec_grid_y0 = spec_y0
+    spec_grid_y1 = st_bar_y0
+    spec_col_w = (sheet_x1 - sheet_x0) / spec_cols
+    spec_row_h = (spec_grid_y1 - spec_grid_y0) / spec_rows
+
+    draw_x0 = sheet_x0 + DRAW_SIDE_PAD
+    draw_x1 = sheet_x1 - DRAW_SIDE_PAD
+    draw_y0 = spec_y1 + DRAW_BOT_PAD
+    draw_y1 = acc_y0  - DRAW_TOP_PAD
+
+    return {
+        "orientation":   orientation,
+        "page_w":        page_w,
+        "page_h":        page_h,
+        "sheet_x0":      sheet_x0,
+        "sheet_y0":      sheet_y0,
+        "sheet_x1":      sheet_x1,
+        "sheet_y1":      sheet_y1,
+        "hdr_y0":        hdr_y0,
+        "hdr_y1":        hdr_y1,
+        "acc_y0":        acc_y0,
+        "acc_y1":        acc_y1,
+        "ftr_y0":        ftr_y0,
+        "ftr_y1":        ftr_y1,
+        "spec_y0":       spec_y0,
+        "spec_y1":       spec_y1,
+        "spec_table_h":  spec_table_h,
+        "st_bar_y0":     st_bar_y0,
+        "st_bar_y1":     st_bar_y1,
+        "spec_cols":     spec_cols,
+        "spec_rows":     spec_rows,
+        "spec_grid_y0":  spec_grid_y0,
+        "spec_grid_y1":  spec_grid_y1,
+        "spec_col_w":    spec_col_w,
+        "spec_row_h":    spec_row_h,
+        "draw_x0":       draw_x0,
+        "draw_x1":       draw_x1,
+        "draw_y0":       draw_y0,
+        "draw_y1":       draw_y1,
+    }
+
+
+# =============================================================================
+# v1.1 — INPUT VALIDATION
+# =============================================================================
+
+_VALID_ORIENTATIONS = ("landscape", "portrait")
+_VALID_ROTATIONS = (0, 90, 180, 270)
+_VALID_FIT_MODES = ("auto", "1:1", "custom")
+
+
+def _validate_v11_inputs(data: dict):
+    """Raise ValueError on any malformed v1.1 input. Missing fields fall
+    to defaults silently. Type mismatches do NOT coerce (decision D11
+    regression contract requires explicit failure)."""
+    # pageOrientation
+    if "pageOrientation" in data:
+        po = data["pageOrientation"]
+        if po not in _VALID_ORIENTATIONS:
+            raise ValueError(
+                f"pageOrientation must be one of {_VALID_ORIENTATIONS}, "
+                f"got {po!r}"
+            )
+
+    # geometryRotation
+    if "geometryRotation" in data:
+        gr = data["geometryRotation"]
+        # Reject booleans and non-int types explicitly.
+        # isinstance(True, int) is True in Python, so guard against bool first.
+        if isinstance(gr, bool) or not isinstance(gr, int) or gr not in _VALID_ROTATIONS:
+            raise ValueError(
+                f"geometryRotation must be one of {_VALID_ROTATIONS}, "
+                f"got {gr!r}"
+            )
+
+    # fitMode
+    if "fitMode" in data:
+        fm = data["fitMode"]
+        if fm not in _VALID_FIT_MODES:
+            raise ValueError(
+                f"fitMode must be one of {_VALID_FIT_MODES}, got {fm!r}"
+            )
+
+    # customScale — only validate when fitMode is 'custom'. Per decision D6
+    # customScale must be a number > 0 (reject 0, negative, None, strings).
+    # When fitMode != 'custom', customScale is ignored silently.
+    if data.get("fitMode") == "custom":
+        cs = data.get("customScale", 1.0)
+        if isinstance(cs, bool) or not isinstance(cs, (int, float)) or cs <= 0:
+            raise ValueError(
+                f"customScale must be a positive number when "
+                f"fitMode='custom', got {cs!r}"
+            )
+
+
+# =============================================================================
+# v1.1 — GEOMETRY ROTATION
+# =============================================================================
+
+def _rotate_geometry(data: dict, degrees: int) -> dict:
+    """Pre-rotate all geometry points around the bbox centroid before
+    auto-fit / 1:1 / custom-scale runs (decision D10).
+
+    Screen-y-down convention (RoofMark canvas convention):
+        90° CW :  (x, y) → (cx + (y - cy), cy - (x - cx))
+        180°   :  (x, y) → (2*cx - x,       2*cy - y)
+        270° CW:  (x, y) → (cx - (y - cy), cy + (x - cx))
+        0°     :  no-op
+
+    Validated at input pre-pass; here we assume `degrees` is one of
+    {0, 90, 180, 270}. Returns a deep-copied data dict; original is
+    not mutated.
+    """
+    if degrees == 0:
+        return data
+
+    # Deep-copy only the geometry portion. specTable + top-level fields
+    # are shared by reference (immutable strings/numbers — safe).
+    from copy import deepcopy
+    data = deepcopy(data)
+    layers = data.get("layers") or []
+    if not layers:
+        return data
+
+    # Compute centroid from pre-rotation bbox of all geometry points.
+    bbox = _compute_bbox(layers)
+    if bbox is None:
+        return data
+    bx0, by0, bx1, by1 = bbox
+    cx = (bx0 + bx1) / 2
+    cy = (by0 + by1) / 2
+
+    def rot(x, y):
+        if degrees == 90:
+            return (cx + (y - cy), cy - (x - cx))
+        if degrees == 180:
+            return (2 * cx - x, 2 * cy - y)
+        # degrees == 270
+        return (cx - (y - cy), cy + (x - cx))
+
+    for layer in layers:
+        for sh in layer.get("shapes", []) or []:
+            if sh.get("type") == "circ":
+                nx, ny = rot(sh.get("cx", 0), sh.get("cy", 0))
+                sh["cx"] = nx
+                sh["cy"] = ny
+                # Radius rotation-invariant
+            else:
+                for p in sh.get("pts", []) or []:
+                    nx, ny = rot(p.get("x", 0), p.get("y", 0))
+                    p["x"] = nx
+                    p["y"] = ny
+        for d in layer.get("dimensions", []) or []:
+            nx1, ny1 = rot(d.get("x1", 0), d.get("y1", 0))
+            nx2, ny2 = rot(d.get("x2", 0), d.get("y2", 0))
+            d["x1"] = nx1; d["y1"] = ny1
+            d["x2"] = nx2; d["y2"] = ny2
+        for ca in layer.get("callouts", []) or []:
+            tipx, tipy = rot(ca.get("tipX", 0), ca.get("tipY", 0))
+            tailx, taily = rot(ca.get("tailX", 0), ca.get("tailY", 0))
+            ca["tipX"] = tipx; ca["tipY"] = tipy
+            ca["tailX"] = tailx; ca["tailY"] = taily
+
+    return data
+
+
+# =============================================================================
+# v1.1 — FIT-MODE SCALE COMPUTATION
+# =============================================================================
+
+def _compute_fit_scale(bbox, layout, fit_mode: str, custom_scale: float):
+    """Return (scale, tx, ty) for the requested fit mode.
+
+    Decisions:
+        D2  — 1:1 == real-world: scale = 72/24 = 3.0
+        D3  — 1:1 overflow: fail loudly with ValueError
+        D4  — Custom overflow: fail loudly with ValueError
+        D5  — Rotation happens BEFORE this function. The bbox passed in
+              is already the rotated bbox.
+
+    `bbox` is (bx0, by0, bx1, by1) in JSON pixel space.
+    `layout` is the dict from _layout(orientation).
+    """
+    bx0, by0, bx1, by1 = bbox
+    bw = max(bx1 - bx0, 1e-6)
+    bh = max(by1 - by0, 1e-6)
+
+    fit_x0 = layout["draw_x0"] + DRAW_FIT_MARGIN
+    fit_y0 = layout["draw_y0"] + DRAW_FIT_MARGIN
+    fit_x1 = layout["draw_x1"] - DRAW_FIT_MARGIN
+    fit_y1 = layout["draw_y1"] - DRAW_FIT_MARGIN
+    fw = fit_x1 - fit_x0
+    fh = fit_y1 - fit_y0
+
+    if fit_mode == "auto":
+        scale = min(fw / bw, fh / bh)
+    elif fit_mode == "1:1":
+        scale = ONE_TO_ONE_SCALE
+        _check_fit_overflow(bw, bh, scale, fw, fh, fit_mode)
+    elif fit_mode == "custom":
+        scale = ONE_TO_ONE_SCALE * float(custom_scale)
+        _check_fit_overflow(bw, bh, scale, fw, fh, fit_mode)
+    else:
+        # Validated at pre-pass; defensive fallback.
+        scale = min(fw / bw, fh / bh)
+
+    # Center the scaled bbox inside the fit area. JSON-y-down → PDF-y-up
+    # flip happens here, unchanged from v1.0.
+    tx = fit_x0 + (fw - bw * scale) / 2 - bx0 * scale
+    ty = fit_y1 - (fh - bh * scale) / 2 + by0 * scale
+    return scale, tx, ty
+
+
+def _check_fit_overflow(bw, bh, scale, fw, fh, fit_mode):
+    """Raise ValueError if scaled bbox exceeds drawing fit region.
+    Decisions D3 + D4 — fail loudly, name the dimensions."""
+    sw = bw * scale
+    sh = bh * scale
+    if sw > fw or sh > fh:
+        raise ValueError(
+            f"Geometry at fitMode={fit_mode!r} exceeds drawing area: "
+            f"required {sw:.1f}x{sh:.1f} pt, "
+            f"available {fw:.1f}x{fh:.1f} pt. "
+            f"Choose fitMode='auto', reduce customScale, or rotate geometry."
+        )
+
+
+# =============================================================================
+# RENDER FUNCTION
 # =============================================================================
 
 def render_shop_drawing(data: dict, out_dir: str | os.PathLike = ".") -> str:
     """Produce the locked KCC shop drawing PDF from a RoofMark Technical
-    Drawing export dict.
+    Drawing export dict. Returns absolute path of the written PDF."""
 
-    Returns the absolute path to the written PDF.
-    """
+    # ---- v1.1 input validation pre-pass (raises ValueError on bad input)
+    _validate_v11_inputs(data)
+
     spec = data.get("specTable") or {}
     layers = data.get("layers") or []
     drawing_type = (data.get("drawingType") or "profile").lower()
-    internal_scale = float(data.get("internalScale") or 24.0)  # px per inch — kept for future use
+    internal_scale = float(data.get("internalScale") or 24.0)  # documented, unused in math
+
+    # v1.1 new fields with defaults
+    orientation = data.get("pageOrientation", "landscape")
+    rotation_deg = int(data.get("geometryRotation", 0))
+    fit_mode = data.get("fitMode", "auto")
+    custom_scale = float(data.get("customScale", 1.0))
 
     # ---- validate required spec fields --------------------------------------
     for required in ("partName", "material", "drawingNo"):
@@ -321,140 +601,187 @@ def render_shop_drawing(data: dict, out_dir: str | os.PathLike = ".") -> str:
     drawing_no = str(spec["drawingNo"]).strip()
     part_name  = str(spec["partName"]).strip()
 
-    # ---- compute output filename --------------------------------------------
+    # ---- compute output filename (decision D12 — pattern unchanged) --------
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     fname = f"{_slug(drawing_no)}_{_slug(part_name)}.pdf"
     out_path = (out_dir / fname).resolve()
 
-    # ---- canvas -------------------------------------------------------------
-    c = canvas.Canvas(str(out_path), pagesize=landscape(letter))
-    c.setTitle(f"KCC Shop Drawing {drawing_no} — {part_name}")
+    # ---- v1.1 ordered pipeline ---------------------------------------------
+    # 1. Validate inputs (above).
+    # 2. Rotate geometry (decision D10 — before bbox/fit).
+    rotated = _rotate_geometry(data, rotation_deg)
+    rotated_layers = rotated.get("layers") or []
+
+    # 3. Compute layout dict for orientation (decision D7).
+    layout = _layout(orientation)
+
+    # ---- canvas (orientation drives page size + page_size argument) --------
+    if orientation == "portrait":
+        page_size = portrait(letter)
+    else:
+        page_size = landscape(letter)
+    c = canvas.Canvas(str(out_path), pagesize=page_size)
+    c.setTitle(f"KCC Shop Drawing {drawing_no} - {part_name}")
     c.setAuthor("Kosarek Construction Company")
     c.setSubject(f"Drawing type: {drawing_type}")
-    c.setCreator("kcc-shop-drawing.py v1.0")
+    c.setCreator("kcc-shop-drawing.py v1.1")
 
-    _draw_page_background(c)
-    _draw_sheet_border(c)
-    _draw_header(c, drawing_no)
-    _draw_accent_stripe(c)
-    _draw_footer(c)
-    _draw_spec_table(c, spec)
-    _draw_drawing_area_frame(c)
-    _draw_geometry(c, layers, drawing_type)
+    # ---- render in fixed order ---------------------------------------------
+    _draw_page_background(c, layout)
+    _draw_sheet_border(c, layout)
+    _draw_header(c, layout, drawing_no)
+    _draw_accent_stripe(c, layout)
+    _draw_footer(c, layout)
+    _draw_spec_table(c, layout, spec)
+    _draw_drawing_area_frame(c, layout)
+    _draw_geometry(c, layout, rotated_layers, drawing_type, fit_mode, custom_scale)
 
     c.save()
     return str(out_path)
 
 
 # =============================================================================
-# DRAW HELPERS — title block (locked layout)
+# DRAW HELPERS — title block (layout-dict driven)
 # =============================================================================
 
-def _draw_page_background(c):
+def _draw_page_background(c, lay):
     c.setFillColor(LIGHT_GRAY_BG)
-    c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+    c.rect(0, 0, lay["page_w"], lay["page_h"], fill=1, stroke=0)
 
 
-def _draw_sheet_border(c):
+def _draw_sheet_border(c, lay):
     c.setStrokeColor(KCC_NAVY)
     c.setLineWidth(SHEET_BORDER_SW)
-    c.rect(SHEET_X0, SHEET_Y0,
-           SHEET_X1 - SHEET_X0, SHEET_Y1 - SHEET_Y0, fill=0, stroke=1)
+    c.rect(lay["sheet_x0"], lay["sheet_y0"],
+           lay["sheet_x1"] - lay["sheet_x0"],
+           lay["sheet_y1"] - lay["sheet_y0"], fill=0, stroke=1)
 
 
-def _draw_header(c, drawing_no: str):
+def _draw_header(c, lay, drawing_no: str):
+    hdr_y0 = lay["hdr_y0"]
+    sheet_x0 = lay["sheet_x0"]
+    sheet_x1 = lay["sheet_x1"]
+    width = sheet_x1 - sheet_x0
+
     # Navy header bar
     c.setFillColor(KCC_NAVY)
-    c.rect(SHEET_X0, HDR_Y0, SHEET_X1 - SHEET_X0, HEADER_H, fill=1, stroke=0)
+    c.rect(sheet_x0, hdr_y0, width, HEADER_H, fill=1, stroke=0)
 
     # LEFT — primary
     c.setFillColor(HDR_L_PRIMARY_COLOR)
     c.setFont(HDR_L_PRIMARY_FONT, HDR_L_PRIMARY_SIZE)
-    c.drawString(SHEET_X0 + HDR_LEFT_PAD, HDR_L_PRIMARY_Y, HDR_L_PRIMARY_TEXT)
+    c.drawString(sheet_x0 + HDR_LEFT_PAD,
+                 hdr_y0 + HEADER_H * 0.58,
+                 HDR_L_PRIMARY_TEXT)
 
     # LEFT — secondary
     c.setFillColor(HDR_L_SECONDARY_COLOR)
     c.setFont(HDR_L_SECONDARY_FONT, HDR_L_SECONDARY_SIZE)
-    c.drawString(SHEET_X0 + HDR_LEFT_PAD, HDR_L_SECONDARY_Y, HDR_L_SECONDARY_TEXT)
+    c.drawString(sheet_x0 + HDR_LEFT_PAD,
+                 hdr_y0 + HEADER_H * 0.20,
+                 HDR_L_SECONDARY_TEXT)
 
     # RIGHT — small label "SHOP DRAWING" (orange)
     c.setFillColor(HDR_R_LABEL_COLOR)
     c.setFont(HDR_R_LABEL_FONT, HDR_R_LABEL_SIZE)
-    c.drawRightString(SHEET_X1 - HDR_RIGHT_PAD, HDR_R_LABEL_Y, HDR_R_LABEL_TEXT)
+    c.drawRightString(sheet_x1 - HDR_RIGHT_PAD,
+                      hdr_y0 + HEADER_H * 0.62,
+                      HDR_R_LABEL_TEXT)
 
-    # RIGHT — primary identifier (drawing number, white, large)
+    # RIGHT — primary identifier (drawing number, white, large). Decision D9.
     c.setFillColor(HDR_R_DWGNO_COLOR)
     c.setFont(HDR_R_DWGNO_FONT, HDR_R_DWGNO_SIZE)
-    c.drawRightString(SHEET_X1 - HDR_RIGHT_PAD, HDR_R_DWGNO_Y, drawing_no)
+    c.drawRightString(sheet_x1 - HDR_RIGHT_PAD,
+                      hdr_y0 + HEADER_H * 0.18,
+                      drawing_no)
 
 
-def _draw_accent_stripe(c):
+def _draw_accent_stripe(c, lay):
     c.setFillColor(KCC_ORANGE)
-    c.rect(SHEET_X0, ACC_Y0, SHEET_X1 - SHEET_X0, ACCENT_H, fill=1, stroke=0)
+    c.rect(lay["sheet_x0"], lay["acc_y0"],
+           lay["sheet_x1"] - lay["sheet_x0"], ACCENT_H, fill=1, stroke=0)
 
 
-def _draw_footer(c):
+def _draw_footer(c, lay):
+    sheet_x0 = lay["sheet_x0"]
+    sheet_x1 = lay["sheet_x1"]
+    ftr_y0 = lay["ftr_y0"]
+    width = sheet_x1 - sheet_x0
+    text_y = ftr_y0 + FOOTER_H * 0.32
+
     c.setFillColor(KCC_NAVY)
-    c.rect(SHEET_X0, FTR_Y0, SHEET_X1 - SHEET_X0, FOOTER_H, fill=1, stroke=0)
+    c.rect(sheet_x0, ftr_y0, width, FOOTER_H, fill=1, stroke=0)
 
     c.setFillColor(FTR_LEFT_COLOR)
     c.setFont(FTR_LEFT_FONT, FTR_LEFT_SIZE)
-    c.drawString(SHEET_X0 + HDR_LEFT_PAD, FTR_TEXT_Y, FTR_LEFT_TEXT)
+    c.drawString(sheet_x0 + HDR_LEFT_PAD, text_y, FTR_LEFT_TEXT)
 
     c.setFillColor(FTR_RIGHT_COLOR)
     c.setFont(FTR_RIGHT_FONT, FTR_RIGHT_SIZE)
-    c.drawRightString(SHEET_X1 - HDR_RIGHT_PAD, FTR_TEXT_Y, FTR_RIGHT_TEXT)
+    c.drawRightString(sheet_x1 - HDR_RIGHT_PAD, text_y, FTR_RIGHT_TEXT)
 
 
-def _draw_spec_table(c, spec: dict):
+def _draw_spec_table(c, lay, spec: dict):
+    sheet_x0 = lay["sheet_x0"]
+    sheet_x1 = lay["sheet_x1"]
+    spec_y0 = lay["spec_y0"]
+    st_bar_y0 = lay["st_bar_y0"]
+    spec_cols = lay["spec_cols"]
+    spec_rows = lay["spec_rows"]
+    spec_col_w = lay["spec_col_w"]
+    spec_row_h = lay["spec_row_h"]
+    spec_grid_y0 = lay["spec_grid_y0"]
+    spec_grid_y1 = lay["spec_grid_y1"]
+    width = sheet_x1 - sheet_x0
+
     # Body fill
     c.setFillColor(SPEC_TABLE_BG)
     c.setStrokeColor(KCC_NAVY)
     c.setLineWidth(0.75)
-    c.rect(SHEET_X0, SPEC_Y0,
-           SHEET_X1 - SHEET_X0, SPEC_TABLE_H, fill=1, stroke=1)
+    c.rect(sheet_x0, spec_y0, width, lay["spec_table_h"], fill=1, stroke=1)
 
     # Top stripe
     c.setFillColor(KCC_NAVY)
-    c.rect(SHEET_X0, ST_BAR_Y0, SHEET_X1 - SHEET_X0, ST_BAR_H, fill=1, stroke=0)
+    c.rect(sheet_x0, st_bar_y0, width, ST_BAR_H, fill=1, stroke=0)
 
+    st_bar_text_y = st_bar_y0 + ST_BAR_H * ST_BAR_TEXT_OFFSET_RATIO
     c.setFillColor(ST_BAR_L_COLOR)
     c.setFont(ST_BAR_L_FONT, ST_BAR_L_SIZE)
-    c.drawString(SHEET_X0 + HDR_LEFT_PAD, ST_BAR_TEXT_Y, ST_BAR_L_TEXT)
+    c.drawString(sheet_x0 + HDR_LEFT_PAD, st_bar_text_y, ST_BAR_L_TEXT)
 
     c.setFillColor(ST_BAR_R_COLOR)
     c.setFont(ST_BAR_R_FONT, ST_BAR_R_SIZE)
-    c.drawRightString(SHEET_X1 - HDR_RIGHT_PAD, ST_BAR_TEXT_Y, ST_BAR_R_TEXT)
+    c.drawRightString(sheet_x1 - HDR_RIGHT_PAD, st_bar_text_y, ST_BAR_R_TEXT)
 
     # Grid dividers
     c.setStrokeColor(KCC_NAVY)
     c.setLineWidth(SPEC_DIVIDER_SW)
-    for i in range(1, SPEC_COLS):
-        xv = SHEET_X0 + i * SPEC_COL_W
-        c.line(xv, SPEC_GRID_Y0, xv, SPEC_GRID_Y1)
-    yh = SPEC_GRID_Y0 + SPEC_ROW_H
-    c.line(SHEET_X0, yh, SHEET_X1, yh)
+    for i in range(1, spec_cols):
+        xv = sheet_x0 + i * spec_col_w
+        c.line(xv, spec_grid_y0, xv, spec_grid_y1)
+    for j in range(1, spec_rows):
+        yh = spec_grid_y0 + j * spec_row_h
+        c.line(sheet_x0, yh, sheet_x1, yh)
 
-    # Field labels + values
+    # Field labels + values (row-major; index → row = i // spec_cols)
     for idx, (label, key) in enumerate(SPEC_FIELDS):
-        row = idx // SPEC_COLS
-        col = idx %  SPEC_COLS
-        cell_x0 = SHEET_X0 + col * SPEC_COL_W
-        cell_y1 = SPEC_GRID_Y1 - row * SPEC_ROW_H
-        cell_y0 = cell_y1 - SPEC_ROW_H
+        row = idx // spec_cols
+        col = idx %  spec_cols
+        cell_x0 = sheet_x0 + col * spec_col_w
+        cell_y1 = spec_grid_y1 - row * spec_row_h
+        cell_y0 = cell_y1 - spec_row_h
 
-        # Label (orange, bold, top of cell)
+        # Label
         c.setFillColor(SPEC_LABEL_COLOR)
         c.setFont(SPEC_LABEL_FONT, SPEC_LABEL_SIZE)
         c.drawString(cell_x0 + SPEC_LABEL_PAD_X,
                      cell_y1 - SPEC_LABEL_OFFSET_Y,
                      label)
 
-        # Value (navy, body weight, bottom of cell)
+        # Value (truncated to fit cell width)
         value_text = _format_spec_value(spec.get(key))
-        # truncate to fit cell width
-        max_w = SPEC_COL_W - 2 * SPEC_VALUE_PAD_X
+        max_w = spec_col_w - 2 * SPEC_VALUE_PAD_X
         value_text = _ellipsize(c, value_text, SPEC_VALUE_FONT, SPEC_VALUE_SIZE, max_w)
 
         c.setFillColor(SPEC_VALUE_COLOR)
@@ -464,96 +791,78 @@ def _draw_spec_table(c, spec: dict):
                      value_text)
 
 
-def _draw_drawing_area_frame(c):
+def _draw_drawing_area_frame(c, lay):
+    draw_x0 = lay["draw_x0"]
+    draw_x1 = lay["draw_x1"]
+    draw_y0 = lay["draw_y0"]
+    draw_y1 = lay["draw_y1"]
+
     # White interior + faint border
     c.setFillColor(white)
     c.setStrokeColor(GRID_LIGHT)
     c.setLineWidth(DRAW_BORDER_SW)
-    c.rect(DRAW_X0, DRAW_Y0,
-           DRAW_X1 - DRAW_X0, DRAW_Y1 - DRAW_Y0, fill=1, stroke=1)
+    c.rect(draw_x0, draw_y0, draw_x1 - draw_x0, draw_y1 - draw_y0, fill=1, stroke=1)
 
     # Faint blueprint grid
     c.setStrokeColor(GRID_LIGHT)
     c.setLineWidth(DRAW_GRID_SW)
-    x = DRAW_X0
-    while x < DRAW_X1:
-        c.line(x, DRAW_Y0, x, DRAW_Y1)
+    x = draw_x0
+    while x < draw_x1:
+        c.line(x, draw_y0, x, draw_y1)
         x += DRAW_GRID_SPACING
-    y = DRAW_Y0
-    while y < DRAW_Y1:
-        c.line(DRAW_X0, y, DRAW_X1, y)
+    y = draw_y0
+    while y < draw_y1:
+        c.line(draw_x0, y, draw_x1, y)
         y += DRAW_GRID_SPACING
 
     # Orange corner crosshairs
     c.setStrokeColor(KCC_ORANGE)
     c.setLineWidth(CROSSHAIR_SW)
-    for (cx, cy) in ((DRAW_X0, DRAW_Y0), (DRAW_X1, DRAW_Y0),
-                     (DRAW_X0, DRAW_Y1), (DRAW_X1, DRAW_Y1)):
+    for (cx, cy) in ((draw_x0, draw_y0), (draw_x1, draw_y0),
+                     (draw_x0, draw_y1), (draw_x1, draw_y1)):
         c.line(cx - CROSSHAIR_LEN, cy, cx + CROSSHAIR_LEN, cy)
         c.line(cx, cy - CROSSHAIR_LEN, cx, cy + CROSSHAIR_LEN)
 
 
 # =============================================================================
-# DRAW HELPERS — geometry (auto-fit + render layers/dimensions/callouts)
+# DRAW HELPERS — geometry (fit + render layers/dimensions/callouts)
 # =============================================================================
 
-def _draw_geometry(c, layers: list, drawing_type: str):
-    """Auto-fit all layer shapes / dimensions / callouts into the drawing area
-    while preserving aspect ratio, then render bottom-to-top by layer.order."""
+def _draw_geometry(c, lay, layers: list, drawing_type: str, fit_mode: str, custom_scale: float):
+    """Compute fit transform, then render bottom-to-top by layer.order."""
     if not layers:
-        # No geometry — draw a small note in the center
+        # No geometry — placeholder text centered in drawing area
         c.setFillColor(TEXT_DIM)
         c.setFont("Helvetica-Oblique", 9)
-        c.drawCentredString((DRAW_X0 + DRAW_X1) / 2,
-                            (DRAW_Y0 + DRAW_Y1) / 2,
+        c.drawCentredString((lay["draw_x0"] + lay["draw_x1"]) / 2,
+                            (lay["draw_y0"] + lay["draw_y1"]) / 2,
                             "(no geometry in JSON)")
         return
 
-    # 1. Compute bounding box of every drawable point in JSON-space (px)
     bbox = _compute_bbox(layers)
     if bbox is None:
         return
-    bx0, by0, bx1, by1 = bbox
-    bw = max(bx1 - bx0, 1e-6)
-    bh = max(by1 - by0, 1e-6)
 
-    # 2. Compute fit transform (JSON px -> PDF pt inside drawing area)
-    fit_x0 = DRAW_X0 + DRAW_FIT_MARGIN
-    fit_y0 = DRAW_Y0 + DRAW_FIT_MARGIN
-    fit_x1 = DRAW_X1 - DRAW_FIT_MARGIN
-    fit_y1 = DRAW_Y1 - DRAW_FIT_MARGIN
-    fw = fit_x1 - fit_x0
-    fh = fit_y1 - fit_y0
-
-    scale = min(fw / bw, fh / bh)
-
-    # Center the drawing within the fit area
-    tx = fit_x0 + (fw - bw * scale) / 2 - bx0 * scale
-    # JSON-space y grows downward (canvas convention). PDF y grows upward.
-    # Flip y so the top of the drawing in RoofMark appears at the top in PDF.
-    ty = fit_y1 - (fh - bh * scale) / 2 + by0 * scale
+    # v1.1 — fit-mode-aware scale (may raise ValueError on 1:1/custom overflow)
+    scale, tx, ty = _compute_fit_scale(bbox, lay, fit_mode, custom_scale)
 
     def tx_pt(x, y):
         return (tx + x * scale, ty - y * scale)
 
-    # 3. Sort layers by order (bottom to top) and render
     sorted_layers = sorted(layers, key=lambda L: int(L.get("order") or 0))
-
     is_assembly = drawing_type == "assembly_stack"
 
     for layer in sorted_layers:
         _render_layer_shapes(c, layer, tx_pt)
 
-    # Dimensions and callouts render on top of all shapes
     for layer in sorted_layers:
         _render_layer_dimensions(c, layer, tx_pt)
 
     for layer in sorted_layers:
         _render_layer_callouts(c, layer, tx_pt)
 
-    # 4. Layer legend for assembly_stack (component name labels in lower-right)
     if is_assembly and len(sorted_layers) > 1:
-        _render_layer_legend(c, sorted_layers)
+        _render_layer_legend(c, lay, sorted_layers)
 
 
 def _compute_bbox(layers):
@@ -589,7 +898,6 @@ def _render_layer_shapes(c, layer, tx_pt):
     stroke_on  = layer.get("strokeOn", DEFAULT_STROKE_ON)
 
     for sh in layer.get("shapes", []) or []:
-        # Per-shape overrides fall back to layer values
         s_fill_op   = sh.get("fillOpacity",   fill_op)
         s_stroke_op = sh.get("strokeOpacity", stroke_op)
         s_sw        = sh.get("strokeWeight",  sw)
@@ -627,11 +935,6 @@ def _render_layer_shapes(c, layer, tx_pt):
 
         elif t == "circ":
             cx, cy = tx_pt(sh.get("cx", 0), sh.get("cy", 0))
-            # Scale radius using the same factor used in tx_pt. Recover scale
-            # from any two points of a known-distance shape would be overkill;
-            # the bbox is built using r directly so we pull scale from the
-            # ratio of any drawn x-coordinate. Simpler: re-derive scale here.
-            # For this single render, scale is consistent across x and y, so:
             cx2, _ = tx_pt(sh.get("cx", 0) + sh.get("r", 0), sh.get("cy", 0))
             r_pt = abs(cx2 - cx)
             c.circle(cx, cy, r_pt, fill=do_fill, stroke=do_stroke)
@@ -644,43 +947,33 @@ def _render_layer_dimensions(c, layer, tx_pt):
         x1, y1 = tx_pt(x1j, y1j)
         x2, y2 = tx_pt(x2j, y2j)
 
-        # Compute perpendicular offset direction (always offset "up" in JSON
-        # space, which is "down" in PDF after y-flip — visually above the line
-        # of the dimension's natural orientation).
         dx, dy = x2 - x1, y2 - y1
         L = (dx * dx + dy * dy) ** 0.5
         if L < 1e-6:
             continue
         ux, uy = dx / L, dy / L
-        # Perpendicular (right-hand): rotate (ux, uy) by -90° in PDF coords
         px, py = uy, -ux
         ox = px * DIM_EXTENSION_OFFSET
         oy = py * DIM_EXTENSION_OFFSET
 
-        # Extension lines from each endpoint to the offset point
         c.setStrokeColor(DIM_AMBER)
         c.setLineWidth(DIM_LINE_SW)
         c.line(x1, y1, x1 + ox, y1 + oy)
         c.line(x2, y2, x2 + ox, y2 + oy)
 
-        # Dimension line between offset endpoints
         ax1, ay1 = x1 + ox, y1 + oy
         ax2, ay2 = x2 + ox, y2 + oy
         c.line(ax1, ay1, ax2, ay2)
 
-        # Arrowheads at each end (pointing outward toward extension lines)
         _arrow(c, ax1, ay1, -ux, -uy)
         _arrow(c, ax2, ay2,  ux,  uy)
 
-        # Label
         label = str(d.get("value") or "").strip()
         if label:
             mx = (ax1 + ax2) / 2
             my = (ay1 + ay2) / 2
-            # Offset label slightly perpendicular to dim line
             lx = mx + px * (DIM_LABEL_PAD + DIM_LABEL_SIZE * 0.55)
             ly = my + py * (DIM_LABEL_PAD + DIM_LABEL_SIZE * 0.55) - DIM_LABEL_SIZE * 0.35
-            # White background pad behind label for legibility
             c.setFont(DIM_LABEL_FONT, DIM_LABEL_SIZE)
             tw = c.stringWidth(label, DIM_LABEL_FONT, DIM_LABEL_SIZE)
             c.setFillColor(white)
@@ -694,11 +987,8 @@ def _render_layer_dimensions(c, layer, tx_pt):
 
 
 def _arrow(c, x, y, ux, uy):
-    """Filled triangular arrowhead at (x,y) pointing in direction (ux,uy)."""
-    # Tip is at (x,y); base is back along -direction by DIM_ARROW_LEN.
     bx = x - ux * DIM_ARROW_LEN
     by = y - uy * DIM_ARROW_LEN
-    # Perpendicular for base width
     px, py = uy, -ux
     p1x = bx + px * DIM_ARROW_HALF_W
     p1y = by + py * DIM_ARROW_HALF_W
@@ -720,12 +1010,10 @@ def _render_layer_callouts(c, layer, tx_pt):
         num   = int(ca.get("num") or 0)
         text  = str(ca.get("textEN") or "").strip()
 
-        # Leader line
         c.setStrokeColor(CALLOUT_LEADER_COLOR)
         c.setLineWidth(CALLOUT_LEADER_SW)
         c.line(tipx, tipy, tailx, taily)
 
-        # Text bubble at tail
         if text:
             c.setFont(CALLOUT_TEXT_FONT, CALLOUT_TEXT_SIZE)
             tw = c.stringWidth(text, CALLOUT_TEXT_FONT, CALLOUT_TEXT_SIZE)
@@ -741,7 +1029,6 @@ def _render_layer_callouts(c, layer, tx_pt):
             c.drawCentredString(tailx, by0 + CALLOUT_BOX_PAD_Y + CALLOUT_TEXT_SIZE * 0.2,
                                 text)
 
-        # Numbered tip on top of leader
         c.setFillColor(CALLOUT_TIP_FILL)
         c.setStrokeColor(CALLOUT_TIP_STROKE)
         c.setLineWidth(CALLOUT_TIP_STROKE_SW)
@@ -752,16 +1039,14 @@ def _render_layer_callouts(c, layer, tx_pt):
             c.drawCentredString(tipx, tipy - CALLOUT_NUM_SIZE * 0.32, str(num))
 
 
-def _render_layer_legend(c, sorted_layers):
-    """For assembly_stack drawings: small legend in the lower-right of the
-    drawing area listing each component in installation order."""
+def _render_layer_legend(c, lay, sorted_layers):
+    """Assembly-stack legend in lower-right of drawing area."""
     pad = 6
     line_h = LAYER_LABEL_SIZE + 4
     swatch = 8
-    rows = list(reversed(sorted_layers))   # top of legend = top of stack
+    rows = list(reversed(sorted_layers))
     box_h = pad * 2 + line_h * len(rows)
 
-    # measure widest
     c.setFont(LAYER_LABEL_FONT, LAYER_LABEL_SIZE)
     widest = max(
         c.stringWidth(str(L.get("name") or "Layer"), LAYER_LABEL_FONT, LAYER_LABEL_SIZE)
@@ -769,8 +1054,8 @@ def _render_layer_legend(c, sorted_layers):
     )
     box_w = pad * 2 + swatch + 6 + widest
 
-    bx1 = DRAW_X1 - DRAW_FIT_MARGIN
-    by0 = DRAW_Y0 + DRAW_FIT_MARGIN
+    bx1 = lay["draw_x1"] - DRAW_FIT_MARGIN
+    by0 = lay["draw_y0"] + DRAW_FIT_MARGIN
     bx0 = bx1 - box_w
     by1 = by0 + box_h
 
@@ -781,12 +1066,10 @@ def _render_layer_legend(c, sorted_layers):
 
     for i, L in enumerate(rows):
         row_y = by1 - pad - (i + 1) * line_h + 4
-        # color swatch
         c.setFillColor(_hex(L.get("color") or "#1A2F4A"))
         c.setStrokeColor(KCC_NAVY)
         c.setLineWidth(0.3)
         c.rect(bx0 + pad, row_y, swatch, swatch, fill=1, stroke=1)
-        # name
         c.setFillColor(KCC_NAVY)
         c.setFont(LAYER_LABEL_FONT, LAYER_LABEL_SIZE)
         c.drawString(bx0 + pad + swatch + 6, row_y + 1, str(L.get("name") or "Layer"))
@@ -797,7 +1080,6 @@ def _render_layer_legend(c, sorted_layers):
 # =============================================================================
 
 def _slug(s: str) -> str:
-    """Filename-safe slug: spaces -> hyphens, drop non-[A-Za-z0-9_-], collapse."""
     s = (s or "").strip()
     s = re.sub(r"\s+", "-", s)
     s = re.sub(r"[^A-Za-z0-9_\-]", "", s)
@@ -815,14 +1097,12 @@ def _format_spec_value(v) -> str:
 def _ellipsize(c, text, font, size, max_w):
     if c.stringWidth(text, font, size) <= max_w:
         return text
-    # Trim from the right and add an ellipsis
     while text and c.stringWidth(text + "…", font, size) > max_w:
         text = text[:-1]
     return (text + "…") if text else "…"
 
 
-def _hex(s: str) -> Color:
-    """Parse a hex color string defensively."""
+def _hex(s) -> Color:
     if isinstance(s, Color):
         return s
     s = (s or "").strip()
@@ -837,7 +1117,6 @@ def _hex(s: str) -> Color:
 
 
 def _with_alpha(color: Color, alpha) -> Color:
-    """Return a new Color with the requested alpha."""
     try:
         a = float(alpha) if alpha is not None else 1.0
     except (TypeError, ValueError):
@@ -857,7 +1136,7 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(
         description="Render a KCC RoofMark shop drawing PDF from a "
-                    "RoofMark Technical Drawing JSON export."
+                    "RoofMark Technical Drawing JSON export. (v1.1)"
     )
     ap.add_argument("json_path", help="Path to roofmark-technical-*.json")
     ap.add_argument("--out-dir", default=".", help="Output directory")

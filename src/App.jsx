@@ -22,6 +22,12 @@ import TechInputPanel from './components/TechInputPanel'
 // The existing FIELD aside is unchanged; the two drawer blocks are
 // mutually exclusive via appMode gate at the wrapper level.
 import SpecTablePanel from './components/SpecTablePanel'
+// Phase 2 18h (May 12 2026) — Technical Drawing Preview overlay + PDF
+// generation. Mounted conditionally on previewState.isOpen under
+// TECHNICAL mode. Keyboard shortcuts [P]/[Esc]/[O]/[R]/[F]/[G] live
+// at the App.jsx level so they fire regardless of focus inside the
+// overlay or canvas.
+import TechnicalPreview from './components/TechnicalPreview'
 import './App.css'
 
 export default function App() {
@@ -121,6 +127,73 @@ export default function App() {
   const handleRedo = () => useAppStore.getState().redo()
   const undoDisabled = undoStack.length === 0
   const redoDisabled = redoStack.length === 0
+
+  // Phase 2 18h (May 12 2026) — Technical Drawing preview shortcuts.
+  //
+  // [P]    open preview (only under TECHNICAL appMode)
+  // [Esc]  close preview when open
+  // [O]    cycle pageOrientation landscape ↔ portrait
+  // [R]    cycle geometryRotation 0 → 90 → 180 → 270
+  // [F]    cycle fitMode auto → 1:1 → custom → auto
+  // [G] or [Enter] generate PDF (no-op if invalid spec table)
+  //
+  // Skips when focus is in a text input / textarea so number-input
+  // typing in the customScale field doesn't trigger shortcuts. Esc is
+  // the lone exception — it fires from any focus context per the
+  // standard overlay-dismiss convention.
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = (e.target?.tagName || '').toUpperCase()
+      const editable = tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable
+      const state = useAppStore.getState()
+      const inTechnical = state.appMode === 'TECHNICAL'
+      // Esc closes preview from any focus (including inputs).
+      if (e.key === 'Escape' && state.previewState.isOpen) {
+        e.preventDefault()
+        state.closePreview()
+        return
+      }
+      if (editable) return
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const k = (e.key || '').toLowerCase()
+      if (k === 'p' && inTechnical && !state.previewState.isOpen) {
+        e.preventDefault()
+        state.openPreview()
+        return
+      }
+      // The next four shortcuts only fire while preview is open.
+      if (!state.previewState.isOpen) return
+      if (k === 'o') {
+        e.preventDefault()
+        state.setPageOrientation(
+          state.previewState.pageOrientation === 'landscape' ? 'portrait' : 'landscape'
+        )
+        return
+      }
+      if (k === 'r') {
+        e.preventDefault()
+        state.cycleRotation()
+        return
+      }
+      if (k === 'f') {
+        e.preventDefault()
+        const order = ['auto', '1:1', 'custom']
+        const idx = order.indexOf(state.previewState.fitMode)
+        state.setFitMode(order[(idx + 1) % order.length])
+        return
+      }
+      if (k === 'g' || e.key === 'Enter') {
+        e.preventDefault()
+        // Synthetic click on the Generate button — defer to its
+        // disabled/validity gate. Falls through silently if not
+        // available (preview closed mid-resolve).
+        const btn = document.querySelector('[data-testid="preview-generate-button"]')
+        if (btn && !btn.disabled) btn.click()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
 
   // Phase 2 18g (May 12 2026) — Spec Table mount hydration.
   //
@@ -422,6 +495,17 @@ export default function App() {
           Build: {typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev'}
         </span>
       </footer>
+      {/*
+        Phase 2 18h — Technical Drawing preview overlay. Mounts above
+        every other UI surface (z-index in App.css). The component
+        self-gates on previewState.isOpen + only renders content under
+        TECHNICAL appMode (the open action itself is gated at the
+        keyboard handler + Preview button). Keeping it outside the
+        appMode === 'FIELD' / 'TECHNICAL' branches above lets the
+        overlay survive the existing mode-exclusive aside blocks
+        without restructuring them.
+      */}
+      <TechnicalPreview />
     </div>
   )
 }

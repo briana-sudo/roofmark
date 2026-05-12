@@ -2382,3 +2382,266 @@ body {
   padding-top: 8px;
   border-top: 1px solid var(--rm-border);
 }
+
+/* ============================================================================
+ * Phase 2 18h (May 12 2026) — Technical Drawing preview overlay.
+ *
+ * Full-viewport position:fixed overlay shown when previewState.isOpen.
+ * Three regions: top bar (32 px), left controls panel (260 px), center
+ * stage (fills remaining). Stage hosts the HTML/CSS page mockup; the
+ * SVG renderer fills the drawing-area div inside that mockup.
+ *
+ * Color tokens reuse the existing --rm-* palette plus v1.1's locked
+ * KCC palette inline for elements that mirror the printed output
+ * exactly. The dark backdrop (#000c, mostly opaque) signals overlay
+ * mode and dims the canvas behind it.
+ * ============================================================================ */
+
+.preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: #0d1117e6;        /* 90% --rm-bg */
+  display: flex;
+  flex-direction: column;
+  font-family: inherit;
+  color: var(--rm-fg);
+}
+
+.preview-topbar {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
+  background: var(--rm-panel);
+  border-bottom: 1px solid var(--rm-border);
+  flex-shrink: 0;
+}
+
+.preview-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  flex: 1;
+}
+
+.preview-hint {
+  font-size: 10px;
+  color: var(--rm-fg-dim);
+  margin-right: 12px;
+}
+
+.preview-close {
+  background: transparent;
+  border: 1px solid var(--rm-border);
+  color: var(--rm-fg);
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.preview-close:hover { background: var(--rm-panel-2); }
+
+.preview-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.preview-controls {
+  width: 260px;
+  flex-shrink: 0;
+  background: var(--rm-panel);
+  border-right: 1px solid var(--rm-border);
+  padding: 12px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.preview-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--rm-fg-dim);
+  margin: 12px 0 6px;
+}
+.preview-section-title:first-child { margin-top: 0; }
+
+.preview-group {
+  display: flex;
+  gap: 4px;
+}
+
+.preview-pill {
+  flex: 1;
+  background: var(--rm-panel-2);
+  border: 1px solid var(--rm-border);
+  color: var(--rm-fg);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.preview-pill:hover { border-color: var(--rm-accent); }
+.preview-pill.active {
+  background: var(--rm-accent);
+  border-color: var(--rm-accent);
+  color: white;
+}
+
+.preview-rotation {
+  width: 100%;
+  background: var(--rm-panel-2);
+  border: 1px solid var(--rm-border);
+  color: var(--rm-fg);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.preview-rotation:hover { border-color: var(--rm-accent); }
+
+.preview-hint-row {
+  font-size: 10px;
+  color: var(--rm-fg-dim);
+  margin-top: 4px;
+}
+
+.preview-custom-scale {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.preview-custom-scale label {
+  font-size: 11px;
+  color: var(--rm-fg-dim);
+}
+.preview-custom-scale input {
+  flex: 1;
+  background: var(--rm-panel-2);
+  border: 1px solid var(--rm-border);
+  color: var(--rm-fg);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.preview-warning {
+  margin-top: 8px;
+  padding: 8px;
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid rgba(248, 81, 73, 0.5);
+  border-radius: 4px;
+  color: #f85149;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.preview-warning-soft {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: rgba(210, 153, 34, 0.12);
+  border: 1px solid rgba(210, 153, 34, 0.5);
+  border-radius: 4px;
+  color: #d29922;
+  font-size: 11px;
+}
+
+.preview-validity-hint {
+  margin-bottom: 8px;
+  padding: 8px;
+  background: rgba(210, 153, 34, 0.12);
+  border: 1px solid rgba(210, 153, 34, 0.5);
+  border-radius: 4px;
+  color: #d29922;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.preview-generate {
+  width: 100%;
+  background: var(--rm-orange);
+  border: 1px solid var(--rm-orange);
+  color: white;
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+}
+.preview-generate:hover:not(:disabled) { filter: brightness(1.1); }
+.preview-generate:disabled {
+  background: var(--rm-panel-2);
+  border-color: var(--rm-border);
+  color: var(--rm-fg-dim);
+  cursor: not-allowed;
+}
+
+.preview-error {
+  margin-top: 12px;
+  padding: 10px;
+  background: rgba(248, 81, 73, 0.15);
+  border: 1px solid rgba(248, 81, 73, 0.5);
+  border-radius: 4px;
+  color: #f85149;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.preview-error-detail {
+  margin: 6px 0;
+  color: var(--rm-fg);
+  word-break: break-word;
+  font-size: 10px;
+}
+.preview-retry,
+.preview-redownload {
+  background: var(--rm-accent);
+  border: 1px solid var(--rm-accent);
+  color: white;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  margin-top: 4px;
+}
+
+.preview-success {
+  margin-top: 12px;
+  padding: 10px;
+  background: rgba(63, 185, 80, 0.15);
+  border: 1px solid rgba(63, 185, 80, 0.5);
+  border-radius: 4px;
+  color: var(--rm-green);
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.preview-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  background: var(--rm-bg);
+  padding: 24px;
+  min-height: 0;
+}
+
+.preview-page {
+  position: relative;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  flex-shrink: 0;
+}

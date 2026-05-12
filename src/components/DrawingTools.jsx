@@ -533,6 +533,26 @@ export default function DrawingTools() {
         <TechSnapMenu />
       </div>
 
+      {/* Phase 2 18h (May 12 2026) — Technical Drawing preview entry.
+          Single button next to the snap group. Opens the full-screen
+          preview overlay (TechnicalPreview component mounted at the
+          App.jsx level). Keyboard shortcut [P] does the same action.
+          Hidden under FIELD since the preview renders Technical
+          Drawing geometry only. */}
+      <div className="tool-group" data-tool-group="tech-preview">
+        <button
+          type="button"
+          className="tool-btn"
+          onClick={() => useAppStore.getState().openPreview()}
+          title="Open shop drawing preview (P)"
+          aria-label="Open shop drawing preview"
+          data-testid="btn-tech-preview"
+        >
+          <span className="tool-icon" aria-hidden="true">👁</span>
+          <span className="tool-name">Preview</span>
+        </button>
+      </div>
+
       <span className="tool-divider" aria-hidden="true" />
       </>
       )}
