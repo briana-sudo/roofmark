@@ -133,3 +133,98 @@ export function cancelCalloutDraft(actions) {
   if (!actions || typeof actions.setTechCalloutDraft !== 'function') return
   actions.setTechCalloutDraft(null)
 }
+
+/**
+ * Phase 2 18k bug-fix (May 12 2026) — Canvas 2D render for a callout
+ * shape. Mirrors shopDrawingSvgRender.renderCallout's structure:
+ *   - leader line from tip to tail (navy)
+ *   - text box at tail (white fill + orange border, navy text)
+ *   - orange tip circle (with white number when tipStyle === 'numbered')
+ *
+ * Caller (CanvasStage.drawStatic) is expected to have applied the
+ * TECHNICAL viewport transform (translate + scale) BEFORE calling, so
+ * this function operates entirely in WORLD coordinates.
+ *
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {Object} ca - callout shape
+ *   { id, type: 'callout',
+ *     tip: { mode, x, y },  // 'free' resolved coords used directly
+ *     tail: { x, y },
+ *     num: int | null,
+ *     textEN: string,
+ *     tipStyle: 'numbered' | 'dot' | 'none' }
+ * @param {Array} [technicalLayers] - reserved for future attached-tip
+ *   lookup; unused in 18k initial.
+ * @param {boolean} [isSelected=false]
+ */
+export function renderCalloutCanvas(ctx, ca, technicalLayers, isSelected) {
+  if (!ca || ca.type !== 'callout') return
+  const tip = ca.tip || {}
+  const tail = ca.tail || {}
+  if (typeof tip.x !== 'number' || typeof tip.y !== 'number') return
+  if (typeof tail.x !== 'number' || typeof tail.y !== 'number') return
+
+  const KCC_NAVY = '#1A2F4A'
+  const KCC_ORANGE = '#e8531a'
+  const SELECT_ORANGE = '#ff7a3a'
+  const num = Number.isFinite(+ca.num) ? +ca.num : 0
+  const text = (typeof ca.textEN === 'string' && ca.textEN.trim()) ? ca.textEN.trim() : ''
+  const tipStyle = ca.tipStyle || 'numbered'
+
+  ctx.save()
+
+  // Leader line — navy stroke (or selection orange when selected).
+  const leaderColor = isSelected ? SELECT_ORANGE : KCC_NAVY
+  ctx.strokeStyle = leaderColor
+  ctx.lineWidth = 0.8
+  ctx.beginPath()
+  ctx.moveTo(tip.x, tip.y)
+  ctx.lineTo(tail.x, tail.y)
+  ctx.stroke()
+
+  // Text box at tail (only when textEN is non-empty).
+  if (text) {
+    ctx.font = '8px Helvetica, Arial, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    const tw = ctx.measureText(text).width
+    const padX = 5, padY = 3
+    const boxW = tw + 2 * padX
+    const boxH = 8 + 2 * padY
+    const bx = tail.x - boxW / 2
+    const by = tail.y - boxH / 2
+    ctx.fillStyle = '#ffffff'
+    ctx.strokeStyle = KCC_ORANGE
+    ctx.lineWidth = 0.6
+    ctx.beginPath()
+    ctx.rect(bx, by, boxW, boxH)
+    ctx.fill()
+    ctx.stroke()
+    ctx.fillStyle = KCC_NAVY
+    ctx.fillText(text, tail.x, tail.y)
+  }
+
+  // Tip dot — orange filled circle, white stroke.
+  if (tipStyle !== 'none') {
+    const TIP_R = 8
+    ctx.beginPath()
+    ctx.arc(tip.x, tip.y, TIP_R, 0, Math.PI * 2)
+    ctx.fillStyle = KCC_ORANGE
+    ctx.fill()
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = 1.2
+    ctx.stroke()
+    // White number inside the tip (only when tipStyle === 'numbered'
+    // AND num > 0). Operators expect to see #1, #2, etc. printed on the
+    // orange dot.
+    if (tipStyle === 'numbered' && num > 0) {
+      ctx.font = 'bold 9px Helvetica, Arial, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillStyle = '#ffffff'
+      ctx.fillText(String(num), tip.x, tip.y)
+    }
+  }
+
+  ctx.restore()
+}

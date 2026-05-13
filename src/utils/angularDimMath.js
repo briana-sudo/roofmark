@@ -199,6 +199,147 @@ export function computeAngleDegrees(dim) {
  * @param {number} [decimalPlaces=1]
  * @returns {string}
  */
+/**
+ * Phase 2 18k bug-fix (May 12 2026) — Canvas 2D render for an angular
+ * dimension. Mirrors shopDrawingSvgRender.renderAngularDim's geometry
+ * (arc + extension lines + tangent arrow tips + label with white bg
+ * pad) but emits to a Canvas 2D context instead of SVG JSX.
+ *
+ * Caller (CanvasStage.drawStatic) is expected to have applied the
+ * TECHNICAL viewport transform (translate + scale) BEFORE calling, so
+ * this function operates entirely in WORLD coordinates — same
+ * convention as dimGeometry.renderDimension.
+ *
+ * Selection state is communicated via `isSelected` flag (orange instead
+ * of amber). isSelected for 18k is wired through but visually subtle;
+ * the existing dim selection grip pattern from dimGeometry can be
+ * grafted on in a future polish step.
+ *
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {Object} dim - angular dimension shape
+ *   { vertex: {x,y}, p1: {x,y}, p2: {x,y}, radius, value, textOverride }
+ *   Operator-stored 'vertex.mode' is ignored here — only the cached x/y
+ *   matter for render (resolveDimensionPoints-equivalent for angular
+ *   dims is deferred to a future associativity pass).
+ * @param {Array} [technicalLayers] - reserved for future attached-vertex
+ *   lookup; unused in 18k.
+ * @param {boolean} [isSelected=false]
+ */
+export function renderAngularDimCanvas(ctx, dim, technicalLayers, isSelected) {
+  if (!dim || !dim.vertex || !dim.p1 || !dim.p2) return
+  const v = dim.vertex
+  const p1 = dim.p1
+  const p2 = dim.p2
+  const radius = (typeof dim.radius === 'number' && dim.radius > 0) ? dim.radius : 24
+
+  // Ray angles in world coords (canvas y-down).
+  const a1 = Math.atan2(p1.y - v.y, p1.x - v.x)
+  const a2 = Math.atan2(p2.y - v.y, p2.x - v.x)
+  let sweep = a2 - a1
+  while (sweep > Math.PI) sweep -= 2 * Math.PI
+  while (sweep < -Math.PI) sweep += 2 * Math.PI
+  const sweepSign = sweep >= 0 ? 1 : -1
+
+  // Arc endpoints.
+  const arcStartX = v.x + radius * Math.cos(a1)
+  const arcStartY = v.y + radius * Math.sin(a1)
+  const arcEndX   = v.x + radius * Math.cos(a1 + sweep)
+  const arcEndY   = v.y + radius * Math.sin(a1 + sweep)
+
+  // Extension line endpoints — vertex → past-arc along each ray.
+  const u1L = Math.hypot(p1.x - v.x, p1.y - v.y) || 1
+  const u1x = (p1.x - v.x) / u1L, u1y = (p1.y - v.y) / u1L
+  const u2L = Math.hypot(p2.x - v.x, p2.y - v.y) || 1
+  const u2x = (p2.x - v.x) / u2L, u2y = (p2.y - v.y) / u2L
+  const extPast = 14  // matches DIM_EXTENSION_OFFSET (linear dim style)
+  const ext1x = v.x + (radius + extPast) * u1x
+  const ext1y = v.y + (radius + extPast) * u1y
+  const ext2x = v.x + (radius + extPast) * u2x
+  const ext2y = v.y + (radius + extPast) * u2y
+
+  ctx.save()
+  const amber = '#B8860B'
+  const orange = '#e8531a'
+  const strokeColor = isSelected ? orange : amber
+  ctx.strokeStyle = strokeColor
+  ctx.fillStyle = strokeColor
+  ctx.lineWidth = 0.8
+  // Use stroke / fill in world units; caller has scaled the ctx so
+  // visual stroke width tracks zoom (matches linear dim style).
+
+  // Extension lines from p1/p2 (far endpoints) through vertex to past-arc.
+  ctx.beginPath()
+  ctx.moveTo(p1.x, p1.y)
+  ctx.lineTo(ext1x, ext1y)
+  ctx.moveTo(p2.x, p2.y)
+  ctx.lineTo(ext2x, ext2y)
+  ctx.stroke()
+
+  // Arc itself — Canvas2D arc takes (cx, cy, radius, startAngle, endAngle, anticlockwise).
+  ctx.beginPath()
+  // canvas-y-down → atan2 angles match standard math, but anticlockwise
+  // flag flips because canvas y is inverted from math convention.
+  // We want the SHORTER sweep; anticlockwise = sweep < 0.
+  ctx.arc(v.x, v.y, radius, a1, a1 + sweep, sweepSign < 0)
+  ctx.stroke()
+
+  // Tangent arrow tips at arc endpoints. Tangent at arc_start oriented
+  // along CCW direction; at arc_end oriented back toward arc_start.
+  const tStartX = -Math.sin(a1) * sweepSign
+  const tStartY =  Math.cos(a1) * sweepSign
+  const tEndX  =  Math.sin(a1 + sweep) * sweepSign
+  const tEndY  = -Math.cos(a1 + sweep) * sweepSign
+  const drawArrow = (tipX, tipY, dirX, dirY) => {
+    const arrowLen = 6, arrowHalfW = 2.5
+    const bx = tipX - dirX * arrowLen
+    const by = tipY - dirY * arrowLen
+    const apx = dirY, apy = -dirX
+    const p1ax = bx + apx * arrowHalfW
+    const p1ay = by + apy * arrowHalfW
+    const p2ax = bx - apx * arrowHalfW
+    const p2ay = by - apy * arrowHalfW
+    ctx.beginPath()
+    ctx.moveTo(tipX, tipY)
+    ctx.lineTo(p1ax, p1ay)
+    ctx.lineTo(p2ax, p2ay)
+    ctx.closePath()
+    ctx.fill()
+  }
+  drawArrow(arcStartX, arcStartY, tStartX, tStartY)
+  drawArrow(arcEndX,   arcEndY,   tEndX,   tEndY)
+
+  // Label at mid-angle outside the arc.
+  const label = (() => {
+    const override = typeof dim.textOverride === 'string'
+      ? dim.textOverride.trim()
+      : ''
+    if (override !== '') return override
+    if (typeof dim.value === 'string' && dim.value.trim()) return dim.value.trim()
+    const degrees = Math.abs(sweep) * 180 / Math.PI
+    return formatAngle(degrees, 'degrees', 1)
+  })()
+  if (label) {
+    const midAngle = a1 + sweep / 2
+    const labelRadius = radius + 12
+    const lx = v.x + labelRadius * Math.cos(midAngle)
+    const ly = v.y + labelRadius * Math.sin(midAngle)
+    // White background pad for the label so it reads over geometry.
+    ctx.save()
+    ctx.font = 'bold 8px Helvetica, Arial, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    const tw = ctx.measureText(label).width
+    const padX = 2, padY = 2
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(lx - tw / 2 - padX, ly - 4 - padY, tw + 2 * padX, 8 + 2 * padY)
+    ctx.fillStyle = strokeColor
+    ctx.fillText(label, lx, ly)
+    ctx.restore()
+  }
+
+  ctx.restore()
+}
+
 export function formatAngle(degrees, mode = 'degrees', decimalPlaces = 1) {
   if (typeof degrees !== 'number' || !Number.isFinite(degrees)) return ''
   if (mode === 'pitch') {

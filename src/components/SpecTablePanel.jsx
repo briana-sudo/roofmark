@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useMemo, useRef } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import {
   SPEC_TABLE_FIELDS,
@@ -40,6 +40,26 @@ import {
 export default function SpecTablePanel() {
   const specTable = useAppStore((s) => s.specTable)
   const setSpecTable = useAppStore((s) => s.setSpecTable)
+  // Phase 2 18k bug-fix (May 12 2026) — Callouts section. Reads every
+  // callout from every visible technicalLayer + flattens with layerId
+  // so updateCalloutText / deleteCallout can target the right shape.
+  const technicalLayers = useAppStore((s) => s.technicalLayers)
+  const updateCalloutText = useAppStore((s) => s.updateCalloutText)
+  const deleteCallout = useAppStore((s) => s.deleteCallout)
+  const callouts = useMemo(() => {
+    const acc = []
+    for (const layer of technicalLayers || []) {
+      if (!layer || layer.visible === false) continue
+      for (const sh of layer.shapes || []) {
+        if (sh && sh.type === 'callout') {
+          acc.push({ ...sh, layerId: layer.id })
+        }
+      }
+    }
+    // Sort by num so the displayed order matches the on-canvas labels.
+    acc.sort((a, b) => (a.num || 0) - (b.num || 0))
+    return acc
+  }, [technicalLayers])
 
   // Focus→blur edit-session refs. Both keyed by field name so multiple
   // in-flight focus sessions can coexist (rare but safe — tab between
@@ -114,6 +134,49 @@ export default function SpecTablePanel() {
         <div className="spec-required-hint">
           Required fields: Part Name, Material, Drawing No
         </div>
+        {/* Phase 2 18k bug-fix (May 12 2026) — Callouts section. Lists
+            every callout in the project (across all visible layers) with
+            editable textEN + delete. Numbering matches the on-canvas
+            tip numbers; deletes don't renumber survivors (D6 — stable
+            across deletions). Empty state nudges operator toward the
+            Callout tool. */}
+        <section className="callouts-section" data-testid="callouts-section">
+          <h3 className="callouts-heading">Callouts</h3>
+          {callouts.length === 0 ? (
+            <p className="callouts-empty" data-testid="callouts-empty">
+              No callouts yet. Press <kbd>C</kbd> or click 📌 Callout to add.
+            </p>
+          ) : (
+            <div className="callouts-list">
+              {callouts.map((c) => (
+                <div className="callout-row" key={c.id} data-testid={`callout-row-${c.id}`}>
+                  <span className="callout-num" aria-label={`Callout ${c.num}`}>
+                    #{c.num}
+                  </span>
+                  <input
+                    type="text"
+                    className="callout-text-input"
+                    value={c.textEN || ''}
+                    onChange={(e) => updateCalloutText(c.id, e.target.value)}
+                    placeholder="callout label"
+                    maxLength={80}
+                    data-testid={`callout-input-${c.id}`}
+                  />
+                  <button
+                    type="button"
+                    className="callout-delete-btn"
+                    onClick={() => deleteCallout(c.id)}
+                    title="Delete callout"
+                    aria-label={`Delete callout ${c.num}`}
+                    data-testid={`callout-delete-${c.id}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       </div>
     </div>
   )

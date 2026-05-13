@@ -2684,3 +2684,103 @@ body {
   color: #999;
   font-style: italic;
 }
+
+/* ===== Phase 2 18k bug-fix (May 12 2026) — Callouts section ============ */
+/*
+   Lives at the bottom of SpecTablePanel below the spec-fields grid.
+   Visible only in TECHNICAL mode (the parent aside is mode-gated).
+*/
+.callouts-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rm-border, #dcdfe5);
+}
+
+.callouts-heading {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--rm-orange, #E8630A);
+  margin: 0 0 8px 0;
+}
+
+.callouts-empty {
+  font-size: 12px;
+  color: #888;
+  font-style: italic;
+  margin: 4px 0;
+}
+
+.callouts-empty kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--rm-navy, #1A2F4A);
+}
+
+.callouts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.callout-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.callout-num {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--rm-orange, #E8630A);
+  min-width: 26px;
+  text-align: right;
+}
+
+.callout-text-input {
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--rm-border, #d1d5db);
+  border-radius: 3px;
+  background: #fff;
+  color: var(--rm-navy, #1A2F4A);
+}
+
+.callout-text-input:focus {
+  outline: 0;
+  border-color: var(--rm-orange, #E8630A);
+}
+
+.callout-delete-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f3f4f6;
+  color: #6b7280;
+  border: 1px solid var(--rm-border, #d1d5db);
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.callout-delete-btn:hover {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}

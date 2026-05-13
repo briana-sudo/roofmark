@@ -519,6 +519,103 @@ pass('37. Line button has retro keyboard hint (L)',
   /Line[\s\S]{0,200}\(L\)/.test(drawingToolsSrc))
 
 // ============================================================================
+// BLOCK P — Canvas wiring & render-path gates (Rule 29)
+// ============================================================================
+// These tests catch the class of defect where store wiring is correct
+// but the operator-visible surface (canvas render + spec table UI) is
+// silently broken. Rule 29: every active canvas tool requires THREE
+// wiring points — click handler + draft preview + static render. A
+// tool shipped without all three is broken from the operator's
+// perspective even though store state updates correctly.
+//
+// History: this class of defect shipped four times in 18h/18k. Block
+// P prevents recurrence via source-grep on the actual render paths.
+//
+// All tests are source-grep against the live working tree. Each
+// failure message names the file + the missing substring so the next
+// operator (or Claude) reading a failure can fix it without re-tracing.
+
+const canvasStageSrc = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'components', 'CanvasStage.jsx'),
+  'utf-8',
+)
+const specTablePanelSrc = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'components', 'SpecTablePanel.jsx'),
+  'utf-8',
+)
+const drawingToolsSrcAgain = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'components', 'DrawingTools.jsx'),
+  'utf-8',
+)
+
+// Heuristic: drawStatic body = chunk between `const drawStatic = () =>`
+// and the next top-level function declaration. drawDynamic similarly.
+// Both substrings must appear in their respective regions for the
+// branch to be wired correctly.
+function extractFnBody(src, fnSig) {
+  const idx = src.indexOf(fnSig)
+  if (idx < 0) return ''
+  // Approximate: walk forward 60 KB or to EOF — sufficient for
+  // CanvasStage's render functions which span ~600-1500 lines each.
+  const end = Math.min(idx + 60000, src.length)
+  return src.slice(idx, end)
+}
+const drawStaticBody = extractFnBody(canvasStageSrc, 'const drawStatic')
+const drawDynamicBody = extractFnBody(canvasStageSrc, 'const drawDynamic')
+
+// P.1 — drawStatic handles callouts.
+pass("P.1 CanvasStage drawStatic dispatches sh.type === 'callout'",
+  drawStaticBody.includes("sh.type === 'callout'")
+  && drawStaticBody.includes('renderCalloutCanvas'),
+  { hint: "drawStatic missing `sh.type === 'callout'` branch + renderCalloutCanvas call. Add an else-if in the shape-type switch." })
+
+// P.2 — drawStatic dispatches angular dims separately from linear.
+pass("P.2 CanvasStage drawStatic dispatches angular dims (sh.dimType === 'angular')",
+  drawStaticBody.includes("sh.dimType === 'angular'")
+  && drawStaticBody.includes('renderAngularDimCanvas'),
+  { hint: "drawStatic 'dimension' branch missing angular dispatch. Switch on sh.dimType and route 'angular' to renderAngularDimCanvas." })
+
+// P.3 — drawDynamic previews techCalloutDraft mid-flow.
+pass("P.3 CanvasStage drawDynamic references techCalloutDraft for draft preview",
+  drawDynamicBody.includes('techCalloutDraft'),
+  { hint: "drawDynamic has no callout draft preview. Without this, operators get zero feedback after click 1 and conclude the tool is broken." })
+
+// P.4 — drawDynamic previews techDimAngularDraft mid-flow.
+pass("P.4 CanvasStage drawDynamic references techDimAngularDraft for draft preview",
+  drawDynamicBody.includes('techDimAngularDraft'),
+  { hint: "drawDynamic has no angular dim draft preview. Without this, operators get zero feedback through the 4-click sequence." })
+
+// P.5 — For every tool id referenced in DrawingTools setTool calls,
+// onMouseDown contains an `=== '<tool>'` branch.
+const TOOLS_REQUIRING_CLICK_BRANCH = [
+  'tech-line', 'tech-select', 'tech-dim-angular', 'tech-callout',
+]
+const onMouseDownBody = extractFnBody(canvasStageSrc, 'const onMouseDown')
+for (const tool of TOOLS_REQUIRING_CLICK_BRANCH) {
+  const branchPresent = onMouseDownBody.includes(`=== '${tool}'`)
+    || onMouseDownBody.includes(`=== "${tool}"`)
+  pass(`P.5 onMouseDown has branch for tool '${tool}'`,
+    branchPresent,
+    { hint: `Add an 'if (t === '${tool}')' branch inside the TECHNICAL appMode block of onMouseDown.` })
+}
+
+// P.6 — Every shape type in the store schema has a drawStatic branch.
+const SHAPE_TYPES_REQUIRING_RENDER = ['line', 'dimension', 'callout']
+for (const shapeType of SHAPE_TYPES_REQUIRING_RENDER) {
+  pass(`P.6 drawStatic has branch for shape type '${shapeType}'`,
+    drawStaticBody.includes(`sh.type === '${shapeType}'`),
+    { hint: `Add 'sh.type === '${shapeType}'' branch in drawStatic's shape-type dispatch. Without this, committed shapes of this type render invisibly.` })
+}
+
+// P.7 — SpecTablePanel renders callouts.
+pass("P.7 SpecTablePanel includes callouts iteration",
+  /callout/i.test(specTablePanelSrc)
+  && /\.map\(/.test(specTablePanelSrc)
+  && (specTablePanelSrc.includes('updateCalloutText')
+      || specTablePanelSrc.includes('deleteCallout')),
+  { hint: "SpecTablePanel doesn't read or render callouts. Add a 'Callouts' section listing callouts with updateCalloutText / deleteCallout handlers." })
+
+// ============================================================================
 // SUMMARY
 // ============================================================================
 setTimeout(() => {

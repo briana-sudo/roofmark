@@ -46,6 +46,12 @@ import {
   identifySnapSourceShape,
   isDimensionCommand,
 } from '../utils/dimGeometry'
+// Phase 2 18k bug-fix (May 12 2026) — angular dim + callout canvas
+// renderers. New 18k shape types (angular dim, callout) have their
+// own world-coord renderers; the existing renderDimension helper
+// stays the linear-dim-only path.
+import { renderAngularDimCanvas } from '../utils/angularDimMath'
+import { renderCalloutCanvas } from '../utils/techCalloutCommit'
 
 /**
  * CanvasStage — Step 3 substrate + Step 5 drawing tools (Spec §6, §7).
@@ -820,10 +826,33 @@ export default function CanvasStage() {
               // renderDimension helper can stay in world coords for
               // its geometry math. Selection state passes through so
               // the helper paints orange + grip squares.
+              //
+              // Phase 2 18k bug-fix (May 12 2026) — dispatch on dimType.
+              // Angular dims (dimType === 'angular') route to
+              // renderAngularDimCanvas which knows about vertex/p1/p2;
+              // linear / aligned dims continue through the original
+              // renderDimension helper. Pre-fix every dim was sent to
+              // the linear renderer which read undefined pointA/pointB
+              // for angular dims → silently rendered nothing.
               ctxStatic.save()
               ctxStatic.translate(techV.panX, techV.panY)
               ctxStatic.scale(techZoom, techZoom)
-              renderDimension(ctxStatic, sh, storeState.technicalLayers, isSelected)
+              if (sh.dimType === 'angular') {
+                renderAngularDimCanvas(ctxStatic, sh, storeState.technicalLayers, isSelected)
+              } else {
+                renderDimension(ctxStatic, sh, storeState.technicalLayers, isSelected)
+              }
+              ctxStatic.restore()
+            } else if (sh.type === 'callout') {
+              // Phase 2 18k bug-fix (May 12 2026) — callout render.
+              // Apply the TECHNICAL viewport transform; renderCallout-
+              // Canvas operates in world coords. Pre-fix: drawStatic
+              // had no callout branch at all, so committed callouts
+              // shipped to the store invisible on the canvas.
+              ctxStatic.save()
+              ctxStatic.translate(techV.panX, techV.panY)
+              ctxStatic.scale(techZoom, techZoom)
+              renderCalloutCanvas(ctxStatic, sh, storeState.technicalLayers, isSelected)
               ctxStatic.restore()
             }
           }
@@ -1406,6 +1435,110 @@ export default function CanvasStage() {
           ctxDynamic.translate(techVD.panX, techVD.panY)
           ctxDynamic.scale(techZoomD, techZoomD)
           renderDimension(ctxDynamic, previewDim, state.technicalLayers, false)
+          ctxDynamic.restore()
+        }
+
+        // Phase 2 18k bug-fix (May 12 2026) — Callout draft preview.
+        // Without this, the operator gets zero visual feedback between
+        // click 1 (tip) and click 2 (tail) — the tool felt broken.
+        //
+        //   awaitTail → rubber-band line from tip to cursor (dashed
+        //               amber); tip rendered as a small open circle.
+        //
+        // awaitText draws nothing on canvas — by that point the
+        // InlineTextEditor is mounted in HTML overlay land.
+        if (state.tool === 'tech-callout' && state.techCalloutDraft
+            && state.techCalloutDraft.stage === 'awaitTail'
+            && state.techCalloutDraft.tip) {
+          const tip = state.techCalloutDraft.tip
+          const cursorWorld = {
+            x: (state.cursorX - techVD.panX) / techZoomD,
+            y: (state.cursorY - techVD.panY) / techZoomD,
+          }
+          ctxDynamic.save()
+          ctxDynamic.translate(techVD.panX, techVD.panY)
+          ctxDynamic.scale(techZoomD, techZoomD)
+          ctxDynamic.strokeStyle = '#e8631a'
+          ctxDynamic.lineWidth = 0.8
+          ctxDynamic.setLineDash([3, 2])
+          ctxDynamic.beginPath()
+          ctxDynamic.moveTo(tip.x, tip.y)
+          ctxDynamic.lineTo(cursorWorld.x, cursorWorld.y)
+          ctxDynamic.stroke()
+          ctxDynamic.setLineDash([])
+          // Tip marker — small open circle so operator sees the locked
+          // point clearly.
+          ctxDynamic.beginPath()
+          ctxDynamic.arc(tip.x, tip.y, 4, 0, Math.PI * 2)
+          ctxDynamic.fillStyle = '#e8631a'
+          ctxDynamic.fill()
+          ctxDynamic.restore()
+        }
+
+        // Phase 2 18k bug-fix (May 12 2026) — Angular dim Workflow 2
+        // draft preview. 4-stage state machine; each stage shows the
+        // locked points + a rubber-band hint to the cursor for the
+        // next pick.
+        if (state.tool === 'tech-dim-angular' && state.techDimAngularDraft
+            && state.techDimAngularDraft.stage) {
+          const draft = state.techDimAngularDraft
+          const cursorWorld = {
+            x: (state.cursorX - techVD.panX) / techZoomD,
+            y: (state.cursorY - techVD.panY) / techZoomD,
+          }
+          ctxDynamic.save()
+          ctxDynamic.translate(techVD.panX, techVD.panY)
+          ctxDynamic.scale(techZoomD, techZoomD)
+          ctxDynamic.strokeStyle = '#B8860B'
+          ctxDynamic.fillStyle = '#B8860B'
+          ctxDynamic.lineWidth = 0.8
+          const markPoint = (pt) => {
+            ctxDynamic.beginPath()
+            ctxDynamic.arc(pt.x, pt.y, 4, 0, Math.PI * 2)
+            ctxDynamic.fill()
+          }
+          if (draft.vertex) markPoint(draft.vertex)
+          if (draft.p1) markPoint(draft.p1)
+          if (draft.p2) markPoint(draft.p2)
+
+          // Rubber-band hint to cursor for the upcoming pick.
+          ctxDynamic.setLineDash([3, 2])
+          ctxDynamic.beginPath()
+          if (draft.stage === 'awaitRay1' && draft.vertex) {
+            ctxDynamic.moveTo(draft.vertex.x, draft.vertex.y)
+            ctxDynamic.lineTo(cursorWorld.x, cursorWorld.y)
+          } else if (draft.stage === 'awaitRay2' && draft.vertex && draft.p1) {
+            ctxDynamic.moveTo(draft.vertex.x, draft.vertex.y)
+            ctxDynamic.lineTo(draft.p1.x, draft.p1.y)
+            ctxDynamic.moveTo(draft.vertex.x, draft.vertex.y)
+            ctxDynamic.lineTo(cursorWorld.x, cursorWorld.y)
+          } else if (draft.stage === 'awaitRadius' && draft.vertex && draft.p1 && draft.p2) {
+            ctxDynamic.moveTo(draft.vertex.x, draft.vertex.y)
+            ctxDynamic.lineTo(draft.p1.x, draft.p1.y)
+            ctxDynamic.moveTo(draft.vertex.x, draft.vertex.y)
+            ctxDynamic.lineTo(draft.p2.x, draft.p2.y)
+          }
+          ctxDynamic.stroke()
+          ctxDynamic.setLineDash([])
+
+          // For awaitRadius: also show a live arc preview at cursor distance.
+          if (draft.stage === 'awaitRadius' && draft.vertex && draft.p1 && draft.p2) {
+            const r = Math.hypot(cursorWorld.x - draft.vertex.x, cursorWorld.y - draft.vertex.y)
+            if (r > 1) {
+              const a1 = Math.atan2(draft.p1.y - draft.vertex.y, draft.p1.x - draft.vertex.x)
+              const a2 = Math.atan2(draft.p2.y - draft.vertex.y, draft.p2.x - draft.vertex.x)
+              let sweep = a2 - a1
+              while (sweep > Math.PI) sweep -= 2 * Math.PI
+              while (sweep < -Math.PI) sweep += 2 * Math.PI
+              ctxDynamic.save()
+              ctxDynamic.globalAlpha = 0.5
+              ctxDynamic.setLineDash([2, 2])
+              ctxDynamic.beginPath()
+              ctxDynamic.arc(draft.vertex.x, draft.vertex.y, r, a1, a1 + sweep, sweep < 0)
+              ctxDynamic.stroke()
+              ctxDynamic.restore()
+            }
+          }
           ctxDynamic.restore()
         }
 
