@@ -1348,6 +1348,30 @@ export default function CanvasStage() {
             )
             || state.techGripEdit
             || (state.tool === 'tech-line' && state.appMode === 'TECHNICAL')
+            // Phase 2 18l Bug 6 fix (May 12 2026) — angular dim snap.
+            // The mousemove scan at ~line 2303 writes techCommandHover
+            // during awaitVertex / awaitRay1 / awaitRay2 stages; this
+            // gate makes the existing diamond render fire so operators
+            // see visual feedback. awaitRadius is grid-only per spec
+            // D2 — exclude here to keep the diamond from lingering
+            // through the radius-drag stage.
+            //
+            // Rule 30 — every tool that writes to a shared visual-
+            // feedback slice (techCommandHover) needs to be enumerated
+            // in the consumer's render gate. Block R.B.1 enforces this
+            // at test time for tech-dim-angular.
+            //
+            // Callout snap (tip-place stage) deferred to a follow-up
+            // — see commit message + investigation notes for the LOC
+            // budget rationale.
+            || (
+              state.tool === 'tech-dim-angular'
+              && state.appMode === 'TECHNICAL'
+              && (
+                !state.techDimAngularDraft
+                || state.techDimAngularDraft.stage !== 'awaitRadius'
+              )
+            )
           )
         ) {
           const hover = state.techCommandHover
@@ -3955,6 +3979,18 @@ export default function CanvasStage() {
       // appears (or updates) on the next rAF tick.
       if (state.technicalLayers !== prev.technicalLayers) {
         staticDirty = true
+      }
+      // Phase 2 18l Bug 5 fix (May 12 2026) — calloutTextSize is read by
+      // drawStatic's renderCalloutCanvas call AND by drawDynamic's
+      // (future) draft callout preview. Without a bridge here the
+      // operator's SpecTablePanel text-size change updates the store
+      // but doesn't repaint existing callouts; only newly-added
+      // callouts (which mutate technicalLayers above) pick up the new
+      // size. Rule 30 — every render-affecting slice needs a producer-
+      // side dirty-flag branch.
+      if (state.calloutTextSize !== prev.calloutTextSize) {
+        staticDirty = true
+        dynamicDirty = true
       }
       // 18b — techDraft change repaints the rubber-band on the dynamic
       // canvas. Fires on first click (draft begin), Enter / freehand

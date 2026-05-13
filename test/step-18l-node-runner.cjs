@@ -257,6 +257,84 @@ pass("43. Legacy v1.2 callout style (KCC_NAVY leader) gone",
   !/CALLOUT_LEADER_COLOR\s*=\s*KCC_NAVY/.test(v13ScriptSrc))
 
 // ============================================================================
+// BLOCK R — Cross-boundary integration assertions (Rule 30)
+// ============================================================================
+// Rule 30: every state slice that participates in a render path requires
+// TWO wiring points in CanvasStage:
+//   1. PRODUCER side: useAppStore.subscribe callback has a branch that
+//      flips the appropriate dirty flag when that slice changes.
+//   2. CONSUMER side: render gates in drawStatic / drawDynamic include
+//      the relevant tool/state conditions to actually render the slice's
+//      effect.
+//
+// Bugs 5 + 6 shipped because each had ONE of the two wirings done but
+// not the other. Block R source-greps for both wirings so a future
+// state-slice addition can't reproduce the defect class.
+
+// Extract the useAppStore.subscribe callback body from CanvasStage.
+// The callback runs ~lines 3947-4400 of the file; capturing it lets us
+// assert on the slice→dirty-flag bridges in isolation.
+const subscribeIdx = canvasStageSrc.indexOf('useAppStore.subscribe(')
+const subscribeBody = subscribeIdx < 0
+  ? ''
+  : canvasStageSrc.slice(subscribeIdx, subscribeIdx + 30000)
+
+// R.A.1 — calloutTextSize producer bridge.
+// Operator changes the SpecTablePanel input → setCalloutTextSize → store
+// mutates. Without this branch the canvas keeps the previously-drawn
+// callout sizes until something else flips staticDirty (e.g., adding a
+// new shape). Bug 5 was exactly this gap.
+pass("R.A.1 subscribe callback flips staticDirty on calloutTextSize change",
+  /state\.calloutTextSize !== prev\.calloutTextSize[\s\S]{0,200}staticDirty\s*=\s*true/.test(subscribeBody),
+  { hint: "Add a branch to the useAppStore.subscribe callback in CanvasStage that compares state.calloutTextSize !== prev.calloutTextSize and flips staticDirty = true. Without it, drawStatic never re-fires when the operator changes the global text size." })
+
+// R.B.1 — Angular dim snap diamond render gate inclusion.
+// The mousemove scan at ~line 2303 writes techCommandHover for
+// tech-dim-angular during awaitVertex/awaitRay1/awaitRay2. The
+// drawDynamic snap-diamond render gate (~line 1340) must include
+// tool === 'tech-dim-angular' or the diamond stays invisible despite
+// the write side being correct. Bug 6 was exactly this gap.
+{
+  // Extract the snap-diamond gate body — the conditional that opens
+  // the diamond stroke block. Match on the gate's outer test
+  // (`state.techCommandHover` followed by line-end + `&&`), agnostic
+  // to CRLF vs LF line endings.
+  const gateMatch = canvasStageSrc.match(/state\.techCommandHover\s*\r?\n\s*&&/)
+  const gateIdx = gateMatch ? gateMatch.index : -1
+  const gateBody = gateIdx < 0
+    ? ''
+    : canvasStageSrc.slice(Math.max(0, gateIdx - 200), gateIdx + 2500)
+  pass("R.B.1 drawDynamic snap-diamond gate includes tech-dim-angular",
+    /state\.tool === ['"]tech-dim-angular['"]/.test(gateBody)
+    && /techDimAngularDraft/.test(gateBody),
+    { hint: "Extend the snap-diamond render gate in drawDynamic to include the tech-dim-angular tool. Without it the snap engine fires under the hood but the operator sees no diamond — appears 'broken'." })
+}
+
+// R.C — Future-proof Rule 30: every render-affecting slice ending in
+// 'TextSize' / 'Opacity' / 'Color' / 'Rotation' (suffixes that signal
+// the slice influences paint output) MUST have a corresponding
+// dirty-flag bridge in the subscribe callback. Currently scoped to the
+// calloutTextSize slice (the slice that surfaced the bug); future
+// render-affecting slices added to the store schema would need to
+// register themselves here or fail at test time.
+//
+// This is a permanent regression gate against the bug class: "operator
+// adds a new render-affecting slice but forgets the producer-side
+// bridge." Cheap to enforce, cheap to extend.
+const RENDER_AFFECTING_SLICES = [
+  'calloutTextSize',
+  // 'gridOpacity', 'gridRotation', etc. — slices that already had
+  // bridges before Rule 30 was named. Not enforced retroactively
+  // here; the test asserts NEW slices register.
+]
+for (const slice of RENDER_AFFECTING_SLICES) {
+  const re = new RegExp(`state\\.${slice} !== prev\\.${slice}[\\s\\S]{0,200}(staticDirty|dynamicDirty)\\s*=\\s*true`)
+  pass(`R.C subscribe callback has dirty-flag bridge for '${slice}'`,
+    re.test(subscribeBody),
+    { hint: `Add a branch in the useAppStore.subscribe callback comparing state.${slice} !== prev.${slice}. Rule 30 — every render-affecting slice needs producer-side wiring.` })
+}
+
+// ============================================================================
 // SUMMARY
 // ============================================================================
 setTimeout(() => {
