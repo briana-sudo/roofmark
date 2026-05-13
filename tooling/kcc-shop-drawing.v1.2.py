@@ -3,18 +3,15 @@
 kcc-shop-drawing.py — KCC RoofMark Locked Shop Drawing Template
 ================================================================================
 
-Status      : LOCKED — v1.3 — May 12 2026
+Status      : LOCKED — v1.2 — May 12 2026
 Authority   : Approved title block layout draft v3 (Webster Groves session)
               + 18h decision-flag pass May 12 2026 (Brian, locked).
               + 18k precursor / v1.2 decision-flag pass May 12 2026
                 (Brian, locked) — angular dim render path.
-              + 18l precursor / v1.3 decision-flag pass May 12 2026
-                (Brian, locked) — callout render-style amendment.
 Spec        : RoofMark Kickoff Spec v1.0, Section 21 — Technical Drawing Mode
               https://www.notion.so/33eca70abea681668644c1dc03228839
 18h spec    : https://www.notion.so/35eca70abea68142854ad4c62cb5dab1
 v1.2 spec   : https://www.notion.so/35eca70abea68134a645f41dcb2e8613
-v1.3 spec   : https://www.notion.so/35fca70abea68124941ac6c7fdea7ae1
 Branding    : KCC Operational Standards — navy / orange / Arial-equivalent
               https://www.notion.so/33dca70abea681c48ce8ff448587bfe4
 
@@ -71,35 +68,6 @@ bbox centroid; radius is rotation-invariant.
 Reference-PDF alignment fields remain OUT OF SCOPE for v1.2. Visual
 style of linear dims, shapes, callouts, header, spec table, and
 footer is byte-identical to v1.1.
-
-v1.2 → v1.3 changes
--------------------
-v1.3 is a callout-render-style amendment + one new global field.
-Backward-compatible with v1.2 for any non-callout-containing input
-(linear dims + angular dims + shapes render byte-identical to v1.2;
-v1.2-era inputs with callouts re-render with the new style).
-
-Callout changes (D1-D4):
-- Tip: small filled amber dot (3pt radius, no outline ring). The
-  prior orange 8pt circle with white outline is gone.
-- Number identifier: moves from inside the tip into the text box.
-  Format: '#{num} {textEN}' when both present; '#{num}' when textEN
-  empty; '{textEN}' alone when num is 0/missing. Empty composed
-  display_text skips the box entirely (no orphan boxes).
-- Leader line: amber DIM_AMBER (matches dim line color), width
-  matching DIM_LINE_SW. Pre-fix was navy. Visual cohesion with dims.
-- Text font size: scales with new top-level field `calloutTextSize`
-  (default 8, valid integer 6..20 inclusive).
-
-New input field (D5):
-- "calloutTextSize": int, optional, default 8. Range 6..20 inclusive.
-  Validated at pre-pass; out-of-range raises ValueError.
-
-tipStyle field is accepted but ignored — reserved for future v1.4
-amendment that may expose dot/numbered/none variants. v1.3 always
-renders the new amber-dot style regardless of tipStyle value.
-
-Reference-PDF alignment fields remain OUT OF SCOPE for v1.3.
 
 Input contract
 --------------
@@ -247,8 +215,8 @@ FTR_LEFT_TEXT   = "KCC ROOFMARK  |  AEROSPACE-GRADE PROCESS DISCIPLINE FOR ROOFI
 FTR_RIGHT_FONT  = "Helvetica"
 FTR_RIGHT_SIZE  = 7
 FTR_RIGHT_COLOR = HEADER_SUB_TEXT
-# v1.0 → v1.1 → v1.2 → v1.3: footer right text updated to reflect script version.
-FTR_RIGHT_TEXT  = "kcc-shop-drawing.py v1.3  |  internal scale 24 px / inch"
+# v1.0 → v1.1 → v1.2: footer right text updated to reflect script version.
+FTR_RIGHT_TEXT  = "kcc-shop-drawing.py v1.2  |  internal scale 24 px / inch"
 
 # ---- Spec table — landscape layout (4 cols × 2 rows) -----------------------
 SPEC_TABLE_H_LANDSCAPE = 75.6    # 1.05 in
@@ -332,32 +300,18 @@ DIM_LABEL_SIZE          = 8
 DIM_LABEL_PAD           = 3.0
 DIM_LABEL_BG_PAD        = 2.0
 
-# Callout styling — v1.3 (May 12 2026) callout-render-style amendment.
-#
-# v1.2 → v1.3 changes:
-#   - Tip: amber dot (3pt radius, no outline) replaces the 8pt orange
-#     circle with white outline. CALLOUT_TIP_R retained for backward-
-#     reference but unused in the v1.3 renderer.
-#   - Leader: amber (DIM_AMBER), width matches DIM_LINE_SW. Was navy.
-#   - Number identifier: moved from inside the tip to the front of
-#     the text-box content. CALLOUT_NUM_* constants retained but
-#     unused in v1.3 (kept for reference / future v1.4 variants).
-#   - Font size: caller passes calloutTextSize via the global JSON
-#     field; CALLOUT_TEXT_SIZE_DEFAULT is the fallback.
-CALLOUT_TIP_DOT_R       = 3.0                 # v1.3 — small amber dot
-CALLOUT_TIP_FILL        = DIM_AMBER           # v1.3 — was KCC_ORANGE
-CALLOUT_TIP_R           = 8.0                 # legacy v1.2 — unused
-CALLOUT_TIP_STROKE      = white               # legacy v1.2 — unused
-CALLOUT_TIP_STROKE_SW   = 1.2                 # legacy v1.2 — unused
-CALLOUT_NUM_FONT        = "Helvetica-Bold"    # legacy — unused
-CALLOUT_NUM_SIZE        = 9                   # legacy — unused
-CALLOUT_NUM_COLOR       = white               # legacy — unused
-CALLOUT_LEADER_SW       = 0.8                 # matches DIM_LINE_SW
-CALLOUT_LEADER_COLOR    = DIM_AMBER           # v1.3 — was KCC_NAVY
+# Callout styling
+CALLOUT_TIP_R           = 8.0
+CALLOUT_TIP_FILL        = KCC_ORANGE
+CALLOUT_TIP_STROKE      = white
+CALLOUT_TIP_STROKE_SW   = 1.2
+CALLOUT_NUM_FONT        = "Helvetica-Bold"
+CALLOUT_NUM_SIZE        = 9
+CALLOUT_NUM_COLOR       = white
+CALLOUT_LEADER_SW       = 0.8
+CALLOUT_LEADER_COLOR    = KCC_NAVY
 CALLOUT_TEXT_FONT       = "Helvetica"
-CALLOUT_TEXT_SIZE_DEFAULT = 8                 # v1.3 — default font size
-CALLOUT_TEXT_SIZE_MIN     = 6                 # v1.3 — validation lower bound
-CALLOUT_TEXT_SIZE_MAX     = 20                # v1.3 — validation upper bound
+CALLOUT_TEXT_SIZE       = 8
 CALLOUT_TEXT_COLOR      = KCC_NAVY
 CALLOUT_BOX_FILL        = white
 CALLOUT_BOX_STROKE      = KCC_ORANGE
@@ -532,47 +486,6 @@ def _validate_v11_inputs(data: dict):
                 continue
             _validate_angular_dim(d, layer_idx, dim_idx)
 
-    # v1.3 — calloutTextSize validation per D5. Optional; default 8;
-    # if present must be a finite int (or int-coercible float) in
-    # [6, 20]. Out-of-range raises ValueError naming the bad value.
-    # Non-numeric raises ValueError.
-    if "calloutTextSize" in data:
-        cts = data["calloutTextSize"]
-        # Reject booleans + non-numeric + NaN/inf.
-        if isinstance(cts, bool) or not isinstance(cts, (int, float)):
-            raise ValueError(
-                f"calloutTextSize must be a number between "
-                f"{CALLOUT_TEXT_SIZE_MIN} and {CALLOUT_TEXT_SIZE_MAX} "
-                f"(inclusive), got {cts!r} (type {type(cts).__name__})."
-            )
-        try:
-            cts_f = float(cts)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"calloutTextSize must be a number between "
-                f"{CALLOUT_TEXT_SIZE_MIN} and {CALLOUT_TEXT_SIZE_MAX} "
-                f"(inclusive), got {cts!r}."
-            )
-        if not math.isfinite(cts_f):
-            raise ValueError(
-                f"calloutTextSize must be a finite number, got {cts!r}."
-            )
-        if cts_f < CALLOUT_TEXT_SIZE_MIN or cts_f > CALLOUT_TEXT_SIZE_MAX:
-            raise ValueError(
-                f"calloutTextSize must be between {CALLOUT_TEXT_SIZE_MIN} "
-                f"and {CALLOUT_TEXT_SIZE_MAX} (inclusive), got {cts!r}."
-            )
-
-    # v1.3 — callout shape validation. Walks every layer.callouts[]
-    # and enforces the v1.2 contract (tipX/tipY/tailX/tailY required +
-    # numeric, num present, textEN may be empty string). Mirrors the
-    # angular dim validator's "fail loudly with location" pattern.
-    for layer_idx, layer in enumerate(data.get("layers") or []):
-        for ca_idx, ca in enumerate(layer.get("callouts") or []):
-            if not isinstance(ca, dict):
-                continue
-            _validate_callout(ca, layer_idx, ca_idx)
-
 
 # =============================================================================
 # v1.2 — ANGULAR DIM VALIDATION
@@ -654,50 +567,6 @@ def _validate_angular_dim(d: dict, layer_idx: int, dim_idx: int) -> None:
             f"Angular dim {where} (id={dim_id!r}) has parallel or "
             f"collinear rays (vertex-to-p1 and vertex-to-p2 are along "
             f"the same line). Arc is undefined."
-        )
-
-
-def _validate_callout(ca: dict, layer_idx: int, ca_idx: int) -> None:
-    """v1.3 — validate a callout shape. Raises ValueError on missing
-    required fields or non-numeric coords. tipStyle is accepted but
-    NOT validated (reserved for v1.4 amendment; missing or any string
-    value passes through unread). Per spec D11 (fail loudly, no silent
-    coercion or fall-back to legacy render)."""
-    where = f"layers[{layer_idx}].callouts[{ca_idx}]"
-    ca_id = ca.get("id") or "(no id)"
-
-    # Required coord fields — must be present and finite numeric.
-    for field in ("tipX", "tipY", "tailX", "tailY"):
-        if field not in ca:
-            raise ValueError(
-                f"Callout {where} (id={ca_id!r}) is missing required "
-                f"field {field!r}. Each callout must carry tipX, tipY, "
-                f"tailX, tailY (numeric) and num (int)."
-            )
-        if not _is_finite_number(ca[field]):
-            raise ValueError(
-                f"Callout {where} (id={ca_id!r}) field {field!r} must "
-                f"be a finite number, got {ca[field]!r}."
-            )
-
-    # num — required field. Operator may pass 0 to signal "no number";
-    # missing entirely is a contract violation (different from 0).
-    if "num" not in ca:
-        raise ValueError(
-            f"Callout {where} (id={ca_id!r}) is missing required field "
-            f"'num'. Use 0 to render only textEN; positive integer to "
-            f"prefix the box content with '#{{num}}'."
-        )
-    num_val = ca["num"]
-    if isinstance(num_val, bool) or not isinstance(num_val, (int, float)):
-        raise ValueError(
-            f"Callout {where} (id={ca_id!r}) field 'num' must be a "
-            f"non-negative integer (or 0), got {num_val!r}."
-        )
-    if not math.isfinite(float(num_val)) or float(num_val) < 0:
-        raise ValueError(
-            f"Callout {where} (id={ca_id!r}) field 'num' must be a "
-            f"non-negative integer (or 0), got {num_val!r}."
         )
 
 
@@ -864,8 +733,6 @@ def render_shop_drawing(data: dict, out_dir: str | os.PathLike = ".") -> str:
     rotation_deg = int(data.get("geometryRotation", 0))
     fit_mode = data.get("fitMode", "auto")
     custom_scale = float(data.get("customScale", 1.0))
-    # v1.3 — callout font size (validated at pre-pass per D5).
-    callout_text_size = int(data.get("calloutTextSize", CALLOUT_TEXT_SIZE_DEFAULT))
 
     # ---- validate required spec fields --------------------------------------
     for required in ("partName", "material", "drawingNo"):
@@ -902,7 +769,7 @@ def render_shop_drawing(data: dict, out_dir: str | os.PathLike = ".") -> str:
     c.setTitle(f"KCC Shop Drawing {drawing_no} - {part_name}")
     c.setAuthor("Kosarek Construction Company")
     c.setSubject(f"Drawing type: {drawing_type}")
-    c.setCreator("kcc-shop-drawing.py v1.3")
+    c.setCreator("kcc-shop-drawing.py v1.2")
 
     # ---- render in fixed order ---------------------------------------------
     _draw_page_background(c, layout)
@@ -912,8 +779,7 @@ def render_shop_drawing(data: dict, out_dir: str | os.PathLike = ".") -> str:
     _draw_footer(c, layout)
     _draw_spec_table(c, layout, spec)
     _draw_drawing_area_frame(c, layout)
-    _draw_geometry(c, layout, rotated_layers, drawing_type, fit_mode, custom_scale,
-                   callout_text_size=callout_text_size)
+    _draw_geometry(c, layout, rotated_layers, drawing_type, fit_mode, custom_scale)
 
     c.save()
     return str(out_path)
@@ -1106,14 +972,8 @@ def _draw_drawing_area_frame(c, lay):
 # DRAW HELPERS — geometry (fit + render layers/dimensions/callouts)
 # =============================================================================
 
-def _draw_geometry(c, lay, layers: list, drawing_type: str, fit_mode: str,
-                   custom_scale: float, callout_text_size: int = CALLOUT_TEXT_SIZE_DEFAULT):
-    """Compute fit transform, then render bottom-to-top by layer.order.
-
-    v1.3 (May 12 2026) — accepts callout_text_size, propagated to
-    _render_layer_callouts so the global JSON field
-    'calloutTextSize' uniformly drives every callout box's font.
-    """
+def _draw_geometry(c, lay, layers: list, drawing_type: str, fit_mode: str, custom_scale: float):
+    """Compute fit transform, then render bottom-to-top by layer.order."""
     if not layers:
         # No geometry — placeholder text centered in drawing area
         c.setFillColor(TEXT_DIM)
@@ -1143,7 +1003,7 @@ def _draw_geometry(c, lay, layers: list, drawing_type: str, fit_mode: str,
         _render_layer_dimensions(c, layer, tx_pt)
 
     for layer in sorted_layers:
-        _render_layer_callouts(c, layer, tx_pt, text_size=callout_text_size)
+        _render_layer_callouts(c, layer, tx_pt)
 
     if is_assembly and len(sorted_layers) > 1:
         _render_layer_legend(c, lay, sorted_layers)
@@ -1471,46 +1331,22 @@ def _arrow(c, x, y, ux, uy):
     c.drawPath(p, fill=1, stroke=0)
 
 
-def _render_layer_callouts(c, layer, tx_pt, text_size=CALLOUT_TEXT_SIZE_DEFAULT):
-    """v1.3 callout renderer.
-
-    Style (per v1.3 spec D1-D4):
-      - Leader: amber DIM_AMBER, width DIM_LINE_SW (matches dim lines).
-      - Tip: small amber filled dot, no outline ring.
-      - Text composition: '#{num} {textEN}', '#{num}', or '{textEN}'.
-        Empty composed text skips the box entirely (no orphan boxes).
-      - Font size: caller-supplied (read from global calloutTextSize
-        field, default 8). Box auto-sizes to fit text.
-
-    @param text_size  Validated 6..20 inclusive. Applied to all callouts
-                      in the layer uniformly (per-callout override is
-                      deferred per v1.3 D4).
-    """
+def _render_layer_callouts(c, layer, tx_pt):
     for ca in layer.get("callouts", []) or []:
         tipx, tipy   = tx_pt(ca.get("tipX", 0),  ca.get("tipY", 0))
         tailx, taily = tx_pt(ca.get("tailX", 0), ca.get("tailY", 0))
         num   = int(ca.get("num") or 0)
         text  = str(ca.get("textEN") or "").strip()
 
-        # Compose display text per v1.3 D2.
-        if num > 0 and text:
-            display_text = f"#{num} {text}"
-        elif num > 0:
-            display_text = f"#{num}"
-        else:
-            display_text = text  # may be empty — handled below
-
-        # Leader line — amber, matches dim line styling (v1.3 D3).
         c.setStrokeColor(CALLOUT_LEADER_COLOR)
         c.setLineWidth(CALLOUT_LEADER_SW)
         c.line(tipx, tipy, tailx, taily)
 
-        # Text box at tail — only when display_text is non-empty.
-        if display_text:
-            c.setFont(CALLOUT_TEXT_FONT, text_size)
-            tw = c.stringWidth(display_text, CALLOUT_TEXT_FONT, text_size)
+        if text:
+            c.setFont(CALLOUT_TEXT_FONT, CALLOUT_TEXT_SIZE)
+            tw = c.stringWidth(text, CALLOUT_TEXT_FONT, CALLOUT_TEXT_SIZE)
             box_w = tw + 2 * CALLOUT_BOX_PAD_X
-            box_h = text_size + 2 * CALLOUT_BOX_PAD_Y
+            box_h = CALLOUT_TEXT_SIZE + 2 * CALLOUT_BOX_PAD_Y
             bx0 = tailx - box_w / 2
             by0 = taily - box_h / 2
             c.setFillColor(CALLOUT_BOX_FILL)
@@ -1518,15 +1354,17 @@ def _render_layer_callouts(c, layer, tx_pt, text_size=CALLOUT_TEXT_SIZE_DEFAULT)
             c.setLineWidth(CALLOUT_BOX_SW)
             c.rect(bx0, by0, box_w, box_h, fill=1, stroke=1)
             c.setFillColor(CALLOUT_TEXT_COLOR)
-            c.drawCentredString(
-                tailx,
-                by0 + CALLOUT_BOX_PAD_Y + text_size * 0.2,
-                display_text,
-            )
+            c.drawCentredString(tailx, by0 + CALLOUT_BOX_PAD_Y + CALLOUT_TEXT_SIZE * 0.2,
+                                text)
 
-        # Tip dot — small amber filled circle, no outline (v1.3 D1).
         c.setFillColor(CALLOUT_TIP_FILL)
-        c.circle(tipx, tipy, CALLOUT_TIP_DOT_R, fill=1, stroke=0)
+        c.setStrokeColor(CALLOUT_TIP_STROKE)
+        c.setLineWidth(CALLOUT_TIP_STROKE_SW)
+        c.circle(tipx, tipy, CALLOUT_TIP_R, fill=1, stroke=1)
+        if num > 0:
+            c.setFillColor(CALLOUT_NUM_COLOR)
+            c.setFont(CALLOUT_NUM_FONT, CALLOUT_NUM_SIZE)
+            c.drawCentredString(tipx, tipy - CALLOUT_NUM_SIZE * 0.32, str(num))
 
 
 def _render_layer_legend(c, lay, sorted_layers):
@@ -1626,7 +1464,7 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(
         description="Render a KCC RoofMark shop drawing PDF from a "
-                    "RoofMark Technical Drawing JSON export. (v1.3)"
+                    "RoofMark Technical Drawing JSON export. (v1.2)"
     )
     ap.add_argument("json_path", help="Path to roofmark-technical-*.json")
     ap.add_argument("--out-dir", default=".", help="Output directory")
