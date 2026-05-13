@@ -500,12 +500,44 @@ export default function DrawingTools() {
           className={tool === 'tech-line' ? 'tool-btn tech-btn active' : 'tool-btn tech-btn'}
           onClick={() => onSelect('tech-line', appMode !== 'TECHNICAL')}
           disabled={appMode !== 'TECHNICAL'}
-          title="Line — click anchor, type length (or click end). Enter commits typed; click commits freehand."
+          title="Line (L) — click anchor, type length (or click end). Enter commits typed; click commits freehand."
           aria-pressed={tool === 'tech-line'}
           data-tool="tech-line"
         >
           <span className="tool-icon" aria-hidden="true">╱</span>
           <span className="tool-name">Line</span>
+        </button>
+        {/* Phase 2 18k — Angular dim tool. Workflow 2 (from-scratch, 4-click
+            vertex → ray1 → ray2 → radius). Workflow 1 (2-line select + drag-
+            radius) is triggered from TechInputPanel when exactly 2 lines are
+            selected under tech-select. */}
+        <button
+          type="button"
+          className={tool === 'tech-dim-angular' ? 'tool-btn tech-btn active' : 'tool-btn tech-btn'}
+          onClick={() => onSelect('tech-dim-angular', appMode !== 'TECHNICAL')}
+          disabled={appMode !== 'TECHNICAL'}
+          title="Dim Angular (A) — click 4 points: vertex, ray-1 endpoint, ray-2 endpoint, radius. Or select 2 lines under Select tool and click Dim ∠."
+          aria-pressed={tool === 'tech-dim-angular'}
+          data-tool="tech-dim-angular"
+          data-testid="btn-tech-dim-angular"
+        >
+          <span className="tool-icon" aria-hidden="true">∠</span>
+          <span className="tool-name">Dim ∠</span>
+        </button>
+        {/* Phase 2 18k — Leader-line callout tool. Two-click commit
+            (tip → tail) followed by inline text entry. */}
+        <button
+          type="button"
+          className={tool === 'tech-callout' ? 'tool-btn tech-btn active' : 'tool-btn tech-btn'}
+          onClick={() => onSelect('tech-callout', appMode !== 'TECHNICAL')}
+          disabled={appMode !== 'TECHNICAL'}
+          title="Callout (C) — click tip, click tail, type label. Enter commits; Esc cancels."
+          aria-pressed={tool === 'tech-callout'}
+          data-tool="tech-callout"
+          data-testid="btn-tech-callout"
+        >
+          <span className="tool-icon" aria-hidden="true">📌</span>
+          <span className="tool-name">Callout</span>
         </button>
       </div>
 

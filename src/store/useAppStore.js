@@ -17,6 +17,10 @@ import {
   writeToHandle,
   verifyHandlePermission,
 } from '../utils/fileSystemAccess'
+// Phase 2 18k (May 12 2026) — angular dim Workflow 1 commit uses
+// computeAngularOrientation to resolve vertex + p1 + p2 from two
+// selected lines. Pure module, no circular ref with this store.
+import { computeAngularOrientation } from '../utils/angularDimMath'
 
 // ============================================================================
 // RoofMark application store — Step 2 of Kickoff Spec Section 16
@@ -639,6 +643,50 @@ const initialState = {
   techDimStage: null,
   techDimPointA: null,
   techDimPointB: null,
+  // Phase 2 18k (May 12 2026) — Angular dim Workflow 2 draft state.
+  // 4-stage state machine for the from-scratch flow (no existing
+  // line shapes to select). Transient. NOT in PERSIST_KEYS. Cleared
+  // at the same sites as other dim state (setAppMode, setTool away,
+  // clearTechSelection, importJSON, clearAll, commit/cancel).
+  //   techDimAngularDraft.stage  — null | 'awaitVertex' | 'awaitRay1'
+  //                                | 'awaitRay2' | 'awaitRadius'
+  //   techDimAngularDraft.vertex — { x, y } | null
+  //   techDimAngularDraft.p1     — { x, y } | null
+  //   techDimAngularDraft.p2     — { x, y } | null
+  // Workflow 1 (operator selects 2 lines + clicks Dim ∠) is a one-shot
+  // commit that resolves vertex+p1+p2 from the lines and enters
+  // awaitRadius with no intermediate clicks. State shape is identical
+  // so the canvas drag-to-radius render path is shared.
+  techDimAngularDraft: null,
+  // Phase 2 18k — Callout tool draft state. 3-stage state machine
+  // (tip → tail → text). Text entry is delegated to InlineTextEditor
+  // mounted at App.jsx; the canvas only renders the live leader line
+  // preview during awaitTail. Transient. Cleared on the standard
+  // tool/mode/project boundaries.
+  //   techCalloutDraft.stage  — null | 'awaitTip' | 'awaitTail' | 'awaitText'
+  //   techCalloutDraft.tip    — { x, y } | null
+  //   techCalloutDraft.tail   — { x, y } | null
+  techCalloutDraft: null,
+  // Phase 2 18k — Shared inline text editor state. Mounted by App.jsx
+  // when kind !== null. Drives:
+  //   kind === 'callout'     — text entry for a new callout (targetId
+  //                            unused; calls commitInlineEdit which
+  //                            consumes techCalloutDraft and creates
+  //                            the shape).
+  //   kind === 'dim-override' — text override edit for an existing
+  //                             dim (targetId = shape id). Future use
+  //                             from SpecTablePanel; not wired in 18k.
+  //   kind === 'callout-edit' — text edit for an existing callout
+  //                             (targetId = shape id). Used by
+  //                             SpecTablePanel's per-callout row.
+  // x, y are screen-space (CSS pixel) coordinates.
+  inlineEditor: {
+    kind: null,
+    targetId: null,
+    x: 0,
+    y: 0,
+    initialValue: '',
+  },
   // Phase 2 18h (May 12 2026) — Technical Drawing preview state +
   // PDF-generation job state. All transient (NOT in PERSIST_KEYS,
   // NOT in dataSnapshot). Cleared on appMode change away from
@@ -1188,6 +1236,10 @@ export const useAppStore = create((set, get) => {
         name: typeof name === 'string' && name.length > 0 ? name : TECHNICAL_LAYER_NAME_DEFAULT,
         visible: true,
         shapes: [],
+        // Phase 2 18k — per-layer callout counter (D5/D6). Increments on
+        // every addTechnicalCallout commit, never decrements on delete.
+        // Stable across deletions per operator's mental model.
+        nextCalloutNum: 1,
       }
       set((s) => ({ technicalLayers: [...s.technicalLayers, layer] }))
       return layer.id
@@ -1207,6 +1259,8 @@ export const useAppStore = create((set, get) => {
             name: TECHNICAL_LAYER_NAME_DEFAULT,
             visible: true,
             shapes: [fullShape],
+            // Phase 2 18k — initialize callout counter on auto-create.
+            nextCalloutNum: 1,
           }
           return { technicalLayers: [layer] }
         }
@@ -1699,6 +1753,11 @@ export const useAppStore = create((set, get) => {
           techDimStage: null,
           techDimPointA: null,
           techDimPointB: null,
+          // Phase 2 18k — angular dim + callout drafts + inline editor
+          // all clear on appMode switch (operator left mid-draft).
+          techDimAngularDraft: null,
+          techCalloutDraft: null,
+          inlineEditor: { kind: null, targetId: null, x: 0, y: 0, initialValue: '' },
           // Phase 2 18h — close preview when switching modes. Operator
           // leaving Technical Drawing should not return to find a stale
           // preview overlay covering Field Markup. previewState's
@@ -1945,6 +2004,22 @@ export const useAppStore = create((set, get) => {
       }))
     },
     setTool: (tool) => set((s) => {
+      // Phase 2 18k — switching away from tech-callout or tech-dim-angular
+      // clears their drafts. Inline editor is also dismissed (operator
+      // changed tools mid-text-entry).
+      const draftClears = {}
+      if (s.tool === 'tech-callout' && tool !== 'tech-callout') {
+        draftClears.techCalloutDraft = null
+      }
+      if (s.tool === 'tech-dim-angular' && tool !== 'tech-dim-angular') {
+        draftClears.techDimAngularDraft = null
+      }
+      if (
+        (s.tool === 'tech-callout' || s.tool === 'tech-dim-angular')
+        && tool !== s.tool
+      ) {
+        draftClears.inlineEditor = { kind: null, targetId: null, x: 0, y: 0, initialValue: '' }
+      }
       // Phase 2 18d — switching away from 'tech-select' clears the
       // selection + typed rotation value. Selection is tool-scoped: a
       // returning operator picking 'tech-select' starts with a fresh
@@ -1966,9 +2041,10 @@ export const useAppStore = create((set, get) => {
           techDimStage: null,
           techDimPointA: null,
           techDimPointB: null,
+          ...draftClears,
         }
       }
-      return { tool }
+      return { tool, ...draftClears }
     }),
     // Phase 2 18b — setTechDraft writes the Technical Drawing line-tool
     // draft state. Called from CanvasStage onMouseDown (anchor capture)
@@ -2067,6 +2143,328 @@ export const useAppStore = create((set, get) => {
     setTechDimStage: (stage) => set({ techDimStage: stage }),
     setTechDimPointA: (p) => set({ techDimPointA: p }),
     setTechDimPointB: (p) => set({ techDimPointB: p }),
+
+    // Phase 2 18k (May 12 2026) — angular dim + callout draft setters.
+    setTechDimAngularDraft: (draft) => set({ techDimAngularDraft: draft }),
+    setTechCalloutDraft: (draft) => set({ techCalloutDraft: draft }),
+
+    // Phase 2 18k — Inline text editor open/close/commit. Mounted at
+    // App.jsx; one editor at a time (single-slot model). Opening with
+    // an editor already mounted replaces it.
+    openInlineEditor: ({ kind, targetId, x, y, initialValue }) => {
+      if (!kind || (kind !== 'callout' && kind !== 'callout-edit' && kind !== 'dim-override')) return
+      set({
+        inlineEditor: {
+          kind,
+          targetId: targetId || null,
+          x: typeof x === 'number' ? x : 0,
+          y: typeof y === 'number' ? y : 0,
+          initialValue: typeof initialValue === 'string' ? initialValue : '',
+        },
+      })
+    },
+    closeInlineEditor: () => set({
+      inlineEditor: { kind: null, targetId: null, x: 0, y: 0, initialValue: '' },
+    }),
+    // Routes a committed inline edit to the correct downstream action
+    // based on the editor's `kind`. Caller passes the final text.
+    commitInlineEdit: (text) => {
+      const state = get()
+      const ed = state.inlineEditor
+      if (!ed || !ed.kind) return
+      const cleanText = typeof text === 'string' ? text : ''
+      if (ed.kind === 'callout') {
+        // Consume the techCalloutDraft to create a new callout shape.
+        const draft = state.techCalloutDraft
+        if (draft && draft.stage === 'awaitText' && draft.tip && draft.tail) {
+          state.addTechnicalCallout({
+            tip: { mode: 'free', x: draft.tip.x, y: draft.tip.y },
+            tail: { x: draft.tail.x, y: draft.tail.y },
+            textEN: cleanText,
+            tipStyle: 'numbered',
+          })
+        }
+        set({
+          techCalloutDraft: null,
+          inlineEditor: { kind: null, targetId: null, x: 0, y: 0, initialValue: '' },
+        })
+        return
+      }
+      if (ed.kind === 'callout-edit') {
+        state.updateCalloutText(ed.targetId, cleanText)
+        set({
+          inlineEditor: { kind: null, targetId: null, x: 0, y: 0, initialValue: '' },
+        })
+        return
+      }
+      if (ed.kind === 'dim-override') {
+        state.setDimTextOverride(ed.targetId, cleanText)
+        set({
+          inlineEditor: { kind: null, targetId: null, x: 0, y: 0, initialValue: '' },
+        })
+        return
+      }
+    },
+
+    // Phase 2 18k — addTechnicalCallout creates a callout shape with
+    // an auto-assigned `num` from the target layer's nextCalloutNum
+    // counter (D5). Counter increments on every commit and is never
+    // decremented on delete (D6) — operator's mental model is "this is
+    // #3 even if #2 was deleted." Returns the new callout's id.
+    //
+    // Storage shape:
+    //   { id, type: 'callout',
+    //     tip: { mode: 'free', x, y },     // attached mode reserved for future
+    //     tail: { x, y },                   // tail is always free
+    //     num: <auto-assigned int>,
+    //     textEN: string,
+    //     tipStyle: 'numbered' | 'dot' | 'none' }   // D11: only 'numbered' shipped
+    addTechnicalCallout: ({ tip, tail, textEN, tipStyle }) => {
+      pushUndo()
+      const calloutId = newTechShapeId()
+      const cleanTextEN = typeof textEN === 'string' ? textEN : ''
+      const cleanTipStyle = tipStyle === 'dot' || tipStyle === 'none' ? tipStyle : 'numbered'
+      const tipNormalized = tip && typeof tip === 'object'
+        ? {
+            mode: tip.mode === 'attached' ? 'attached' : 'free',
+            shapeId: tip.mode === 'attached' ? (tip.shapeId || null) : null,
+            pointKey: tip.mode === 'attached' ? (tip.pointKey || null) : null,
+            x: typeof tip.x === 'number' ? tip.x : 0,
+            y: typeof tip.y === 'number' ? tip.y : 0,
+          }
+        : { mode: 'free', shapeId: null, pointKey: null, x: 0, y: 0 }
+      const tailNormalized = tail && typeof tail === 'object'
+        ? {
+            x: typeof tail.x === 'number' ? tail.x : 0,
+            y: typeof tail.y === 'number' ? tail.y : 0,
+          }
+        : { x: 0, y: 0 }
+      set((s) => {
+        // Choose target layer: first existing technical layer, or auto-
+        // create 'Layer 1' if no technical layers exist yet.
+        if (s.technicalLayers.length === 0) {
+          const layer = {
+            id: newTechLayerId(),
+            name: TECHNICAL_LAYER_NAME_DEFAULT,
+            visible: true,
+            shapes: [{
+              id: calloutId, type: 'callout',
+              tip: tipNormalized, tail: tailNormalized,
+              num: 1,
+              textEN: cleanTextEN,
+              tipStyle: cleanTipStyle,
+            }],
+            nextCalloutNum: 2,
+          }
+          return { technicalLayers: [layer] }
+        }
+        return {
+          technicalLayers: s.technicalLayers.map((tl, i) => {
+            if (i !== 0) return tl
+            const assignedNum = typeof tl.nextCalloutNum === 'number' && tl.nextCalloutNum > 0
+              ? tl.nextCalloutNum
+              : 1
+            return {
+              ...tl,
+              shapes: [...tl.shapes, {
+                id: calloutId, type: 'callout',
+                tip: tipNormalized, tail: tailNormalized,
+                num: assignedNum,
+                textEN: cleanTextEN,
+                tipStyle: cleanTipStyle,
+              }],
+              nextCalloutNum: assignedNum + 1,
+            }
+          }),
+        }
+      })
+      return calloutId
+    },
+
+    // Phase 2 18k — partial-update a callout's textEN (called from
+    // SpecTablePanel row edit OR commitInlineEdit for 'callout-edit').
+    updateCalloutText: (calloutId, text) => {
+      if (!calloutId) return
+      pushUndo()
+      const cleanText = typeof text === 'string' ? text : ''
+      set((s) => ({
+        technicalLayers: s.technicalLayers.map((tl) => ({
+          ...tl,
+          shapes: (tl.shapes || []).map((sh) =>
+            sh && sh.id === calloutId && sh.type === 'callout'
+              ? { ...sh, textEN: cleanText }
+              : sh
+          ),
+        })),
+      }))
+    },
+
+    deleteCallout: (calloutId) => {
+      if (!calloutId) return
+      pushUndo()
+      // Per D6, do NOT decrement nextCalloutNum — surviving callouts
+      // keep their numbers, and the next-added callout takes the
+      // counter value (which has already been advanced past this id).
+      set((s) => ({
+        technicalLayers: s.technicalLayers.map((tl) => ({
+          ...tl,
+          shapes: (tl.shapes || []).filter((sh) =>
+            !(sh && sh.id === calloutId && sh.type === 'callout')
+          ),
+        })),
+      }))
+    },
+
+    // Phase 2 18k — set a dim's textOverride field. Mirrors the
+    // setSpecTable partial-merge pattern: only the override field is
+    // touched. Empty / null override is treated as "no override" so the
+    // computed value (formatArchitecturalLength / formatAngle) wins.
+    setDimTextOverride: (dimId, override) => {
+      if (!dimId) return
+      pushUndo()
+      const cleanOverride = typeof override === 'string' ? override : null
+      set((s) => ({
+        technicalLayers: s.technicalLayers.map((tl) => ({
+          ...tl,
+          shapes: (tl.shapes || []).map((sh) =>
+            sh && sh.id === dimId && sh.type === 'dimension'
+              ? { ...sh, textOverride: cleanOverride }
+              : sh
+          ),
+        })),
+      }))
+    },
+
+    // Phase 2 18k — Angular dimension commit (Workflow 1).
+    //
+    // Operator has selected exactly 2 line shapes (verified by caller).
+    // We resolve vertex (shared endpoint preferred; intersection if not)
+    // and pick each line's far endpoint as p1/p2 via
+    // angularDimMath.computeAngularOrientation. The cursor at click time
+    // sets the radius (distance from vertex to cursor).
+    //
+    // This is a one-shot commit — there's no awaitRadius state machine
+    // for Workflow 1 because the caller already provides cursorWorld.
+    // For drag-to-radius UX, CanvasStage runs an intermediate radius-drag
+    // phase before calling this with the final cursor position.
+    //
+    // Returns the new dim's id, or null on geometry failure (parallel
+    // lines with no shared endpoint).
+    commitWorkflow1AngularDimension: ({ line1, line2, cursorWorld, layerId, preSnap }) => {
+      const orientation = computeAngularOrientation(line1, line2, cursorWorld)
+      if (!orientation) return null
+      const dimId = newTechShapeId()
+      const dim = {
+        id: dimId,
+        type: 'dimension',
+        dimType: 'angular',
+        vertex: { mode: 'free', shapeId: null, pointKey: null,
+                  x: orientation.vertex.x, y: orientation.vertex.y },
+        p1: { x: orientation.p1.x, y: orientation.p1.y },
+        p2: { x: orientation.p2.x, y: orientation.p2.y },
+        radius: orientation.radius,
+        textOverride: null,
+      }
+      set((s) => {
+        let nextLayers = s.technicalLayers
+        if (layerId) {
+          nextLayers = nextLayers.map((l) =>
+            l.id === layerId ? { ...l, shapes: [...l.shapes, dim] } : l
+          )
+        } else if (nextLayers.length === 0) {
+          nextLayers = [{
+            id: newTechLayerId(),
+            name: TECHNICAL_LAYER_NAME_DEFAULT,
+            visible: true,
+            shapes: [dim],
+            nextCalloutNum: 1,
+          }]
+        } else {
+          // Default to the first layer, mirroring addTechnicalShape's policy.
+          nextLayers = nextLayers.map((l, i) =>
+            i === 0 ? { ...l, shapes: [...l.shapes, dim] } : l
+          )
+        }
+        return {
+          technicalLayers: nextLayers,
+          techSelected: [],
+          techDimAngularDraft: null,
+        }
+      })
+      if (typeof preSnap === 'string') {
+        set((state) => {
+          const next = [...state.undoStack, preSnap]
+          if (next.length > UNDO_LIMIT) next.shift()
+          return { undoStack: next, redoStack: [] }
+        })
+      }
+      return dimId
+    },
+
+    // Phase 2 18k — Angular dimension commit (Workflow 2).
+    //
+    // 4-click flow already navigated by the canvas state machine. By
+    // the time this fires, vertex/p1/p2/radius are all known. Caller
+    // passes the final cursor position which determines the radius.
+    commitWorkflow2AngularDimension: ({ vertex, p1, p2, cursorWorld, layerId, preSnap }) => {
+      if (!vertex || !p1 || !p2 || !cursorWorld) return null
+      if (typeof vertex.x !== 'number' || typeof p1.x !== 'number' || typeof p2.x !== 'number') return null
+      const radius = Math.hypot(cursorWorld.x - vertex.x, cursorWorld.y - vertex.y)
+      if (radius < 1e-6) return null
+      // Reject parallel rays.
+      const v1x = p1.x - vertex.x, v1y = p1.y - vertex.y
+      const v2x = p2.x - vertex.x, v2y = p2.y - vertex.y
+      const cross = v1x * v2y - v1y * v2x
+      const len1 = Math.hypot(v1x, v1y)
+      const len2 = Math.hypot(v2x, v2y)
+      if (len1 < 1e-9 || len2 < 1e-9) return null
+      if (Math.abs(cross) / (len1 * len2) < 1e-6) return null
+
+      const dimId = newTechShapeId()
+      const dim = {
+        id: dimId,
+        type: 'dimension',
+        dimType: 'angular',
+        vertex: { mode: 'free', shapeId: null, pointKey: null, x: vertex.x, y: vertex.y },
+        p1: { x: p1.x, y: p1.y },
+        p2: { x: p2.x, y: p2.y },
+        radius,
+        textOverride: null,
+      }
+      set((s) => {
+        let nextLayers = s.technicalLayers
+        if (layerId) {
+          nextLayers = nextLayers.map((l) =>
+            l.id === layerId ? { ...l, shapes: [...l.shapes, dim] } : l
+          )
+        } else if (nextLayers.length === 0) {
+          nextLayers = [{
+            id: newTechLayerId(),
+            name: TECHNICAL_LAYER_NAME_DEFAULT,
+            visible: true,
+            shapes: [dim],
+            nextCalloutNum: 1,
+          }]
+        } else {
+          nextLayers = nextLayers.map((l, i) =>
+            i === 0 ? { ...l, shapes: [...l.shapes, dim] } : l
+          )
+        }
+        return {
+          technicalLayers: nextLayers,
+          techSelected: [],
+          techDimAngularDraft: null,
+        }
+      })
+      if (typeof preSnap === 'string') {
+        set((state) => {
+          const next = [...state.undoStack, preSnap]
+          if (next.length > UNDO_LIMIT) next.shift()
+          return { undoStack: next, redoStack: [] }
+        })
+      }
+      return dimId
+    },
 
     // ============ Phase 2 18h (May 12 2026) — Preview + PDF gen ===========
     //
@@ -2454,6 +2852,7 @@ export const useAppStore = create((set, get) => {
             name: TECHNICAL_LAYER_NAME_DEFAULT,
             visible: true,
             shapes: [dim],
+            nextCalloutNum: 1,
           }]
         }
         return {
@@ -3329,6 +3728,11 @@ export const useAppStore = create((set, get) => {
         techDimStage: null,
         techDimPointA: null,
         techDimPointB: null,
+        // Phase 2 18k — angular dim + callout drafts + inline editor
+        // cleared on New Project alongside other tech-command state.
+        techDimAngularDraft: null,
+        techCalloutDraft: null,
+        inlineEditor: { kind: null, targetId: null, x: 0, y: 0, initialValue: '' },
         techCommandHover: null,
         techGripEdit: null,
         // P45 (Phase 2 18a, May 10 2026) — New Project clears the

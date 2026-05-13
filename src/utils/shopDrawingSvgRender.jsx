@@ -127,9 +127,134 @@ function renderShape(shape, key, layer, txPt) {
   return null
 }
 
-/** Render one dimension (extension lines + dim line + arrows + label). */
+/**
+ * Phase 2 18k — Render an angular dimension as SVG. Mirrors v1.2 Python
+ * _render_angular_dim's output shape:
+ *   - Arc (smaller sweep) at radius from vertex
+ *   - Extension lines along each ray from far endpoint past arc
+ *   - Tangent arrow tips at arc endpoints
+ *   - Label at mid-angle outside arc with white-bg pad
+ *
+ * SVG arc uses <path d="M{x1},{y1} A{rx},{ry} 0 {largeArc},{sweepFlag}
+ * {x2},{y2}" />. largeArc=0 + sweepFlag=0 picks the smaller-sweep CCW
+ * arc; we choose flags from the sign of the normalized sweep.
+ */
+function renderAngularDim(dim, key, txPt) {
+  if (!dim || !dim.vertex || !dim.p1 || !dim.p2) return null
+  const [vx, vy] = txPt(dim.vertex.x || 0, dim.vertex.y || 0)
+  const [p1x, p1y] = txPt(dim.p1.x || 0, dim.p1.y || 0)
+  const [p2x, p2y] = txPt(dim.p2.x || 0, dim.p2.y || 0)
+  // Derive radius in screen pt by transforming vertex + (radius, 0) and
+  // measuring the resulting distance. Picks up the fit scale.
+  const radius_px = typeof dim.radius === 'number' && dim.radius > 0 ? dim.radius : 24
+  const [rax, ray] = txPt((dim.vertex.x || 0) + radius_px, dim.vertex.y || 0)
+  const radius = Math.hypot(rax - vx, ray - vy)
+  if (radius < 1e-6) return null
+
+  // Ray angles in screen space. tx_pt y-flips so atan2 here operates on
+  // the post-flip vectors directly — the angle we render is what the
+  // operator sees on the preview / PDF page.
+  const a1 = Math.atan2(p1y - vy, p1x - vx)
+  const a2 = Math.atan2(p2y - vy, p2x - vx)
+  let sweep = a2 - a1
+  while (sweep > Math.PI) sweep -= 2 * Math.PI
+  while (sweep < -Math.PI) sweep += 2 * Math.PI
+
+  const arcStartX = vx + radius * Math.cos(a1)
+  const arcStartY = vy + radius * Math.sin(a1)
+  const arcEndX   = vx + radius * Math.cos(a1 + sweep)
+  const arcEndY   = vy + radius * Math.sin(a1 + sweep)
+
+  // SVG arc flags: largeArc=0 (we always pick smaller arc); sweep=1 for
+  // CCW (positive sweep), 0 for CW.
+  const sweepFlag = sweep >= 0 ? 1 : 0
+  const arcD = `M${arcStartX} ${arcStartY} A${radius} ${radius} 0 0 ${sweepFlag} ${arcEndX} ${arcEndY}`
+
+  // Extension lines along each ray. Unit vector from vertex toward each
+  // far point.
+  const u1L = Math.hypot(p1x - vx, p1y - vy) || 1
+  const u1x = (p1x - vx) / u1L, u1y = (p1y - vy) / u1L
+  const u2L = Math.hypot(p2x - vx, p2y - vy) || 1
+  const u2x = (p2x - vx) / u2L, u2y = (p2y - vy) / u2L
+  const extPast = DIM_EXTENSION_OFFSET
+  const ext1x = vx + (radius + extPast) * u1x
+  const ext1y = vy + (radius + extPast) * u1y
+  const ext2x = vx + (radius + extPast) * u2x
+  const ext2y = vy + (radius + extPast) * u2y
+
+  // Tangent arrow tips. Tangent at start (along arc CCW) = (-sin a1, cos a1).
+  // For CW sweep, flip sign.
+  const sweepSign = sweep >= 0 ? 1 : -1
+  const tStartX = -Math.sin(a1) * sweepSign
+  const tStartY =  Math.cos(a1) * sweepSign
+  const tEndX  =  Math.sin(a1 + sweep) * sweepSign
+  const tEndY  = -Math.cos(a1 + sweep) * sweepSign
+
+  const arrow = (tipX, tipY, dirX, dirY, akey) => {
+    const bx = tipX - dirX * DIM_ARROW_LEN
+    const by = tipY - dirY * DIM_ARROW_LEN
+    const apx = dirY, apy = -dirX
+    const p1ax = bx + apx * DIM_ARROW_HALF_W
+    const p1ay = by + apy * DIM_ARROW_HALF_W
+    const p2ax = bx - apx * DIM_ARROW_HALF_W
+    const p2ay = by - apy * DIM_ARROW_HALF_W
+    return (
+      <path
+        key={akey}
+        d={`M${tipX} ${tipY} L${p1ax} ${p1ay} L${p2ax} ${p2ay} Z`}
+        fill={DIM_AMBER} stroke="none"
+      />
+    )
+  }
+
+  // Label at mid-angle outside arc.
+  const midAngle = a1 + sweep / 2
+  const labelRadius = radius + 12
+  const lx = vx + labelRadius * Math.cos(midAngle)
+  const ly = vy + labelRadius * Math.sin(midAngle)
+  const label = (typeof dim.value === 'string' && dim.value.trim()) ? dim.value.trim() : ''
+
+  return (
+    <g key={key} data-dim-type="angular">
+      {/* Extension lines */}
+      <line x1={p1x} y1={p1y} x2={ext1x} y2={ext1y}
+        stroke={DIM_AMBER} strokeWidth={DIM_LINE_SW} />
+      <line x1={p2x} y1={p2y} x2={ext2x} y2={ext2y}
+        stroke={DIM_AMBER} strokeWidth={DIM_LINE_SW} />
+      {/* Arc */}
+      <path d={arcD} fill="none" stroke={DIM_AMBER} strokeWidth={DIM_LINE_SW} />
+      {/* Tangent arrow tips */}
+      {arrow(arcStartX, arcStartY, tStartX, tStartY, 'a1')}
+      {arrow(arcEndX,   arcEndY,   tEndX,   tEndY,   'a2')}
+      {label && (
+        <g>
+          <rect
+            x={lx - label.length * DIM_LABEL_SIZE * 0.3 - 2}
+            y={ly - DIM_LABEL_SIZE * 0.9}
+            width={label.length * DIM_LABEL_SIZE * 0.6 + 4}
+            height={DIM_LABEL_SIZE + 4}
+            fill="white" stroke="none"
+          />
+          <text
+            x={lx} y={ly}
+            fontFamily="Helvetica, Arial, sans-serif"
+            fontSize={DIM_LABEL_SIZE}
+            fontWeight="bold"
+            fill={DIM_AMBER}
+            textAnchor="middle"
+          >
+            {label}
+          </text>
+        </g>
+      )}
+    </g>
+  )
+}
+
+/** Render one dimension. Dispatches on dim.type (default 'linear'). */
 function renderDimension(dim, key, txPt) {
   if (!dim) return null
+  if (dim.type === 'angular') return renderAngularDim(dim, key, txPt)
   const [x1, y1] = txPt(dim.x1 || 0, dim.y1 || 0)
   const [x2, y2] = txPt(dim.x2 || 0, dim.y2 || 0)
   const dx = x2 - x1, dy = y2 - y1

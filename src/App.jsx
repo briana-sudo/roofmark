@@ -28,6 +28,10 @@ import SpecTablePanel from './components/SpecTablePanel'
 // at the App.jsx level so they fire regardless of focus inside the
 // overlay or canvas.
 import TechnicalPreview from './components/TechnicalPreview'
+// Phase 2 18k (May 12 2026) — InlineTextEditor mounted at App level so
+// it overlays canvas + drawers regardless of tool/mode. Visibility gated
+// on store.inlineEditor.kind !== null.
+import InlineTextEditor from './components/InlineTextEditor'
 import './App.css'
 
 export default function App() {
@@ -189,6 +193,57 @@ export default function App() {
         // available (preview closed mid-resolve).
         const btn = document.querySelector('[data-testid="preview-generate-button"]')
         if (btn && !btn.disabled) btn.click()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
+  // Phase 2 18k (May 12 2026) — Technical Drawing tool shortcuts.
+  //
+  //   A → set tool 'tech-dim-angular' (angular dim Workflow 2)
+  //   C → set tool 'tech-callout' (leader-line callout)
+  //   L → set tool 'tech-line' (retro-fit per D9)
+  //   S → set tool 'tech-select' (retro-fit per D9)
+  //
+  // All four are gated by:
+  //   - appMode === 'TECHNICAL'
+  //   - no editable focus (input / textarea / contentEditable)
+  //   - preview overlay NOT open (preview owns its own A/P/O/R/F/G map)
+  //   - inline editor NOT open (operator typing in editor must not
+  //     trigger tool switches mid-keystroke; InlineTextEditor stops
+  //     propagation on most keys, but defense-in-depth still gates here)
+  //   - no modifier keys (Cmd/Ctrl/Alt all reserved for system shortcuts)
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const tag = (e.target?.tagName || '').toUpperCase()
+      const editable = tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable
+      if (editable) return
+      const state = useAppStore.getState()
+      if (state.appMode !== 'TECHNICAL') return
+      if (state.previewState.isOpen) return
+      if (state.inlineEditor && state.inlineEditor.kind) return
+      const k = (e.key || '').toLowerCase()
+      if (k === 'a') {
+        e.preventDefault()
+        state.setTool('tech-dim-angular')
+        return
+      }
+      if (k === 'c') {
+        e.preventDefault()
+        state.setTool('tech-callout')
+        return
+      }
+      if (k === 'l') {
+        e.preventDefault()
+        state.setTool('tech-line')
+        return
+      }
+      if (k === 's') {
+        e.preventDefault()
+        state.setTool('tech-select')
+        return
       }
     }
     document.addEventListener('keydown', onKey)
@@ -506,6 +561,44 @@ export default function App() {
         without restructuring them.
       */}
       <TechnicalPreview />
+      {/* Phase 2 18k (May 12 2026) — InlineTextEditor mount. Visible
+          when store.inlineEditor.kind !== null. Single instance — the
+          store enforces one open editor at a time. onCommit / onCancel
+          route through store actions so the same flow serves callout
+          creation, callout edit, and (future) dim textOverride edit. */}
+      <InlineTextEditorMount />
     </div>
+  )
+}
+
+/**
+ * Phase 2 18k — InlineTextEditor wrapper. Reads visibility/position from
+ * store.inlineEditor; wires onCommit → commitInlineEdit and onCancel →
+ * closeInlineEditor + cancel any pending callout/dim draft.
+ */
+function InlineTextEditorMount() {
+  const editor = useAppStore((s) => s.inlineEditor)
+  if (!editor || !editor.kind) return null
+  return (
+    <InlineTextEditor
+      x={editor.x}
+      y={editor.y}
+      initialValue={editor.initialValue || ''}
+      placeholder={
+        editor.kind === 'callout' ? 'Callout label…'
+        : editor.kind === 'callout-edit' ? 'Callout label…'
+        : editor.kind === 'dim-override' ? 'Override dim text…'
+        : ''
+      }
+      onCommit={(text) => useAppStore.getState().commitInlineEdit(text)}
+      onCancel={() => {
+        const s = useAppStore.getState()
+        // For callout-create, cancel the in-progress draft too.
+        if (editor.kind === 'callout') {
+          s.setTechCalloutDraft(null)
+        }
+        s.closeInlineEditor()
+      }}
+    />
   )
 }

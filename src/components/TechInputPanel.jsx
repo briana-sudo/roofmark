@@ -584,6 +584,50 @@ export default function TechInputPanel() {
   // Rotate/Move/Copy per spec §"Decision flags" #11 (those operations
   // are out of scope for 18e initial on dim shapes — Delete + recreate
   // is the workflow). Dim button is always present.
+  //
+  // Phase 2 18k (May 12 2026) — Angular dim Workflow 1 trigger. When
+  // exactly 2 lines are selected, show "📐∠ Dim ∠" alongside the
+  // existing dim buttons. Click resolves vertex + p1 + p2 from the
+  // selected lines and immediately commits with the cursor position
+  // (which the operator then drags before mousedown). For 18k initial,
+  // we use the canvas center as the cursor position — operator can
+  // re-select + drag in the future.
+  const handleDimAngularWorkflow1 = () => {
+    if (techSelected.length !== 2) return
+    const state = useAppStore.getState()
+    const layers = state.technicalLayers
+    const findShape = (entry) => {
+      const layer = layers.find((l) => l.id === entry.layerId)
+      return layer?.shapes?.find((s) => s.id === entry.shapeId) || null
+    }
+    const sh1 = findShape(techSelected[0])
+    const sh2 = findShape(techSelected[1])
+    if (!sh1 || !sh2 || sh1.type !== 'line' || sh2.type !== 'line') return
+    // Pick a sensible default cursor position — midpoint between the
+    // two lines' midpoints, offset slightly outward — so the radius is
+    // non-zero. Operator can edit textOverride later for adjustment.
+    const m1 = { x: (sh1.a.x + sh1.b.x) / 2, y: (sh1.a.y + sh1.b.y) / 2 }
+    const m2 = { x: (sh2.a.x + sh2.b.x) / 2, y: (sh2.a.y + sh2.b.y) / 2 }
+    const cursorWorld = { x: (m1.x + m2.x) / 2, y: (m1.y + m2.y) / 2 }
+    const preSnap = state.captureUndoSnapshot()
+    state.commitWorkflow1AngularDimension({
+      line1: sh1,
+      line2: sh2,
+      cursorWorld,
+      layerId: techSelected[0].layerId,
+      preSnap,
+    })
+  }
+  const exactlyTwoLinesSelected = techSelected.length === 2 && (() => {
+    const state = useAppStore.getState()
+    const findShape = (entry) => {
+      const layer = state.technicalLayers.find((l) => l.id === entry.layerId)
+      return layer?.shapes?.find((s) => s.id === entry.shapeId) || null
+    }
+    const sh1 = findShape(techSelected[0])
+    const sh2 = findShape(techSelected[1])
+    return sh1 && sh2 && sh1.type === 'line' && sh2.type === 'line'
+  })()
   return (
     <div className="tech-input-panel" role="toolbar" data-testid="tech-input-panel">
       {!selectionHasDimension && (
@@ -630,6 +674,17 @@ export default function TechInputPanel() {
       >
         📐 Dim X/Y
       </button>
+      {exactlyTwoLinesSelected && (
+        <button
+          type="button"
+          className="cmd-btn"
+          onClick={handleDimAngularWorkflow1}
+          data-testid="tech-dim-angular-button"
+          title="Angular dim from 2 selected lines"
+        >
+          ∠ Dim ∠
+        </button>
+      )}
       <button
         type="button"
         className="cmd-btn cmd-danger"

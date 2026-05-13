@@ -2645,3 +2645,42 @@ body {
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
   flex-shrink: 0;
 }
+
+/* ===== Phase 2 18k (May 12 2026) — InlineTextEditor ===================== */
+/*
+   Absolutely-positioned overlay used by:
+   - Technical Drawing callout tool (text entry after tip+tail placement)
+   - SpecTablePanel callout row edit (future)
+   - Dim textOverride edit (future)
+
+   Position is set via inline style (x/y CSS pixels from viewport top-left).
+   z-index 900 puts the editor above the canvas + drawers but below the
+   preview overlay (z-index 1000) so an open preview's controls still win.
+*/
+.inline-text-editor {
+  /* position: fixed + left/top set inline via React style prop */
+  background: var(--rm-bg, #ffffff);
+  border: 2px solid var(--rm-orange, #E8630A);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  padding: 4px 6px;
+  min-width: 200px;
+  max-width: 320px;
+}
+
+.inline-text-editor-input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--rm-navy, #1A2F4A);
+  padding: 2px 0;
+}
+
+.inline-text-editor-input::placeholder {
+  color: #999;
+  font-style: italic;
+}

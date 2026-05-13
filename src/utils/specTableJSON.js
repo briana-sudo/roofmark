@@ -23,6 +23,7 @@
 
 import { SPEC_TABLE_FIELDS } from './specTableValidation'
 import { formatArchitecturalLength } from './formatArchitecturalLength'
+import { computeAngleDegrees, formatAngle } from './angularDimMath'
 
 /**
  * Convert a RoofMark technicalLayers shape to the v1.1 shape contract.
@@ -74,6 +75,47 @@ function stripShape(shape) {
  */
 function dimensionFromRoofMarkDim(dim) {
   if (!dim || dim.type !== 'dimension') return null
+
+  // Phase 2 18k — angular dim branch. v1.2 contract:
+  //   { type: 'angular', vertex: {x,y}, p1: {x,y}, p2: {x,y},
+  //     radius: number, value: string }
+  // Operator stores vertex with attached-mode metadata (forward-compat
+  // for future "vertex follows a parent line endpoint"); the JSON
+  // contract takes the plain {x,y} only. textOverride wins when non-
+  // empty, mirroring linear-dim behavior; empty/missing override falls
+  // back to formatAngle(computedDegrees, 'degrees', 1) → "45.0°".
+  if (dim.dimType === 'angular') {
+    if (!dim.vertex || !dim.p1 || !dim.p2) return null
+    if (typeof dim.vertex.x !== 'number' || typeof dim.vertex.y !== 'number') return null
+    if (typeof dim.p1.x !== 'number' || typeof dim.p1.y !== 'number') return null
+    if (typeof dim.p2.x !== 'number' || typeof dim.p2.y !== 'number') return null
+    const radius = typeof dim.radius === 'number' && dim.radius > 0 ? dim.radius : 24
+    const override = typeof dim.textOverride === 'string'
+      ? dim.textOverride.trim()
+      : ''
+    let value
+    if (override !== '') {
+      value = override
+    } else {
+      const degrees = computeAngleDegrees({
+        vertex: { x: dim.vertex.x, y: dim.vertex.y },
+        p1: { x: dim.p1.x, y: dim.p1.y },
+        p2: { x: dim.p2.x, y: dim.p2.y },
+        radius,
+      })
+      value = formatAngle(degrees, 'degrees', 1)
+    }
+    return {
+      type: 'angular',
+      vertex: { x: dim.vertex.x, y: dim.vertex.y },
+      p1: { x: dim.p1.x, y: dim.p1.y },
+      p2: { x: dim.p2.x, y: dim.p2.y },
+      radius,
+      value,
+    }
+  }
+
+  // Linear dim path (18e/18h contract — unchanged).
   const A = dim.pointA && { x: dim.pointA.x, y: dim.pointA.y }
   const B = dim.pointB && { x: dim.pointB.x, y: dim.pointB.y }
   if (!A || !B) return null
@@ -108,6 +150,36 @@ function dimensionFromRoofMarkDim(dim) {
  * dimension array). RoofMark dimensions and lines coexist in the same
  * `shapes` array on the canvas side; we split them here.
  */
+/**
+ * Phase 2 18k — Bridge a RoofMark callout shape to the v1.1 callout
+ * contract. RoofMark stores callouts as:
+ *   { id, type: 'callout',
+ *     tip: { mode, shapeId?, pointKey?, x, y },
+ *     tail: { x, y },
+ *     num, textEN, tipStyle }
+ * v1.1 contract:
+ *   { id, tipX, tipY, tailX, tailY, num, textEN }
+ * v1.2 Python ignores unknown fields, so `tipStyle` may be sent through
+ * for forward-compat with the (future) v1.3 amendment.
+ */
+function calloutFromRoofMarkCallout(ca) {
+  if (!ca || ca.type !== 'callout') return null
+  const tip = ca.tip || {}
+  const tail = ca.tail || {}
+  if (typeof tip.x !== 'number' || typeof tip.y !== 'number') return null
+  if (typeof tail.x !== 'number' || typeof tail.y !== 'number') return null
+  return {
+    id: ca.id || undefined,
+    tipX: tip.x,
+    tipY: tip.y,
+    tailX: tail.x,
+    tailY: tail.y,
+    num: typeof ca.num === 'number' ? ca.num : 0,
+    textEN: typeof ca.textEN === 'string' ? ca.textEN : '',
+    tipStyle: ca.tipStyle === 'dot' || ca.tipStyle === 'none' ? ca.tipStyle : 'numbered',
+  }
+}
+
 function stripLayer(layer) {
   if (!layer) return null
   const shapes = []
@@ -120,6 +192,12 @@ function stripLayer(layer) {
       if (d) dimensions.push(d)
       continue
     }
+    if (sh.type === 'callout') {
+      // Phase 2 18k — emit callouts to layer.callouts[] (v1.1 contract).
+      const c = calloutFromRoofMarkCallout(sh)
+      if (c) callouts.push(c)
+      continue
+    }
     if (sh.type === 'line' || sh.type === 'poly' || sh.type === 'tri'
       || sh.type === 'rect' || sh.type === 'circ') {
       const stripped = stripShape(sh)
@@ -127,8 +205,6 @@ function stripLayer(layer) {
     }
     // Unknown shape types (future arcs/ellipses) silently skipped.
   }
-  // RoofMark Technical Drawing has no callout primitive today; included
-  // for forward-compat with v1.1's contract which accepts them.
   return {
     name: layer.name || 'Layer',
     color: layer.color || '#1A2F4A',

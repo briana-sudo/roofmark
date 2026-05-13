@@ -75,6 +75,20 @@ export function rotateGeometry(layers, degrees) {
     }),
     dimensions: (layer.dimensions || []).map((d) => {
       if (!d) return d
+      // Phase 2 18k — angular dim rotation: rotate vertex/p1/p2 around
+      // bbox centroid; radius is rotation-invariant. Mirrors the v1.2
+      // Python pre-pass at _rotate_geometry's angular branch.
+      if (d.type === 'angular') {
+        const v = d.vertex ? rot(d.vertex.x || 0, d.vertex.y || 0) : null
+        const p1 = d.p1 ? rot(d.p1.x || 0, d.p1.y || 0) : null
+        const p2 = d.p2 ? rot(d.p2.x || 0, d.p2.y || 0) : null
+        return {
+          ...d,
+          vertex: v ? { x: v.x, y: v.y } : d.vertex,
+          p1: p1 ? { x: p1.x, y: p1.y } : d.p1,
+          p2: p2 ? { x: p2.x, y: p2.y } : d.p2,
+        }
+      }
       const p1 = rot(d.x1 || 0, d.y1 || 0)
       const p2 = rot(d.x2 || 0, d.y2 || 0)
       return { ...d, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }
@@ -115,6 +129,21 @@ export function computeBbox(layers) {
     }
     for (const d of layer.dimensions || []) {
       if (!d) continue
+      // Phase 2 18k — angular dim bbox: vertex + p1 + p2 + 4 cardinal
+      // radius points (so the arc itself, which can extend in any
+      // direction from the vertex up to `radius` distance, never
+      // clips the fit area). Mirrors v1.2 Python _compute_bbox's
+      // angular branch.
+      if (d.type === 'angular') {
+        const v = d.vertex || { x: 0, y: 0 }
+        const p1 = d.p1 || { x: 0, y: 0 }
+        const p2 = d.p2 || { x: 0, y: 0 }
+        const r = typeof d.radius === 'number' ? d.radius : 0
+        acc(v.x, v.y); acc(p1.x, p1.y); acc(p2.x, p2.y)
+        acc(v.x + r, v.y); acc(v.x - r, v.y)
+        acc(v.x, v.y + r); acc(v.x, v.y - r)
+        continue
+      }
       acc(d.x1, d.y1); acc(d.x2, d.y2)
     }
     for (const ca of layer.callouts || []) {

@@ -2807,6 +2807,129 @@ export default function CanvasStage() {
           dynamicDirty = true
           return
         }
+        // Phase 2 18k (May 12 2026) — Callout tool. 3-stage state machine:
+        //   awaitTip  → click 1 captures tip world coords
+        //   awaitTail → click 2 captures tail world coords + opens
+        //               InlineTextEditor at the tail's screen position
+        //   awaitText → operator types in the inline editor; commit
+        //               happens via commitInlineEdit (consumes draft,
+        //               creates the callout shape).
+        if (t === 'tech-callout') {
+          const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+          const techZoom = techV.zoom || 1
+          const worldX = (raw.x - techV.panX) / techZoom
+          const worldY = (raw.y - techV.panY) / techZoom
+          const draft = store.techCalloutDraft
+          if (!draft || draft.stage === 'awaitTip' || !draft.stage) {
+            store.setTechCalloutDraft({
+              stage: 'awaitTail',
+              tip: { x: worldX, y: worldY },
+              tail: null,
+            })
+            dynamicDirty = true
+            return
+          }
+          if (draft.stage === 'awaitTail' && draft.tip) {
+            // Reject zero-distance leader.
+            const dx = worldX - draft.tip.x
+            const dy = worldY - draft.tip.y
+            if (Math.hypot(dx, dy) < 0.5) {
+              return  // click ignored; operator may try again
+            }
+            store.setTechCalloutDraft({
+              stage: 'awaitText',
+              tip: draft.tip,
+              tail: { x: worldX, y: worldY },
+            })
+            // Open InlineTextEditor at the tail's screen position. Use
+            // e.clientX/clientY directly — InlineTextEditor uses
+            // position:fixed which is in CSS viewport pixels.
+            store.openInlineEditor({
+              kind: 'callout',
+              targetId: null,
+              x: e.clientX,
+              y: e.clientY + 12, // offset below cursor to keep tail visible
+              initialValue: '',
+            })
+            dynamicDirty = true
+            return
+          }
+          // awaitText — clicks elsewhere fall through to commit-on-blur
+          // logic in InlineTextEditor (click-outside listener). Don't
+          // intercept here.
+          return
+        }
+
+        // Phase 2 18k — Angular dim Workflow 2 (from scratch). 4-stage
+        // state machine. Workflow 1 (operator pre-selected 2 lines)
+        // bypasses this by calling commitWorkflow1AngularDimension
+        // directly from TechInputPanel.
+        if (t === 'tech-dim-angular') {
+          const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+          const techZoom = techV.zoom || 1
+          const worldX = (raw.x - techV.panX) / techZoom
+          const worldY = (raw.y - techV.panY) / techZoom
+          const draft = store.techDimAngularDraft
+          if (!draft || !draft.stage || draft.stage === 'awaitVertex') {
+            store.setTechDimAngularDraft({
+              stage: 'awaitRay1',
+              vertex: { x: worldX, y: worldY },
+              p1: null, p2: null,
+            })
+            dynamicDirty = true
+            return
+          }
+          if (draft.stage === 'awaitRay1' && draft.vertex) {
+            // Reject vertex == ray1
+            const dx = worldX - draft.vertex.x
+            const dy = worldY - draft.vertex.y
+            if (Math.hypot(dx, dy) < 0.5) return
+            store.setTechDimAngularDraft({
+              stage: 'awaitRay2',
+              vertex: draft.vertex,
+              p1: { x: worldX, y: worldY },
+              p2: null,
+            })
+            dynamicDirty = true
+            return
+          }
+          if (draft.stage === 'awaitRay2' && draft.vertex && draft.p1) {
+            const dx = worldX - draft.vertex.x
+            const dy = worldY - draft.vertex.y
+            if (Math.hypot(dx, dy) < 0.5) return
+            // Reject parallel rays.
+            const v1x = draft.p1.x - draft.vertex.x, v1y = draft.p1.y - draft.vertex.y
+            const v2x = worldX - draft.vertex.x, v2y = worldY - draft.vertex.y
+            const cross = v1x * v2y - v1y * v2x
+            const len1 = Math.hypot(v1x, v1y), len2 = Math.hypot(v2x, v2y)
+            if (len1 < 1e-9 || len2 < 1e-9
+                || Math.abs(cross) / (len1 * len2) < 1e-6) return
+            store.setTechDimAngularDraft({
+              stage: 'awaitRadius',
+              vertex: draft.vertex,
+              p1: draft.p1,
+              p2: { x: worldX, y: worldY },
+            })
+            dynamicDirty = true
+            return
+          }
+          if (draft.stage === 'awaitRadius' && draft.vertex && draft.p1 && draft.p2) {
+            const preSnap = useAppStore.getState().captureUndoSnapshot()
+            store.commitWorkflow2AngularDimension({
+              vertex: draft.vertex,
+              p1: draft.p1,
+              p2: draft.p2,
+              cursorWorld: { x: worldX, y: worldY },
+              layerId: null,
+              preSnap,
+            })
+            staticDirty = true
+            dynamicDirty = true
+            return
+          }
+          return
+        }
+
         return // no tool selected — nothing to do; Field Markup paths stay suppressed
       }
 
@@ -3326,6 +3449,21 @@ export default function CanvasStage() {
             sEscTech.setTechDimPointB(null)
             sEscTech.setTechCommandHover(null)
             sEscTech.setTechCommandPreSnap(null)
+            dynamicDirty = true
+            return
+          }
+          // Phase 2 18k — angular dim Workflow 2 draft Escape cancel.
+          // Clears the in-progress vertex/p1/p2 picks.
+          if (sEscTech.techDimAngularDraft && sEscTech.techDimAngularDraft.stage) {
+            sEscTech.setTechDimAngularDraft(null)
+            dynamicDirty = true
+            return
+          }
+          // Phase 2 18k — callout draft Escape cancel. Closes any open
+          // inline editor too.
+          if (sEscTech.techCalloutDraft && sEscTech.techCalloutDraft.stage) {
+            sEscTech.setTechCalloutDraft(null)
+            sEscTech.closeInlineEditor()
             dynamicDirty = true
             return
           }
