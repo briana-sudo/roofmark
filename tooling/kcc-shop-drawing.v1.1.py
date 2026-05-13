@@ -3,15 +3,12 @@
 kcc-shop-drawing.py — KCC RoofMark Locked Shop Drawing Template
 ================================================================================
 
-Status      : LOCKED — v1.2 — May 12 2026
+Status      : LOCKED — v1.1 — May 12 2026
 Authority   : Approved title block layout draft v3 (Webster Groves session)
               + 18h decision-flag pass May 12 2026 (Brian, locked).
-              + 18k precursor / v1.2 decision-flag pass May 12 2026
-                (Brian, locked) — angular dim render path.
 Spec        : RoofMark Kickoff Spec v1.0, Section 21 — Technical Drawing Mode
               https://www.notion.so/33eca70abea681668644c1dc03228839
 18h spec    : https://www.notion.so/35eca70abea68142854ad4c62cb5dab1
-v1.2 spec   : https://www.notion.so/35eca70abea68134a645f41dcb2e8613
 Branding    : KCC Operational Standards — navy / orange / Arial-equivalent
               https://www.notion.so/33dca70abea681c48ce8ff448587bfe4
 
@@ -35,39 +32,6 @@ visually identical to v1.0 (regression-safe per 18h locked decision D11):
 Reference-PDF alignment (CLIENT / STATUS / PROFILE-description / REV /
 SHEET / notes block / length-into-page callout / finish callout) is
 OUT OF SCOPE for v1.1. Visual style is unchanged.
-
-v1.1 → v1.2 changes
--------------------
-v1.2 adds a single new dim type — angular — discriminated by a new
-optional `type` field on each entry in layer.dimensions[]. Absent
-`type` defaults to "linear" so every v1.1-era input renders byte-
-identical (regression contract enforced by 18k precursor decision flags).
-
-Linear dim contract (unchanged from v1.1):
-    { "id": str, "type": "linear",   # optional, default "linear"
-      "x1": float, "y1": float, "x2": float, "y2": float,
-      "value": str }
-
-Angular dim contract (new in v1.2):
-    { "id": str, "type": "angular",
-      "vertex": { "x": float, "y": float },   # ray intersection point
-      "p1":     { "x": float, "y": float },   # ray 1 reference point
-      "p2":     { "x": float, "y": float },   # ray 2 reference point
-      "radius": float,                         # arc radius in JSON pixels
-      "value":  str }                          # label, e.g. "45.0°" or "4/12"
-
-Render: arc (smaller sweep) + extension lines along each ray from far
-endpoint past arc + tangent arrow tips at arc endpoints + label at
-mid-angle outside arc with white-bg pad. All amber #B8860B, matching
-linear dim style.
-
-Auto-fit bbox includes vertex + p1 + p2 + 4 cardinal radius points so
-the arc never clips. Geometry rotation rotates vertex/p1/p2 around
-bbox centroid; radius is rotation-invariant.
-
-Reference-PDF alignment fields remain OUT OF SCOPE for v1.2. Visual
-style of linear dims, shapes, callouts, header, spec table, and
-footer is byte-identical to v1.1.
 
 Input contract
 --------------
@@ -139,7 +103,6 @@ selected via pageOrientation == 'portrait' switches to 8.5in x 11.0in
 """
 
 from __future__ import annotations
-import math
 import os
 import re
 from pathlib import Path
@@ -215,8 +178,8 @@ FTR_LEFT_TEXT   = "KCC ROOFMARK  |  AEROSPACE-GRADE PROCESS DISCIPLINE FOR ROOFI
 FTR_RIGHT_FONT  = "Helvetica"
 FTR_RIGHT_SIZE  = 7
 FTR_RIGHT_COLOR = HEADER_SUB_TEXT
-# v1.0 → v1.1 → v1.2: footer right text updated to reflect script version.
-FTR_RIGHT_TEXT  = "kcc-shop-drawing.py v1.2  |  internal scale 24 px / inch"
+# v1.0 → v1.1: footer right text updated to reflect script version.
+FTR_RIGHT_TEXT  = "kcc-shop-drawing.py v1.1  |  internal scale 24 px / inch"
 
 # ---- Spec table — landscape layout (4 cols × 2 rows) -----------------------
 SPEC_TABLE_H_LANDSCAPE = 75.6    # 1.05 in
@@ -472,103 +435,6 @@ def _validate_v11_inputs(data: dict):
                 f"fitMode='custom', got {cs!r}"
             )
 
-    # v1.2 — angular dim validation. Walks every layer.dimensions[] entry
-    # whose `type` is 'angular' and verifies the contract before render.
-    # Fail loudly with a sensible message naming the offending dim id +
-    # field. Linear dims (or dims with no `type`) are not validated here
-    # — they fall through .get() defaults in the linear render path,
-    # which is the v1.1 contract and stays byte-identical.
-    for layer_idx, layer in enumerate(data.get("layers") or []):
-        for dim_idx, d in enumerate(layer.get("dimensions") or []):
-            if not isinstance(d, dict):
-                continue
-            if d.get("type") != "angular":
-                continue
-            _validate_angular_dim(d, layer_idx, dim_idx)
-
-
-# =============================================================================
-# v1.2 — ANGULAR DIM VALIDATION
-# =============================================================================
-
-def _is_finite_number(v) -> bool:
-    """True for finite int/float (excluding bool). Rejects NaN, inf."""
-    if isinstance(v, bool):
-        return False
-    if not isinstance(v, (int, float)):
-        return False
-    try:
-        return math.isfinite(float(v))
-    except (TypeError, ValueError):
-        return False
-
-
-def _is_point_obj(p) -> bool:
-    """True iff `p` is a dict with finite-number `x` and `y`."""
-    if not isinstance(p, dict):
-        return False
-    return _is_finite_number(p.get("x")) and _is_finite_number(p.get("y"))
-
-
-def _validate_angular_dim(d: dict, layer_idx: int, dim_idx: int) -> None:
-    """Raise ValueError on any malformed angular dim. Names the offending
-    layer index + dim index + field in the message so the operator can
-    locate the bad entry. Per v1.2 decision flag D5 (fail loudly, no
-    silent coercion or fall-back to linear)."""
-    where = f"layers[{layer_idx}].dimensions[{dim_idx}]"
-    dim_id = d.get("id") or "(no id)"
-
-    # vertex / p1 / p2 must each be objects with finite numeric x and y
-    for field in ("vertex", "p1", "p2"):
-        if field not in d:
-            raise ValueError(
-                f"Angular dim {where} (id={dim_id!r}) is missing required "
-                f"field {field!r}. Each angular dim must carry "
-                f"vertex, p1, p2 (each with numeric x and y) and a "
-                f"positive radius."
-            )
-        if not _is_point_obj(d[field]):
-            raise ValueError(
-                f"Angular dim {where} (id={dim_id!r}) field {field!r} "
-                f"must be an object with finite numeric x and y, got "
-                f"{d[field]!r}."
-            )
-
-    # radius must be a positive finite number
-    r = d.get("radius")
-    if not _is_finite_number(r) or r <= 0:
-        raise ValueError(
-            f"Angular dim {where} (id={dim_id!r}) field 'radius' must "
-            f"be a positive number, got {r!r}."
-        )
-
-    # Rays must not be parallel / collinear from the vertex.
-    # Cross product of (p1-vertex) and (p2-vertex). If magnitude is
-    # near zero, the two rays point in the same (or exactly opposite)
-    # direction — no unambiguous arc.
-    v = d["vertex"]
-    p1 = d["p1"]
-    p2 = d["p2"]
-    v1x, v1y = p1["x"] - v["x"], p1["y"] - v["y"]
-    v2x, v2y = p2["x"] - v["x"], p2["y"] - v["y"]
-    len1 = math.hypot(v1x, v1y)
-    len2 = math.hypot(v2x, v2y)
-    if len1 < 1e-9 or len2 < 1e-9:
-        raise ValueError(
-            f"Angular dim {where} (id={dim_id!r}) has a degenerate ray: "
-            f"p1 or p2 coincides with vertex. Each ray must have "
-            f"non-zero length."
-        )
-    cross = v1x * v2y - v1y * v2x
-    # Threshold: cross product / (len1 * len2) is sin(angle between rays).
-    # If |sin(angle)| < 1e-6, rays are parallel or anti-parallel.
-    if abs(cross) / (len1 * len2) < 1e-6:
-        raise ValueError(
-            f"Angular dim {where} (id={dim_id!r}) has parallel or "
-            f"collinear rays (vertex-to-p1 and vertex-to-p2 are along "
-            f"the same line). Arc is undefined."
-        )
-
 
 # =============================================================================
 # v1.1 — GEOMETRY ROTATION
@@ -628,20 +494,10 @@ def _rotate_geometry(data: dict, degrees: int) -> dict:
                     p["x"] = nx
                     p["y"] = ny
         for d in layer.get("dimensions", []) or []:
-            if d.get("type") == "angular":
-                # v1.2 — angular dim has vertex/p1/p2 points. Rotate each
-                # around bbox centroid; radius is rotation-invariant.
-                for field in ("vertex", "p1", "p2"):
-                    if field in d and isinstance(d[field], dict):
-                        nx, ny = rot(d[field].get("x", 0), d[field].get("y", 0))
-                        d[field]["x"] = nx
-                        d[field]["y"] = ny
-            else:
-                # Linear dim (v1.1 contract — unchanged).
-                nx1, ny1 = rot(d.get("x1", 0), d.get("y1", 0))
-                nx2, ny2 = rot(d.get("x2", 0), d.get("y2", 0))
-                d["x1"] = nx1; d["y1"] = ny1
-                d["x2"] = nx2; d["y2"] = ny2
+            nx1, ny1 = rot(d.get("x1", 0), d.get("y1", 0))
+            nx2, ny2 = rot(d.get("x2", 0), d.get("y2", 0))
+            d["x1"] = nx1; d["y1"] = ny1
+            d["x2"] = nx2; d["y2"] = ny2
         for ca in layer.get("callouts", []) or []:
             tipx, tipy = rot(ca.get("tipX", 0), ca.get("tipY", 0))
             tailx, taily = rot(ca.get("tailX", 0), ca.get("tailY", 0))
@@ -769,7 +625,7 @@ def render_shop_drawing(data: dict, out_dir: str | os.PathLike = ".") -> str:
     c.setTitle(f"KCC Shop Drawing {drawing_no} - {part_name}")
     c.setAuthor("Kosarek Construction Company")
     c.setSubject(f"Drawing type: {drawing_type}")
-    c.setCreator("kcc-shop-drawing.py v1.2")
+    c.setCreator("kcc-shop-drawing.py v1.1")
 
     # ---- render in fixed order ---------------------------------------------
     _draw_page_background(c, layout)
@@ -1023,28 +879,8 @@ def _compute_bbox(layers):
                     xs.append(p.get("x", 0))
                     ys.append(p.get("y", 0))
         for d in layer.get("dimensions", []) or []:
-            if d.get("type") == "angular":
-                # v1.2 — bbox spans vertex + p1 + p2 + 4 cardinal radius
-                # points (so the arc itself, which can extend in any
-                # direction from the vertex up to `radius` distance,
-                # never clips the fit area).
-                v = d.get("vertex") or {}
-                p1 = d.get("p1") or {}
-                p2 = d.get("p2") or {}
-                vx = v.get("x", 0)
-                vy = v.get("y", 0)
-                r = d.get("radius", 0) or 0
-                xs.extend([
-                    vx, p1.get("x", 0), p2.get("x", 0),
-                    vx + r, vx - r, vx, vx,
-                ])
-                ys.extend([
-                    vy, p1.get("y", 0), p2.get("y", 0),
-                    vy, vy, vy + r, vy - r,
-                ])
-            else:
-                xs.extend([d.get("x1", 0), d.get("x2", 0)])
-                ys.extend([d.get("y1", 0), d.get("y2", 0)])
+            xs.extend([d.get("x1", 0), d.get("x2", 0)])
+            ys.extend([d.get("y1", 0), d.get("y2", 0)])
         for ca in layer.get("callouts", []) or []:
             xs.extend([ca.get("tipX", 0), ca.get("tailX", 0)])
             ys.extend([ca.get("tipY", 0), ca.get("tailY", 0)])
@@ -1105,213 +941,49 @@ def _render_layer_shapes(c, layer, tx_pt):
 
 
 def _render_layer_dimensions(c, layer, tx_pt):
-    """v1.2 — dispatches per-dim by `type` field. Default is 'linear'
-    (preserves v1.1 contract byte-identical for any input without
-    `type`). Angular dims route to _render_angular_dim."""
     for d in layer.get("dimensions", []) or []:
-        dim_type = d.get("type", "linear")
-        if dim_type == "angular":
-            _render_angular_dim(c, d, tx_pt)
-        else:
-            _render_linear_dim(c, d, tx_pt)
+        x1j, y1j = d.get("x1", 0), d.get("y1", 0)
+        x2j, y2j = d.get("x2", 0), d.get("y2", 0)
+        x1, y1 = tx_pt(x1j, y1j)
+        x2, y2 = tx_pt(x2j, y2j)
 
+        dx, dy = x2 - x1, y2 - y1
+        L = (dx * dx + dy * dy) ** 0.5
+        if L < 1e-6:
+            continue
+        ux, uy = dx / L, dy / L
+        px, py = uy, -ux
+        ox = px * DIM_EXTENSION_OFFSET
+        oy = py * DIM_EXTENSION_OFFSET
 
-def _render_linear_dim(c, d, tx_pt):
-    """Render a single linear (x1/y1/x2/y2) dimension. v1.1 body
-    extracted verbatim — byte-identical output for any v1.1-era input."""
-    x1j, y1j = d.get("x1", 0), d.get("y1", 0)
-    x2j, y2j = d.get("x2", 0), d.get("y2", 0)
-    x1, y1 = tx_pt(x1j, y1j)
-    x2, y2 = tx_pt(x2j, y2j)
+        c.setStrokeColor(DIM_AMBER)
+        c.setLineWidth(DIM_LINE_SW)
+        c.line(x1, y1, x1 + ox, y1 + oy)
+        c.line(x2, y2, x2 + ox, y2 + oy)
 
-    dx, dy = x2 - x1, y2 - y1
-    L = (dx * dx + dy * dy) ** 0.5
-    if L < 1e-6:
-        return
-    ux, uy = dx / L, dy / L
-    px, py = uy, -ux
-    ox = px * DIM_EXTENSION_OFFSET
-    oy = py * DIM_EXTENSION_OFFSET
+        ax1, ay1 = x1 + ox, y1 + oy
+        ax2, ay2 = x2 + ox, y2 + oy
+        c.line(ax1, ay1, ax2, ay2)
 
-    c.setStrokeColor(DIM_AMBER)
-    c.setLineWidth(DIM_LINE_SW)
-    c.line(x1, y1, x1 + ox, y1 + oy)
-    c.line(x2, y2, x2 + ox, y2 + oy)
+        _arrow(c, ax1, ay1, -ux, -uy)
+        _arrow(c, ax2, ay2,  ux,  uy)
 
-    ax1, ay1 = x1 + ox, y1 + oy
-    ax2, ay2 = x2 + ox, y2 + oy
-    c.line(ax1, ay1, ax2, ay2)
-
-    _arrow(c, ax1, ay1, -ux, -uy)
-    _arrow(c, ax2, ay2,  ux,  uy)
-
-    label = str(d.get("value") or "").strip()
-    if label:
-        mx = (ax1 + ax2) / 2
-        my = (ay1 + ay2) / 2
-        lx = mx + px * (DIM_LABEL_PAD + DIM_LABEL_SIZE * 0.55)
-        ly = my + py * (DIM_LABEL_PAD + DIM_LABEL_SIZE * 0.55) - DIM_LABEL_SIZE * 0.35
-        c.setFont(DIM_LABEL_FONT, DIM_LABEL_SIZE)
-        tw = c.stringWidth(label, DIM_LABEL_FONT, DIM_LABEL_SIZE)
-        c.setFillColor(white)
-        c.rect(lx - tw / 2 - DIM_LABEL_BG_PAD,
-               ly - DIM_LABEL_BG_PAD,
-               tw + 2 * DIM_LABEL_BG_PAD,
-               DIM_LABEL_SIZE + 2 * DIM_LABEL_BG_PAD,
-               fill=1, stroke=0)
-        c.setFillColor(DIM_AMBER)
-        c.drawCentredString(lx, ly, label)
-
-
-def _render_angular_dim(c, d, tx_pt):
-    """v1.2 — render a single angular dimension.
-
-    Geometry pipeline (all in PDF pt coordinates after tx_pt):
-      1. Transform vertex, p1, p2 from JSON px → PDF pt.
-      2. Derive radius in PDF pt by transforming a virtual radius
-         reference point at (vertex.x + radius_px, vertex.y) and
-         measuring the resulting Euclidean distance from the
-         transformed vertex. This guarantees radius scales identically
-         to all other geometry, matching whatever scale _compute_fit_scale
-         picked for the page/fit-mode/customScale combination.
-      3. Compute ray angles a1 = atan2(p1-vertex) and a2 = atan2(p2-vertex)
-         in PDF pt space (y-flipped relative to JSON). Pick the smaller
-         sweep (|sweep| <= π).
-      4. Draw arc from a1 to a1+sweep at the computed radius.
-      5. Extension lines from each ray's far point through the vertex
-         to a point just past the arc.
-      6. Tangent arrow tips at the two arc endpoints, pointing along
-         the arc (toward the other endpoint).
-      7. Label at mid-angle on the outside of the arc with a white-bg
-         pad behind the text (matches linear dim label style).
-
-    All strokes are DIM_AMBER. Validation already happened at
-    _validate_angular_dim — by the time this function runs the input
-    is known good (vertex/p1/p2 finite, radius > 0, rays not parallel).
-    """
-    v_json  = d["vertex"]
-    p1_json = d["p1"]
-    p2_json = d["p2"]
-    radius_px = float(d["radius"])
-
-    # Transform anchor points
-    vx, vy = tx_pt(v_json["x"], v_json["y"])
-    p1x, p1y = tx_pt(p1_json["x"], p1_json["y"])
-    p2x, p2y = tx_pt(p2_json["x"], p2_json["y"])
-
-    # Derive radius in PDF pt by transforming vertex + (radius, 0) in
-    # JSON-space and measuring the distance. Picks up whatever scale
-    # _compute_fit_scale applied, so the arc tracks the rest of the
-    # geometry under auto / 1:1 / custom.
-    rx_anchor, ry_anchor = tx_pt(v_json["x"] + radius_px, v_json["y"])
-    radius_pt = math.hypot(rx_anchor - vx, ry_anchor - vy)
-    if radius_pt < 1e-6:
-        # Degenerate (shouldn't happen given validator, but defensive).
-        return
-
-    # Ray directions from vertex toward p1 / p2 (PDF pt space). Note the
-    # y-axis flip: tx_pt maps JSON-y-down → PDF-y-up, so atan2 here
-    # operates on the post-flip vectors directly. That's correct: the
-    # angle we render is the angle the operator sees on the PDF page.
-    a1 = math.atan2(p1y - vy, p1x - vx)
-    a2 = math.atan2(p2y - vy, p2x - vx)
-
-    # Smaller sweep — normalize to (-π, π]. Positive sweep = CCW, which
-    # matches reportlab's c.arc() extent semantics.
-    sweep = a2 - a1
-    while sweep > math.pi:
-        sweep -= 2 * math.pi
-    while sweep < -math.pi:
-        sweep += 2 * math.pi
-
-    # Arc endpoints (where the dim arc meets each ray at radius_pt from vertex).
-    arc_start_x = vx + radius_pt * math.cos(a1)
-    arc_start_y = vy + radius_pt * math.sin(a1)
-    arc_end_x   = vx + radius_pt * math.cos(a1 + sweep)
-    arc_end_y   = vy + radius_pt * math.sin(a1 + sweep)
-
-    c.setStrokeColor(DIM_AMBER)
-    c.setLineWidth(DIM_LINE_SW)
-
-    # ---- Arc -------------------------------------------------------------
-    # reportlab c.arc(x1, y1, x2, y2, startAng, extent) takes the bbox of
-    # the circle and angles in degrees. startAng + extent are measured
-    # CCW from the +x axis, matching atan2 output.
-    bbox_x1 = vx - radius_pt
-    bbox_y1 = vy - radius_pt
-    bbox_x2 = vx + radius_pt
-    bbox_y2 = vy + radius_pt
-    start_deg  = math.degrees(a1)
-    extent_deg = math.degrees(sweep)
-    p = c.beginPath()
-    # Approximate the arc with arcTo by anchoring at arc_start.
-    p.moveTo(arc_start_x, arc_start_y)
-    p.arcTo(bbox_x1, bbox_y1, bbox_x2, bbox_y2, start_deg, extent_deg)
-    c.drawPath(p, fill=0, stroke=1)
-
-    # ---- Extension lines --------------------------------------------------
-    # Per spec D7: extension lines run along each ray from the far end
-    # (p1 / p2 in PDF space) through the vertex, ending at DIM_EXTENSION_OFFSET
-    # pt past the arc endpoint along the same ray direction.
-    # Direction unit vectors (from vertex toward p1 / p2).
-    def _unit(dx, dy):
-        L = math.hypot(dx, dy)
-        return (dx / L, dy / L) if L > 1e-9 else (0.0, 0.0)
-    u1x, u1y = _unit(p1x - vx, p1y - vy)
-    u2x, u2y = _unit(p2x - vx, p2y - vy)
-
-    ext_past = DIM_EXTENSION_OFFSET   # = 14.0 pt, matches linear dim style
-    # Extension line 1: from p1 through vertex to (vertex + (radius + ext_past) * u1).
-    ext1_far_x = vx + (radius_pt + ext_past) * u1x
-    ext1_far_y = vy + (radius_pt + ext_past) * u1y
-    c.line(p1x, p1y, ext1_far_x, ext1_far_y)
-    ext2_far_x = vx + (radius_pt + ext_past) * u2x
-    ext2_far_y = vy + (radius_pt + ext_past) * u2y
-    c.line(p2x, p2y, ext2_far_x, ext2_far_y)
-
-    # ---- Tangent arrow tips ----------------------------------------------
-    # At each arc endpoint, the tangent direction is perpendicular to the
-    # radius vector at that point, oriented along the arc. For a +sweep
-    # (CCW), tangent at arc_start points CCW = (-sin(a1), cos(a1)); at
-    # arc_end (a1 + sweep) it also points CCW. For -sweep (CW), flip sign.
-    # Convention for v1.1's _arrow(c, x, y, ux, uy): (ux, uy) is the
-    # "back-pointing" direction (toward the dim line's interior). For our
-    # arc, we want the arrow to point ALONG the arc back toward the other
-    # endpoint. So at arc_start, the back direction is +tangent (toward
-    # arc_end); at arc_end, the back direction is -tangent (toward arc_start).
-    sweep_sign = 1.0 if sweep >= 0 else -1.0
-    # Tangent at arc_start, oriented toward arc_end:
-    t_start_x = -math.sin(a1) * sweep_sign
-    t_start_y =  math.cos(a1) * sweep_sign
-    # Tangent at arc_end, oriented toward arc_start (negate the toward-end
-    # tangent at that point):
-    a_end = a1 + sweep
-    t_end_x =   math.sin(a_end) * sweep_sign
-    t_end_y =  -math.cos(a_end) * sweep_sign
-    _arrow(c, arc_start_x, arc_start_y, t_start_x, t_start_y)
-    _arrow(c, arc_end_x,   arc_end_y,   t_end_x,   t_end_y)
-
-    # ---- Label -----------------------------------------------------------
-    label = str(d.get("value") or "").strip()
-    if label:
-        # Position at vertex + (radius + DIM_LABEL_PAD + label_pad) * (cos, sin)
-        # of the mid-angle. Mid-angle puts the label on the outside of the
-        # arc bisecting the sweep.
-        mid_angle = a1 + sweep / 2
-        label_radius = radius_pt + DIM_LABEL_PAD + DIM_LABEL_SIZE * 0.55
-        lx = vx + label_radius * math.cos(mid_angle)
-        ly = vy + label_radius * math.sin(mid_angle) - DIM_LABEL_SIZE * 0.35
-
-        c.setFont(DIM_LABEL_FONT, DIM_LABEL_SIZE)
-        tw = c.stringWidth(label, DIM_LABEL_FONT, DIM_LABEL_SIZE)
-        c.setFillColor(white)
-        c.rect(lx - tw / 2 - DIM_LABEL_BG_PAD,
-               ly - DIM_LABEL_BG_PAD,
-               tw + 2 * DIM_LABEL_BG_PAD,
-               DIM_LABEL_SIZE + 2 * DIM_LABEL_BG_PAD,
-               fill=1, stroke=0)
-        c.setFillColor(DIM_AMBER)
-        c.drawCentredString(lx, ly, label)
+        label = str(d.get("value") or "").strip()
+        if label:
+            mx = (ax1 + ax2) / 2
+            my = (ay1 + ay2) / 2
+            lx = mx + px * (DIM_LABEL_PAD + DIM_LABEL_SIZE * 0.55)
+            ly = my + py * (DIM_LABEL_PAD + DIM_LABEL_SIZE * 0.55) - DIM_LABEL_SIZE * 0.35
+            c.setFont(DIM_LABEL_FONT, DIM_LABEL_SIZE)
+            tw = c.stringWidth(label, DIM_LABEL_FONT, DIM_LABEL_SIZE)
+            c.setFillColor(white)
+            c.rect(lx - tw / 2 - DIM_LABEL_BG_PAD,
+                   ly - DIM_LABEL_BG_PAD,
+                   tw + 2 * DIM_LABEL_BG_PAD,
+                   DIM_LABEL_SIZE + 2 * DIM_LABEL_BG_PAD,
+                   fill=1, stroke=0)
+            c.setFillColor(DIM_AMBER)
+            c.drawCentredString(lx, ly, label)
 
 
 def _arrow(c, x, y, ux, uy):
@@ -1464,7 +1136,7 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(
         description="Render a KCC RoofMark shop drawing PDF from a "
-                    "RoofMark Technical Drawing JSON export. (v1.2)"
+                    "RoofMark Technical Drawing JSON export. (v1.1)"
     )
     ap.add_argument("json_path", help="Path to roofmark-technical-*.json")
     ap.add_argument("--out-dir", default=".", help="Output directory")
