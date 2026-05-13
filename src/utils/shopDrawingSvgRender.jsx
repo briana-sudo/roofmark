@@ -325,25 +325,38 @@ function renderDimension(dim, key, txPt) {
   )
 }
 
-/** Render one callout (leader + tip circle + numbered + text box). */
-function renderCallout(ca, key, txPt) {
+/**
+ * Render one callout (v1.3 style — amber dot tip + amber leader +
+ * boxed "#N text" at tail). Mirrors the canvas renderer
+ * renderCalloutCanvas in techCalloutCommit.js; the two paths share
+ * composeCalloutText to guarantee identical text composition.
+ *
+ * @param {Object} ca - callout in v1.1 payload shape (tipX/tipY/
+ *   tailX/tailY/num/textEN/tipStyle).
+ * @param {string|number} key - React key
+ * @param {Function} txPt - world→svg coord transform
+ * @param {number} [textSize=8] - font size from store.calloutTextSize
+ */
+function renderCallout(ca, key, txPt, textSize) {
   if (!ca) return null
   const [tipx, tipy]   = txPt(ca.tipX  || 0, ca.tipY  || 0)
   const [tailx, taily] = txPt(ca.tailX || 0, ca.tailY || 0)
   const num = Number.isFinite(+ca.num) ? +ca.num : 0
-  const text = (typeof ca.textEN === 'string' && ca.textEN.trim()) ? ca.textEN.trim() : ''
-  const TIP_R = 8
-  const TEXT_SIZE = 8
+  // 18l: composition shared with the canvas renderer. Number prefix
+  // sits inside the box; empty composition skips the box.
+  const display = composeCalloutTextSvg(num, ca.textEN)
+  const fontPx = Math.max(6, Math.min(20, Math.round(+textSize || 8)))
+  const TIP_R = 3        // v1.3: small amber dot, no outline ring
   const BOX_PAD_X = 5
   const BOX_PAD_Y = 3
-  const approxTw = text.length * TEXT_SIZE * 0.55
+  const approxTw = display.length * fontPx * 0.55
   const boxW = approxTw + 2 * BOX_PAD_X
-  const boxH = TEXT_SIZE + 2 * BOX_PAD_Y
+  const boxH = fontPx + 2 * BOX_PAD_Y
   return (
     <g key={key}>
       <line x1={tipx} y1={tipy} x2={tailx} y2={taily}
-        stroke={KCC_NAVY} strokeWidth={0.8} />
-      {text && (
+        stroke={DIM_AMBER} strokeWidth={0.8} />
+      {display && (
         <g>
           <rect
             x={tailx - boxW / 2}
@@ -356,32 +369,35 @@ function renderCallout(ca, key, txPt) {
           />
           <text
             x={tailx}
-            y={taily + TEXT_SIZE * 0.32}
+            y={taily + fontPx * 0.32}
             fontFamily="Helvetica, Arial, sans-serif"
-            fontSize={TEXT_SIZE}
+            fontSize={fontPx}
+            fontWeight="bold"
             fill={KCC_NAVY}
             textAnchor="middle"
           >
-            {text}
+            {display}
           </text>
         </g>
       )}
-      <circle cx={tipx} cy={tipy} r={TIP_R}
-        fill={KCC_ORANGE} stroke="white" strokeWidth={1.2} />
-      {num > 0 && (
-        <text
-          x={tipx} y={tipy + 3.2}
-          fontFamily="Helvetica, Arial, sans-serif"
-          fontSize={9}
-          fontWeight="bold"
-          fill="white"
-          textAnchor="middle"
-        >
-          {String(num)}
-        </text>
-      )}
+      {/* Tip dot — small amber circle, fill only, no outline (v1.3 D1). */}
+      <circle cx={tipx} cy={tipy} r={TIP_R} fill={DIM_AMBER} />
     </g>
   )
+}
+
+/**
+ * Local copy of composeCalloutText logic — duplicated here (instead of
+ * importing) so this module can stay test-shim-loadable without
+ * pulling in techCalloutCommit's deps. Keep in sync byte-for-byte
+ * with techCalloutCommit.composeCalloutText.
+ */
+function composeCalloutTextSvg(num, textEN) {
+  const n = Number.isFinite(+num) ? +num : 0
+  const t = (typeof textEN === 'string' ? textEN : '').trim()
+  if (n > 0 && t) return `#${n} ${t}`
+  if (n > 0) return `#${n}`
+  return t
 }
 
 /** Faint blueprint grid + 4 corner crosshairs for the drawing area. */
@@ -425,6 +441,14 @@ export function renderShopDrawingSVG({ data, drawingAreaPx, previewControls }) {
   const fitMode = ['auto', '1:1', 'custom'].includes(controls.fitMode) ? controls.fitMode : 'auto'
   const customScale = typeof controls.customScale === 'number' && controls.customScale > 0
     ? controls.customScale : 1.0
+  // Phase 2 18l (May 12 2026) — calloutTextSize flows from the payload
+  // (set by buildShopDrawingPayload reading store.calloutTextSize).
+  // Clamped to v1.3's valid 6..20 range.
+  const calloutTextSize = (() => {
+    const raw = data && typeof data.calloutTextSize === 'number'
+      ? data.calloutTextSize : 8
+    return Math.max(6, Math.min(20, Math.round(raw) || 8))
+  })()
 
   const rotatedLayers = rotateGeometry(layers, rotation)
   const bbox = computeBbox(rotatedLayers)
@@ -465,7 +489,7 @@ export function renderShopDrawingSVG({ data, drawingAreaPx, previewControls }) {
       ))}
       {sortedLayers.map((layer, li) => (
         <g key={`l-cas-${li}`}>
-          {(layer.callouts || []).map((ca, ci) => renderCallout(ca, `c-${li}-${ci}`, txPt))}
+          {(layer.callouts || []).map((ca, ci) => renderCallout(ca, `c-${li}-${ci}`, txPt, calloutTextSize))}
         </g>
       ))}
     </svg>

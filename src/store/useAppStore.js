@@ -202,6 +202,10 @@ const PERSIST_KEYS = [
   // `techSnapEnabled` is intentionally NOT persisted (session-only,
   // mirrors FM `snapEnabled`).
   'techSnapTypes',
+  // Phase 2 18l (May 12 2026) — global callout text size (6..20,
+  // default 8). Operator-set via SpecTablePanel control; persists
+  // across reload so the operator's chosen size sticks per-project.
+  'calloutTextSize',
 ]
 // Phase 2 18b (May 10 2026) — Field Markup `mode` slice valid values.
 // Pre-18b the set also included 'TECHNICAL', a stale token left over from
@@ -519,6 +523,16 @@ const initialState = {
   // hydrateSpecTableDefaults after this point to populate `date` +
   // `drawnBy` from today() + localStorage.
   specTable: normalizeSpecTable(hydrated?.specTable),
+  // Phase 2 18l (May 12 2026) — global callout text size. Pre-18l
+  // saved projects don't have this field; default to 8 (v1.3 default).
+  // Clamp to [6, 20] defensively in case a hand-edited JSON is loaded
+  // with an out-of-range value (matches setCalloutTextSize's clamping).
+  calloutTextSize: (() => {
+    const raw = hydrated && typeof hydrated.calloutTextSize === 'number'
+      ? hydrated.calloutTextSize : 8
+    const n = Math.round(raw)
+    return Number.isFinite(n) ? Math.max(6, Math.min(20, n)) : 8
+  })(),
 
   // ---- UI / app ----
   // `mode` and `activeLayerId` are persisted (Step 10 partial-completion fix)
@@ -667,6 +681,12 @@ const initialState = {
   //   techCalloutDraft.tip    — { x, y } | null
   //   techCalloutDraft.tail   — { x, y } | null
   techCalloutDraft: null,
+  // Phase 2 18l (May 12 2026) — global callout text size. Drives the
+  // box font for every callout in the project (canvas + preview + PDF).
+  // v1.3 Python's calloutTextSize field; valid range [6, 20], default 8.
+  // Persisted via PERSIST_KEYS so the operator's choice survives reload.
+  // Pre-18l projects loaded without this field default to 8.
+  calloutTextSize: 8,
   // Phase 2 18k — Shared inline text editor state. Mounted by App.jsx
   // when kind !== null. Drives:
   //   kind === 'callout'     — text entry for a new callout (targetId
@@ -2147,6 +2167,16 @@ export const useAppStore = create((set, get) => {
     // Phase 2 18k (May 12 2026) — angular dim + callout draft setters.
     setTechDimAngularDraft: (draft) => set({ techDimAngularDraft: draft }),
     setTechCalloutDraft: (draft) => set({ techCalloutDraft: draft }),
+
+    // Phase 2 18l (May 12 2026) — global callout text size setter.
+    // Clamps to [6, 20] per v1.3 Python validation; non-numeric input
+    // (NaN, empty string) falls back to the existing value to avoid
+    // accidental reset while typing. Used by the SpecTablePanel input.
+    setCalloutTextSize: (size) => set((s) => {
+      const parsed = parseInt(size, 10)
+      if (!Number.isFinite(parsed)) return {}
+      return { calloutTextSize: Math.max(6, Math.min(20, parsed)) }
+    }),
 
     // Phase 2 18k — Inline text editor open/close/commit. Mounted at
     // App.jsx; one editor at a time (single-slot model). Opening with

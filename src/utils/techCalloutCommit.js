@@ -135,11 +135,37 @@ export function cancelCalloutDraft(actions) {
 }
 
 /**
- * Phase 2 18k bug-fix (May 12 2026) — Canvas 2D render for a callout
- * shape. Mirrors shopDrawingSvgRender.renderCallout's structure:
- *   - leader line from tip to tail (navy)
- *   - text box at tail (white fill + orange border, navy text)
- *   - orange tip circle (with white number when tipStyle === 'numbered')
+ * Phase 2 18l (May 12 2026) — compose the display text for a callout's
+ * text box. Format mirrors v1.3 Python _render_layer_callouts (D2):
+ *
+ *   num > 0 && textEN     → "#{num} {textEN}"
+ *   num > 0 && !textEN    → "#{num}"
+ *   else                  → textEN (may be empty — caller skips box)
+ *
+ * Pure — no DOM, no store. Shared by canvas + SVG renderers so the
+ * two paths can never drift apart on text composition.
+ *
+ * @param {number | null | undefined} num
+ * @param {string | null | undefined} textEN
+ * @returns {string}
+ */
+export function composeCalloutText(num, textEN) {
+  const n = Number.isFinite(+num) ? +num : 0
+  const t = (typeof textEN === 'string' ? textEN : '').trim()
+  if (n > 0 && t) return `#${n} ${t}`
+  if (n > 0) return `#${n}`
+  return t
+}
+
+/**
+ * Phase 2 18l (May 12 2026) — Canvas 2D render for a callout shape.
+ * v1.3 visual style — matches v1.3 Python _render_layer_callouts:
+ *   - Leader line: amber DIM_AMBER (#B8860B), width matches dim
+ *     line styling.
+ *   - Tip: small amber filled dot (3px world-radius, no outline).
+ *   - Text box: white fill + orange border + navy text. Contents
+ *     composed via composeCalloutText (number prefix in front of
+ *     textEN). Empty composed display skips the box entirely.
  *
  * Caller (CanvasStage.drawStatic) is expected to have applied the
  * TECHNICAL viewport transform (translate + scale) BEFORE calling, so
@@ -148,33 +174,39 @@ export function cancelCalloutDraft(actions) {
  * @param {CanvasRenderingContext2D} ctx
  * @param {Object} ca - callout shape
  *   { id, type: 'callout',
- *     tip: { mode, x, y },  // 'free' resolved coords used directly
- *     tail: { x, y },
- *     num: int | null,
- *     textEN: string,
- *     tipStyle: 'numbered' | 'dot' | 'none' }
- * @param {Array} [technicalLayers] - reserved for future attached-tip
- *   lookup; unused in 18k initial.
- * @param {boolean} [isSelected=false]
+ *     tip: { mode, x, y },  tail: { x, y },
+ *     num: int | null, textEN: string,
+ *     tipStyle: 'numbered' | 'dot' | 'none' }    // 18l: ignored;
+ *                                                  always dot style
+ * @param {Array} [technicalLayers] - reserved for attached-tip
+ *   lookup; unused in 18l.
+ * @param {boolean} [isSelected=false] - render in selection orange.
+ * @param {number} [textSize=8] - global font size for the box text,
+ *   driven by store.calloutTextSize (operator control in SpecTable).
  */
-export function renderCalloutCanvas(ctx, ca, technicalLayers, isSelected) {
+export function renderCalloutCanvas(ctx, ca, technicalLayers, isSelected, textSize) {
   if (!ca || ca.type !== 'callout') return
   const tip = ca.tip || {}
   const tail = ca.tail || {}
   if (typeof tip.x !== 'number' || typeof tip.y !== 'number') return
   if (typeof tail.x !== 'number' || typeof tail.y !== 'number') return
 
+  // v1.3 palette — must match the locked Python constants 1:1.
+  const DIM_AMBER = '#B8860B'
   const KCC_NAVY = '#1A2F4A'
   const KCC_ORANGE = '#e8531a'
   const SELECT_ORANGE = '#ff7a3a'
+
   const num = Number.isFinite(+ca.num) ? +ca.num : 0
-  const text = (typeof ca.textEN === 'string' && ca.textEN.trim()) ? ca.textEN.trim() : ''
-  const tipStyle = ca.tipStyle || 'numbered'
+  const display = composeCalloutText(num, ca.textEN)
+  // 18l D4 — clamp text size to v1.3's valid range [6, 20].
+  const fontPx = Math.max(6, Math.min(20, Math.round(+textSize || 8)))
 
   ctx.save()
 
-  // Leader line — navy stroke (or selection orange when selected).
-  const leaderColor = isSelected ? SELECT_ORANGE : KCC_NAVY
+  // Leader line — amber (selection orange when selected) at dim-line
+  // width 0.8. Matches v1.3 Python CALLOUT_LEADER_COLOR + CALLOUT_LEADER_SW.
+  const leaderColor = isSelected ? SELECT_ORANGE : DIM_AMBER
   ctx.strokeStyle = leaderColor
   ctx.lineWidth = 0.8
   ctx.beginPath()
@@ -182,15 +214,16 @@ export function renderCalloutCanvas(ctx, ca, technicalLayers, isSelected) {
   ctx.lineTo(tail.x, tail.y)
   ctx.stroke()
 
-  // Text box at tail (only when textEN is non-empty).
-  if (text) {
-    ctx.font = '8px Helvetica, Arial, sans-serif'
+  // Text box at tail — only when composed display string is non-empty.
+  // Skips the box entirely when num=0 AND textEN is blank (D5).
+  if (display) {
+    ctx.font = `bold ${fontPx}px Helvetica, Arial, sans-serif`
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    const tw = ctx.measureText(text).width
+    const tw = ctx.measureText(display).width
     const padX = 5, padY = 3
     const boxW = tw + 2 * padX
-    const boxH = 8 + 2 * padY
+    const boxH = fontPx + 2 * padY
     const bx = tail.x - boxW / 2
     const by = tail.y - boxH / 2
     ctx.fillStyle = '#ffffff'
@@ -201,30 +234,15 @@ export function renderCalloutCanvas(ctx, ca, technicalLayers, isSelected) {
     ctx.fill()
     ctx.stroke()
     ctx.fillStyle = KCC_NAVY
-    ctx.fillText(text, tail.x, tail.y)
+    ctx.fillText(display, tail.x, tail.y)
   }
 
-  // Tip dot — orange filled circle, white stroke.
-  if (tipStyle !== 'none') {
-    const TIP_R = 8
-    ctx.beginPath()
-    ctx.arc(tip.x, tip.y, TIP_R, 0, Math.PI * 2)
-    ctx.fillStyle = KCC_ORANGE
-    ctx.fill()
-    ctx.strokeStyle = '#ffffff'
-    ctx.lineWidth = 1.2
-    ctx.stroke()
-    // White number inside the tip (only when tipStyle === 'numbered'
-    // AND num > 0). Operators expect to see #1, #2, etc. printed on the
-    // orange dot.
-    if (tipStyle === 'numbered' && num > 0) {
-      ctx.font = 'bold 9px Helvetica, Arial, sans-serif'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.fillStyle = '#ffffff'
-      ctx.fillText(String(num), tip.x, tip.y)
-    }
-  }
+  // Tip dot — small amber filled circle, no outline (v1.3 D1).
+  // CALLOUT_TIP_DOT_R = 3.0 in the Python; matching here.
+  ctx.beginPath()
+  ctx.arc(tip.x, tip.y, 3, 0, Math.PI * 2)
+  ctx.fillStyle = leaderColor
+  ctx.fill()
 
   ctx.restore()
 }

@@ -2784,3 +2784,40 @@ body {
   color: #b91c1c;
   border-color: #fca5a5;
 }
+
+/* ===== Phase 2 18l (May 12 2026) — Callout text size control ============ */
+.callout-text-size {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--rm-border, #e5e7eb);
+  font-size: 11px;
+}
+
+.callout-text-size-label {
+  color: var(--rm-navy, #1A2F4A);
+  font-weight: 500;
+}
+
+.callout-text-size-input {
+  width: 56px;
+  padding: 3px 6px;
+  border: 1px solid var(--rm-border, #d1d5db);
+  border-radius: 3px;
+  background: #fff;
+  color: var(--rm-navy, #1A2F4A);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.callout-text-size-input:focus {
+  outline: 0;
+  border-color: var(--rm-orange, #E8630A);
+}
+
+.callout-text-size-unit {
+  color: #6b7280;
+  font-size: 10px;
+}

@@ -251,6 +251,14 @@ export function buildShopDrawingPayload(storeState, previewControls) {
     && previewControls.customScale > 0
     ? previewControls.customScale : 1.0
 
+  // Phase 2 18l (May 12 2026) — global callout text size flows through
+  // to v1.3 Python's calloutTextSize field. Read from store with the
+  // v1.3 default (8) when absent. Clamp to v1.3's [6, 20] range so an
+  // unsanitized store value can't trip v1.3's validator.
+  const rawCalloutTextSize = (storeState && typeof storeState.calloutTextSize === 'number'
+    ? storeState.calloutTextSize : 8)
+  const calloutTextSize = Math.max(6, Math.min(20, Math.round(rawCalloutTextSize) || 8))
+
   return {
     specTable,
     drawingType: 'profile',
@@ -260,6 +268,7 @@ export function buildShopDrawingPayload(storeState, previewControls) {
     geometryRotation,
     fitMode,
     customScale,
+    calloutTextSize,
   }
 }
 

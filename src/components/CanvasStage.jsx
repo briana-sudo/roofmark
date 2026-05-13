@@ -849,10 +849,16 @@ export default function CanvasStage() {
               // Canvas operates in world coords. Pre-fix: drawStatic
               // had no callout branch at all, so committed callouts
               // shipped to the store invisible on the canvas.
+              //
+              // Phase 2 18l (May 12 2026) — pass calloutTextSize from
+              // store so canvas + preview + PDF all read the same size.
               ctxStatic.save()
               ctxStatic.translate(techV.panX, techV.panY)
               ctxStatic.scale(techZoom, techZoom)
-              renderCalloutCanvas(ctxStatic, sh, storeState.technicalLayers, isSelected)
+              renderCalloutCanvas(
+                ctxStatic, sh, storeState.technicalLayers, isSelected,
+                storeState.calloutTextSize,
+              )
               ctxStatic.restore()
             }
           }
@@ -2288,6 +2294,73 @@ export default function CanvasStage() {
       // 1/2/3 chain (grip edit / command-with-basePoint / etc.) doesn't
       // also fire — dim command has its own state shape and shouldn't
       // be handled by the generic command branches below.
+      // Phase 2 18l (May 12 2026) — Angular dim snap scan. Mirrors the
+      // dim-aligned/dim-linear awaitPointA/B snap pattern: scan
+      // endpoints + midpoints, write techCommandHover so the existing
+      // diamond render in drawDynamic fires (Rule 29: snap visual
+      // feedback for every stage that snaps). awaitRadius is a grid-
+      // only stage per spec D2 — no snap-scan there.
+      if (
+        store.appMode === 'TECHNICAL'
+        && store.tool === 'tech-dim-angular'
+        && store.techDimAngularDraft
+        && store.techDimAngularDraft.stage
+        && store.techDimAngularDraft.stage !== 'awaitRadius'
+      ) {
+        const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+        const techZoom = techV.zoom || 1
+        const cursorWorld = { x: (x - techV.panX) / techZoom, y: (y - techV.panY) / techZoom }
+        if (store.techSnapEnabled) {
+          const target = findTechSnapTarget(
+            cursorWorld,
+            [],
+            store.technicalLayers,
+            techV,
+            7,
+            null,
+            store.techSnapTypes,
+          )
+          const cur = store.techCommandHover
+          const hoverChanged = (
+            (target && (!cur || cur.x !== target.x || cur.y !== target.y || cur.type !== target.type))
+            || (!target && cur)
+          )
+          if (hoverChanged) store.setTechCommandHover(target)
+        } else if (store.techCommandHover !== null) {
+          store.setTechCommandHover(null)
+        }
+        dynamicDirty = true
+        return
+      }
+
+      // Phase 2 18l — Angular dim awaitVertex (draft not started).
+      // Snap-scan even before the first click so the operator sees
+      // a snap diamond hovering over endpoints they're about to click.
+      if (
+        store.appMode === 'TECHNICAL'
+        && store.tool === 'tech-dim-angular'
+        && !store.techDimAngularDraft
+      ) {
+        const techV = store.viewports?.TECHNICAL || { panX: 0, panY: 0, zoom: 1 }
+        const techZoom = techV.zoom || 1
+        const cursorWorld = { x: (x - techV.panX) / techZoom, y: (y - techV.panY) / techZoom }
+        if (store.techSnapEnabled) {
+          const target = findTechSnapTarget(
+            cursorWorld, [], store.technicalLayers, techV, 7, null, store.techSnapTypes,
+          )
+          const cur = store.techCommandHover
+          const hoverChanged = (
+            (target && (!cur || cur.x !== target.x || cur.y !== target.y || cur.type !== target.type))
+            || (!target && cur)
+          )
+          if (hoverChanged) store.setTechCommandHover(target)
+        } else if (store.techCommandHover !== null) {
+          store.setTechCommandHover(null)
+        }
+        dynamicDirty = true
+        return
+      }
+
       if (
         store.appMode === 'TECHNICAL'
         && isDimensionCommand(store.techActiveCommand)
@@ -3002,37 +3075,53 @@ export default function CanvasStage() {
           const techZoom = techV.zoom || 1
           const worldX = (raw.x - techV.panX) / techZoom
           const worldY = (raw.y - techV.panY) / techZoom
+          // Phase 2 18l (May 12 2026) — snap consumption. The mousemove
+          // snap-scan above wrote techCommandHover when the cursor was
+          // over an endpoint or midpoint; click consumes the hover and
+          // commits to the snap-exact coords instead of the cursor pixel.
+          // awaitRadius stage doesn't snap to geometry (spec D2 — radius
+          // is grid-only / free), so it falls through to cursor coords.
           const draft = store.techDimAngularDraft
+          const stage = draft?.stage || 'awaitVertex'
+          const snapHover = store.techCommandHover
+          const useSnap = !!snapHover
+            && store.techSnapEnabled
+            && stage !== 'awaitRadius'
+          const clickX = useSnap ? snapHover.x : worldX
+          const clickY = useSnap ? snapHover.y : worldY
+
           if (!draft || !draft.stage || draft.stage === 'awaitVertex') {
             store.setTechDimAngularDraft({
               stage: 'awaitRay1',
-              vertex: { x: worldX, y: worldY },
+              vertex: { x: clickX, y: clickY },
               p1: null, p2: null,
             })
+            if (useSnap) store.setTechCommandHover(null)
             dynamicDirty = true
             return
           }
           if (draft.stage === 'awaitRay1' && draft.vertex) {
             // Reject vertex == ray1
-            const dx = worldX - draft.vertex.x
-            const dy = worldY - draft.vertex.y
+            const dx = clickX - draft.vertex.x
+            const dy = clickY - draft.vertex.y
             if (Math.hypot(dx, dy) < 0.5) return
             store.setTechDimAngularDraft({
               stage: 'awaitRay2',
               vertex: draft.vertex,
-              p1: { x: worldX, y: worldY },
+              p1: { x: clickX, y: clickY },
               p2: null,
             })
+            if (useSnap) store.setTechCommandHover(null)
             dynamicDirty = true
             return
           }
           if (draft.stage === 'awaitRay2' && draft.vertex && draft.p1) {
-            const dx = worldX - draft.vertex.x
-            const dy = worldY - draft.vertex.y
+            const dx = clickX - draft.vertex.x
+            const dy = clickY - draft.vertex.y
             if (Math.hypot(dx, dy) < 0.5) return
             // Reject parallel rays.
             const v1x = draft.p1.x - draft.vertex.x, v1y = draft.p1.y - draft.vertex.y
-            const v2x = worldX - draft.vertex.x, v2y = worldY - draft.vertex.y
+            const v2x = clickX - draft.vertex.x, v2y = clickY - draft.vertex.y
             const cross = v1x * v2y - v1y * v2x
             const len1 = Math.hypot(v1x, v1y), len2 = Math.hypot(v2x, v2y)
             if (len1 < 1e-9 || len2 < 1e-9
@@ -3041,13 +3130,16 @@ export default function CanvasStage() {
               stage: 'awaitRadius',
               vertex: draft.vertex,
               p1: draft.p1,
-              p2: { x: worldX, y: worldY },
+              p2: { x: clickX, y: clickY },
             })
+            if (useSnap) store.setTechCommandHover(null)
             dynamicDirty = true
             return
           }
           if (draft.stage === 'awaitRadius' && draft.vertex && draft.p1 && draft.p2) {
             const preSnap = useAppStore.getState().captureUndoSnapshot()
+            // Radius stage uses cursor coords (no snap-to-geometry per
+            // spec D2). worldX/Y stand in for clickX/Y here.
             store.commitWorkflow2AngularDimension({
               vertex: draft.vertex,
               p1: draft.p1,

@@ -46,6 +46,13 @@ export default function SpecTablePanel() {
   const technicalLayers = useAppStore((s) => s.technicalLayers)
   const updateCalloutText = useAppStore((s) => s.updateCalloutText)
   const deleteCallout = useAppStore((s) => s.deleteCallout)
+  // Phase 2 18l (May 12 2026) — global callout text size control.
+  // Drives every callout's box font (canvas + preview + PDF). Range
+  // 6..20 per v1.3 Python validation; clamping happens in
+  // setCalloutTextSize so even hand-typed out-of-range values fall
+  // back gracefully.
+  const calloutTextSize = useAppStore((s) => s.calloutTextSize)
+  const setCalloutTextSize = useAppStore((s) => s.setCalloutTextSize)
   const callouts = useMemo(() => {
     const acc = []
     for (const layer of technicalLayers || []) {
@@ -176,6 +183,26 @@ export default function SpecTablePanel() {
               ))}
             </div>
           )}
+          {/* Phase 2 18l (May 12 2026) — global callout text size.
+              Drives every callout box's font on canvas + preview + PDF.
+              Operator-facing range matches v1.3 Python validation. */}
+          <div className="callout-text-size" data-testid="callout-text-size">
+            <label htmlFor="callout-text-size-input" className="callout-text-size-label">
+              Callout text size:
+            </label>
+            <input
+              id="callout-text-size-input"
+              type="number"
+              min={6}
+              max={20}
+              step={1}
+              value={calloutTextSize}
+              onChange={(e) => setCalloutTextSize(e.target.value)}
+              className="callout-text-size-input"
+              data-testid="callout-text-size-input"
+            />
+            <span className="callout-text-size-unit">pt</span>
+          </div>
         </section>
       </div>
     </div>
